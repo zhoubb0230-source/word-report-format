@@ -40,6 +40,7 @@ from docxcommon import (
 )
 from headings import (
     RE_CAPTION, RE_TOCTITLE, infer_heading_level, parse_leading_label,
+    looks_like_caption_style,
 )
 
 
@@ -145,19 +146,34 @@ def main():
 
         outline = ppr.get("outline")
         level = None
+        level_source = None
         if not is_blank and not is_toc and not is_toctitle:
-            level = infer_heading_level(sid, outline, text, resolver)
+            level, level_source = infer_heading_level(sid, outline, text, resolver)
         num_raw = parse_leading_label(text) if level else None
 
         caption = None
         if not is_blank and not is_toc and not is_toctitle and level is None:
             mc = RE_CAPTION.match(text)
+            style_says_caption = looks_like_caption_style(sid, resolver)
             if mc:
                 rest = mc.group(3).strip()
                 caption = {
                     "kind": "figure" if mc.group(1) == "图" else "table",
                     "num_raw": mc.group(2),
                     "has_content": bool(rest),
+                    "source": "style" if style_says_caption else "pattern",
+                }
+            elif style_says_caption and text[:1] in ("图", "表"):
+                # Caption style confirmed, but no digit found at all -- the
+                # paragraph's own number is missing, not just unrecognized.
+                # Kept as a caption record (num_raw=None) rather than
+                # dropped, so continuity() can surface a "missing number"
+                # hint instead of this being invisible.
+                caption = {
+                    "kind": "figure" if text[:1] == "图" else "table",
+                    "num_raw": None,
+                    "has_content": bool(text[1:].strip()),
+                    "source": "style",
                 }
 
         rec = {
@@ -169,6 +185,7 @@ def main():
             "is_toc": is_toc or is_toctitle,
             "is_heading": level is not None,
             "level": level,
+            "level_source": level_source,
             "num_raw": num_raw,
             "caption": caption,
             "in_table": in_table(p),
@@ -179,6 +196,8 @@ def main():
                 "first_line": ppr.get("first_line"),
                 "left_chars": ppr.get("left_chars"), "left": ppr.get("left"),
                 "start_chars": ppr.get("start_chars"), "start": ppr.get("start"),
+                "right_chars": ppr.get("right_chars"), "right": ppr.get("right"),
+                "end_chars": ppr.get("end_chars"), "end": ppr.get("end"),
                 "hanging_chars": ppr.get("hanging_chars"), "hanging": ppr.get("hanging"),
                 "jc": ppr.get("jc"), "outline": outline,
             },
@@ -234,7 +253,9 @@ def main():
         },
         "blank": sum(1 for r in records if r["is_blank"]),
         "headings": sum(1 for r in records if r["is_heading"]),
+        "headings_unconfirmed": sum(1 for r in records if r["is_heading"] and r["level_source"] == "pattern"),
         "captions": sum(1 for r in records if r["caption"]),
+        "captions_unconfirmed": sum(1 for r in records if r["caption"] and r["caption"].get("source") == "pattern"),
         "n_shards": len(shard_files),
         "shard_dir": os.path.abspath(shard_dir),
         "shard_files": shard_files,

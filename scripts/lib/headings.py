@@ -6,17 +6,29 @@ Used by extraction (20_extract_structure.py), the model-review-apply stage
 (27_apply_review.py), and the text-rewrite stage (40_apply_fixes.py) so the
 three never drift out of sync with each other.
 
-Two different jobs are kept deliberately separate here:
+Three different jobs are kept deliberately separate here:
 
   * infer_heading_level() — a best-effort SHAPE/STYLE guess at a paragraph's
-    heading level, used only as the PRE-REVIEW default. It cannot always be
-    right: a document may use bare "1." for its actual level-1 sections,
-    which mechanically looks like the level-3 shape ("1." + digit). That is
-    exactly why the skill also does a full-document model review pass (see
-    26_export_review.py / 27_apply_review.py) — the model looks at all
-    candidates together and can correct a level this shape-only guess gets
-    wrong. Deterministic code alone can't reliably cover every document's
-    ground truth here.
+    heading level AND how confident that guess is (see "source" below). It
+    cannot always be right: a document may use bare "1." for its actual
+    level-1 sections, which mechanically looks like the level-3 shape ("1."
+    + digit). That is exactly why the skill also does a full-document model
+    review pass (see 26_export_review.py / 27_apply_review.py) — the model
+    looks at all candidates together and can correct a level this shape-only
+    guess gets wrong. Deterministic code alone can't reliably cover every
+    document's ground truth here.
+
+  * detection SOURCE ("outline" / "style" / "pattern") — a heading detected
+    via a real w:outlineLvl or a heading-ish paragraph style is a much more
+    reliable signal than one guessed purely from a short line matching a
+    numbering shape (a "pattern" match — plenty of non-heading short lines
+    can accidentally look like "3." or "（一）"). Downstream, only
+    outline/style-confirmed headings (or ones the model has explicitly
+    confirmed via 27_apply_review.py, which upgrades them to
+    "model_confirmed") get auto-renumbered; "pattern"-only ones only ever
+    get a review hint — never a silent text edit — until a human-equivalent
+    (the model, reading full-document context) explicitly confirms them.
+    Captions get the same treatment via CAPTION_STYLE_HINTS / caption_source.
 
   * ANY_LABEL_RE / parse_leading_label() — a LEVEL-INDEPENDENT match for
     "does this paragraph have *some* leading enumeration label, and what is
@@ -42,6 +54,14 @@ RE_L4 = re.compile(r"^[（(]\s*(\d{1,2})\s*[）)]")        # （4）
 RE_CAPTION = re.compile(r"^\s*(图|表)\s*([0-9]+(?:[-\.–][0-9]+)?)(.*)$")
 RE_TOCTITLE = re.compile(r"^\s*目\s*录\s*$")            # 目录 / 目 录
 
+# Paragraph style name/id substrings that specifically mean "this is a
+# figure/table caption", as distinct from the generic "heading" hint below.
+# Deliberately checked BEFORE outline/heading-style so a caption paragraph
+# that happens to inherit an outlineLvl (template quirk) or whose style name
+# also contains "标题" (e.g. a custom "图表标题" caption style — "标题" is a
+# substring of that) is never misclassified as a heading.
+CAPTION_STYLE_HINTS = ("题注", "caption", "图表标题", "表格标题", "图题", "表题")
+
 # --- level-independent leading-label matcher --------------------------------
 # Any of the four canonical shapes, in either numeral system, so a mismatch
 # between the ORIGINAL punctuation/numeral system and what the (possibly
@@ -60,13 +80,7 @@ def parse_leading_label(text):
     return m.group(0) if m else None
 
 
-def infer_heading_level(style_id, outline, text, resolver):
-    """Return a best-effort heading level 1..4 (or None). See module docstring:
-    this is the PRE-REVIEW default, not a final answer."""
-    # 1) resolved outline level wins
-    if outline is not None:
-        return min(outline + 1, 4)
-    # 2) style whose name/id looks like a heading
+def _style_name(style_id, resolver):
     from docxcommon import qn  # local import: avoid a hard dependency for
                                 # any caller that only wants the regexes.
     sid = (style_id or "")
@@ -75,24 +89,44 @@ def infer_heading_level(style_id, outline, text, resolver):
         nm = resolver.styles[sid].find(qn("w:name"))
         if nm is not None:
             name = nm.get(qn("w:val")) or ""
+    return sid, name
+
+
+def looks_like_caption_style(style_id, resolver):
+    """True if the paragraph style name/id specifically suggests a
+    figure/table caption (题注/Caption/图表标题/...), as opposed to a generic
+    heading style."""
+    sid, name = _style_name(style_id, resolver)
+    hint = (sid + " " + name).lower()
+    return any(h.lower() in hint for h in CAPTION_STYLE_HINTS)
+
+
+def infer_heading_level(style_id, outline, text, resolver):
+    """Return (level, source). level is 1..4 or None; source is
+    "outline"/"style"/"pattern" when level is not None, else None. See
+    module docstring: this is the PRE-REVIEW default, not a final answer."""
+    # 0) a caption-shaped or caption-styled paragraph is NEVER a heading —
+    # checked FIRST, before outline/style, because either an inherited
+    # outlineLvl or a "标题"-containing caption style name would otherwise
+    # override this unambiguous signal (see CAPTION_STYLE_HINTS docstring).
+    if RE_CAPTION.match(text) or looks_like_caption_style(style_id, resolver):
+        return None, None
+    # 1) resolved outline level wins
+    if outline is not None:
+        return min(outline + 1, 4), "outline"
+    # 2) style whose name/id looks like a heading
+    sid, name = _style_name(style_id, resolver)
     hint = (sid + " " + name).lower()
     is_hstyle = ("heading" in hint) or ("标题" in (sid + name))
+    # 3) numbering pattern (only trust for short lines when no style backs it)
     short = len(text.strip()) <= 40
-    if RE_L1.match(text):
-        return 1 if (is_hstyle or short) else None
-    if RE_L2.match(text):
-        return 2 if (is_hstyle or short) else None
-    if RE_L4.match(text):
-        return 4 if (is_hstyle or short) else None
-    if RE_L3.match(text):
-        return 3 if (is_hstyle or short) else None
-    # A "图1.../表1..." caption is NEVER a heading, even when its paragraph
-    # style name happens to contain "标题" (e.g. a custom "图表标题" caption
-    # style) — without this guard the generic is_hstyle fallback below claims
-    # it as a level-1 heading, which also hides it from caption continuity
-    # checking (that only runs when level is None).
-    if RE_CAPTION.match(text):
-        return None
+    for rx, lvl in ((RE_L1, 1), (RE_L2, 2), (RE_L4, 4), (RE_L3, 3)):
+        if rx.match(text):
+            if is_hstyle:
+                return lvl, "style"
+            if short:
+                return lvl, "pattern"
+            return None, None
     if is_hstyle:
-        return 1
-    return None
+        return 1, "style"
+    return None, None

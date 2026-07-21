@@ -142,7 +142,7 @@ def _set_line_exact(pPr, line_twips):
             del sp.attrib[qn(a)]
 
 
-def _set_first_line_and_clear_left(pPr, first_line_chars, clear_left):
+def _set_first_line_and_clear_left(pPr, first_line_chars, clear_left, clear_right=False):
     ind = _get_or_make(pPr, "w:ind")
     if first_line_chars is not None:
         ind.set(qn("w:firstLineChars"), str(first_line_chars))
@@ -152,6 +152,14 @@ def _set_first_line_and_clear_left(pPr, first_line_chars, clear_left):
                 del ind.attrib[qn(a)]
     if clear_left:
         for a in ("w:leftChars", "w:left", "w:startChars", "w:start"):
+            if ind.get(qn(a)) is not None:
+                del ind.attrib[qn(a)]
+    if clear_right:
+        # w:right/w:rightChars and their w:end/w:endChars synonyms. Clearing
+        # this (title/TOC only) is what makes jc=center actually center on
+        # the page width instead of the width left after an un-cleared
+        # right indent narrows it asymmetrically.
+        for a in ("w:rightChars", "w:right", "w:endChars", "w:end"):
             if ind.get(qn(a)) is not None:
                 del ind.attrib[qn(a)]
 
@@ -269,10 +277,12 @@ def main():
             pPr = get_pPr(p)
             if fix.get("set_line_exact") is not None:
                 _set_line_exact(pPr, fix["set_line_exact"])
-            if fix.get("set_first_line_chars") is not None or fix.get("clear_left_indent"):
+            if (fix.get("set_first_line_chars") is not None
+                    or fix.get("clear_left_indent") or fix.get("clear_right_indent")):
                 _set_first_line_and_clear_left(
                     pPr, fix.get("set_first_line_chars"),
-                    bool(fix.get("clear_left_indent")))
+                    bool(fix.get("clear_left_indent")),
+                    bool(fix.get("clear_right_indent")))
             if fix.get("set_jc") is not None:
                 _set_jc(pPr, fix["set_jc"])
             applied["format"] += 1

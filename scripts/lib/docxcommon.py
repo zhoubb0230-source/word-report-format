@@ -283,6 +283,8 @@ def read_ppr(ppr):
          "first_line_chars": None, "first_line": None,
          "left_chars": None, "left": None,
          "start_chars": None, "start": None,
+         "right_chars": None, "right": None,
+         "end_chars": None, "end": None,
          "hanging_chars": None, "hanging": None,
          "style_id": None}
     if ppr is None:
@@ -315,6 +317,10 @@ def read_ppr(ppr):
                           ("left", "left"),
                           ("startChars", "start_chars"),
                           ("start", "start"),
+                          ("rightChars", "right_chars"),
+                          ("right", "right"),
+                          ("endChars", "end_chars"),
+                          ("end", "end"),
                           ("hangingChars", "hanging_chars"),
                           ("hanging", "hanging")):
             v = ind.get(qn("w:" + attr))

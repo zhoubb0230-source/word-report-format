@@ -238,7 +238,20 @@ def continuity(records, spec):
         expected_token = _heading_token(lvl, expected)
         raw = r.get("num_raw")
         if raw is None:
-            continue  # no recognizable leading number at all; nothing safe to replace
+            # Recognized as a heading (outline/style/model-confirmed) but no
+            # leading number could be found at all -- nothing safe to insert
+            # automatically (unlike a wrong-but-present label, there is no
+            # text to replace, and some headings are intentionally unnumbered
+            # e.g. "摘要"/"结论"), so this stays a HINT rather than a silent
+            # skip: the user needs to know a numbered slot in the sequence
+            # went missing, not have it disappear without a trace.
+            fixes.append({
+                "para_index": r["i"], "op": "hint",
+                "rule_id": "heading.missing_number",
+                "rule_text": "%d级标题未识别到序号（按位置应为“%s”），请确认是否漏编号" % (lvl, expected_token),
+                "comment": True,
+            })
+            continue
         if raw != expected_token:
             # Covers BOTH kinds of violation with one comparison: sequence gaps
             # (e.g. "\u4e00\u3001" skipping to "\u4e09\u3001") AND format errors (e.g. arabic

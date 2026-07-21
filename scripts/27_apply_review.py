@@ -5,13 +5,17 @@ Stage 2c — apply the model's structural review decisions onto structure.json.
 This is the ONLY place a model's judgment calls enter the pipeline, and it is
 deliberately narrow: the model may only assign a heading's LEVEL (1-4, or
 null to say "not actually a heading") and a caption's KIND ("figure"/"table",
-or null to say "not actually a caption") for paragraphs 26_export_review.py
-already surfaced as candidates. It does not hand-write fix objects, font
-values, or numbering tokens — those stay 100% deterministic, computed
+or null to say "not actually a caption"). It does not hand-write fix objects,
+font values, or numbering tokens — those stay 100% deterministic, computed
 downstream by checks.py from spec/format_spec.json exactly as before. This
 keeps the "no model-invented formatting rules" boundary intact while letting
-the model correct the one thing a regex genuinely cannot always resolve:
-which level a given numbering shape means IN THIS document.
+the model correct the two things a regex genuinely cannot always resolve:
+which level a given numbering shape means IN THIS document, and whether a
+paragraph regex/style missed entirely is actually a heading (a heading can
+have no recognizable number AND no distinctive style — pure regex/style
+matching cannot see it; 26_export_review.py's possible_missed_headings list,
+built from font signals instead, is one way to find candidates worth
+promoting here, but any real para_index in the document may be targeted).
 
 Usage:
     python 27_apply_review.py <workdir> <overrides.json>
@@ -22,16 +26,21 @@ overrides.json (write this yourself — schema is intentionally tiny):
   "captions": {"<para_index>": "figure"|"table"|null, ...}
 }
 Only list paragraphs that need correcting; omitted ones keep their
-auto-detected classification from 20_extract_structure.py. Every para_index
-must be one already present in review_candidates.json — this only corrects
-existing candidates, it does not promote arbitrary paragraphs to headings.
+auto-detected classification from 20_extract_structure.py. Any para_index
+that names a real paragraph in the document is accepted — this both
+corrects already-detected candidates AND promotes a paragraph regex/style
+never flagged at all (e.g. a heading with no number and no heading-ish
+style) into a heading, or demotes a false positive to null.
 
 Effect: rewrites <workdir>/structure.json in place (a pre-review copy is
-kept as structure.pre_review.json) AND regenerates <workdir>/shards/*, so
-that whichever check path runs next (full or sharded) sees the corrected
-level — which also determines which font spec applies (黑体 for level 1,
-楷体 for level 2, 仿宋 for level 3/4), so correcting a level must refresh
-formatting, not just renumbering.
+kept as structure.pre_review.json), recomputes the cover/toc/body region
+boundary (promoting/demoting the document's first heading can move where
+that boundary falls — everything before it is otherwise silently excluded
+from all body-region checks), AND regenerates <workdir>/shards/*, so that
+whichever check path runs next (full or sharded) sees the corrected level —
+which also determines which font spec applies (黑体 for level 1, 楷体 for
+level 2, 仿宋 for level 3/4), so correcting a level must refresh formatting,
+not just renumbering.
 
 Safe to run with an empty overrides.json ({} or {"headings":{},"captions":{}})
 if review found nothing to correct — it's a no-op in that case.
@@ -72,6 +81,26 @@ def _full_text(r):
     # label is always within the first handful of characters, so the
     # truncation never loses it.
     return r.get("text") or ""
+
+
+def _retag_regions(records):
+    # Mirrors 20_extract_structure.py's region-tagging pass exactly. Must be
+    # redone here: promoting a previously-undetected paragraph to a heading
+    # (or demoting the old "first heading") can move where the cover/body
+    # boundary actually falls. Without this, paragraphs between a newly
+    # promoted early heading and the old first-detected one would stay
+    # mis-tagged "cover" — invisible to every body-region check (font,
+    # indent, continuity) even though they are now clearly body content.
+    first_toc_idx = next((r["i"] for r in records if r["is_toc"]), None)
+    first_heading_idx = next((r["i"] for r in records if r["is_heading"]), None)
+    cover_end = first_toc_idx if first_toc_idx is not None else first_heading_idx
+    for r in records:
+        if r["is_toc"]:
+            r["region"] = "toc"
+        elif cover_end is not None and r["i"] < cover_end:
+            r["region"] = "cover"
+        else:
+            r["region"] = "body"
 
 
 def _rewrite_shards(workdir, records):
@@ -130,6 +159,8 @@ def main():
                 "num_raw": mc.group(2) if mc else None,
                 "has_content": bool(rest),
             }
+
+    _retag_regions(records)
 
     bak = os.path.join(workdir, "structure.pre_review.json")
     if not os.path.exists(bak):

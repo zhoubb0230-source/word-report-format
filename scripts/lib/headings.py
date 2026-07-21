@@ -58,9 +58,14 @@ RE_TOCTITLE = re.compile(r"^\s*目\s*录\s*$")            # 目录 / 目 录
 # figure/table caption", as distinct from the generic "heading" hint below.
 # Deliberately checked BEFORE outline/heading-style so a caption paragraph
 # that happens to inherit an outlineLvl (template quirk) or whose style name
-# also contains "标题" (e.g. a custom "图表标题" caption style — "标题" is a
-# substring of that) is never misclassified as a heading.
-CAPTION_STYLE_HINTS = ("题注", "caption", "图表标题", "表格标题", "图题", "表题")
+# also contains "标题" (e.g. a custom "图表标题"/"图标题"/"表标题" caption
+# style — "标题" is a substring of all of those) is never misclassified as a
+# heading. NOTE: "图标题"/"表标题" must be listed explicitly — the shorter
+# "图题"/"表题" are NOT substrings of them ("标" sits in between), so without
+# these entries a "表标题"-styled paragraph would fall through to the generic
+# "标题"-in-name heading test and be wrongly treated as a level-1 heading.
+CAPTION_STYLE_HINTS = ("题注", "caption", "图表标题", "表格标题",
+                       "图标题", "表标题", "图题", "表题")
 
 # --- level-independent leading-label matcher --------------------------------
 # Any of the four canonical shapes, in either numeral system, so a mismatch
@@ -99,6 +104,24 @@ def looks_like_caption_style(style_id, resolver):
     sid, name = _style_name(style_id, resolver)
     hint = (sid + " " + name).lower()
     return any(h.lower() in hint for h in CAPTION_STYLE_HINTS)
+
+
+def caption_kind_from_style(style_id, resolver):
+    """Infer 'figure'/'table' from a caption style's NAME when the paragraph
+    text itself carries no 图/表 prefix (e.g. a "表标题"-styled line that just
+    reads "设备清单"). Returns None when the style name is ambiguous — mentions
+    both 图 and 表 (a generic "图表标题" caption style) or neither — in which
+    case the kind can only come from the text, not the style."""
+    sid, name = _style_name(style_id, resolver)
+    s = (sid + " " + name)
+    low = s.lower()
+    has_fig = ("图" in s) or ("fig" in low)
+    has_tbl = ("表" in s) or ("table" in low)
+    if has_fig and not has_tbl:
+        return "figure"
+    if has_tbl and not has_fig:
+        return "table"
+    return None
 
 
 def infer_heading_level(style_id, outline, text, resolver):

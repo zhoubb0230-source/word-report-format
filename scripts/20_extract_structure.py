@@ -40,7 +40,7 @@ from docxcommon import (
 )
 from headings import (
     RE_CAPTION, RE_TOCTITLE, infer_heading_level, parse_leading_label,
-    looks_like_caption_style,
+    looks_like_caption_style, caption_kind_from_style,
 )
 
 
@@ -163,18 +163,31 @@ def main():
                     "has_content": bool(rest),
                     "source": "style" if style_says_caption else "pattern",
                 }
-            elif style_says_caption and text[:1] in ("图", "表"):
-                # Caption style confirmed, but no digit found at all -- the
-                # paragraph's own number is missing, not just unrecognized.
-                # Kept as a caption record (num_raw=None) rather than
-                # dropped, so continuity() can surface a "missing number"
-                # hint instead of this being invisible.
-                caption = {
-                    "kind": "figure" if text[:1] == "图" else "table",
-                    "num_raw": None,
-                    "has_content": bool(text[1:].strip()),
-                    "source": "style",
-                }
+            elif style_says_caption:
+                # Caption style confirmed (题注/图标题/表标题/...), but the text
+                # does not match the "图/表 + 数字" shape -- either it starts
+                # with 图/表 yet has no digit, OR it carries no 图/表 prefix at
+                # all (e.g. a "表标题"-styled line reading just "设备清单").
+                # Either way the paragraph IS a caption whose number is missing,
+                # not merely unrecognized, so it is kept as a caption record
+                # (num_raw=None) rather than dropped -- continuity() then
+                # auto-inserts the correct 图N/表N number (confirmed captions
+                # are auto-fixable). The kind comes from the 图/表 prefix when
+                # present, else from the style name.
+                first = text[:1]
+                if first in ("图", "表"):
+                    kind = "figure" if first == "图" else "table"
+                    content = text[1:].strip()
+                else:
+                    kind = caption_kind_from_style(sid, resolver)
+                    content = text.strip()
+                if kind:
+                    caption = {
+                        "kind": kind,
+                        "num_raw": None,
+                        "has_content": bool(content),
+                        "source": "style",
+                    }
 
         rec = {
             "i": i,

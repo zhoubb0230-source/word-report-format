@@ -54,6 +54,15 @@ def int2cn(n):
     return s
 
 
+def _size_name(hp):
+    """Half-point value -> a human-readable Chinese size label for comments."""
+    names = {40: "20磅", 36: "小一", 32: "三号",
+             28: "14磅", 24: "小四", 21: "五号"}
+    if hp in names:
+        return names[hp]
+    return "%g磅" % (hp / 2.0)
+
+
 def _font_ok(actual, spec_entry):
     """True if actual font matches any accepted spelling."""
     if actual is None:
@@ -84,6 +93,15 @@ def check_paragraph(rec, spec):
     # rules the spec does not state.
     if rec.get("caption"):
         return None
+
+    # Table-cell content has its OWN font/size rule (仿宋 14磅), distinct from
+    # ordinary body text (仿宋 三号). Without this a cell paragraph would be
+    # judged against the body rule and, worse, have a 2-char first-line indent
+    # forced onto it — neither of which is right for tabular content. Only the
+    # font/size are enforced here (the spec states nothing about a cell's indent
+    # or line spacing, so those are left untouched).
+    if rec.get("in_table"):
+        return _check_table_body(rec, spec)
 
     eff = rec["eff"]
     sets = {"set_east_asia": None, "set_ascii": None, "set_size_hp": None,
@@ -144,6 +162,21 @@ def check_paragraph(rec, spec):
     return _mk_format(rec["i"], sets, violations)
 
 
+def _check_table_body(rec, spec):
+    """表格内容：仿宋 14磅。Only font + size are checked (the spec says nothing
+    about a cell's indent/line spacing, so we do not invent those)."""
+    tb = spec.get("table_body")
+    if not tb or not tb.get("east_asia") or not tb.get("size_hp"):
+        return None  # spec not configured for table content; nothing to check
+    eff = rec["eff"]
+    sets = {"set_east_asia": None, "set_ascii": None, "set_size_hp": None,
+            "set_line_exact": None, "set_first_line_chars": None,
+            "clear_left_indent": False, "clear_right_indent": False, "set_jc": None}
+    violations = []
+    _check_font_size(eff, tb, sets, violations, label="表格内容")
+    return _mk_format(rec["i"], sets, violations)
+
+
 def _check_toc(rec, spec):
     t = spec.get("toc") or {}
     if not t.get("east_asia") or not t.get("size_hp"):
@@ -182,7 +215,7 @@ def _check_font_size(eff, spec_entry, sets, violations, label):
                           % (label, spec_entry["east_asia"], eff.get("east_asia")))
     if eff.get("size_hp") != spec_entry["size_hp"]:
         sets["set_size_hp"] = spec_entry["size_hp"]
-        violations.append("%s\u5b57\u53f7\u5e94\u4e3a\u4e09\u53f7" % label)
+        violations.append("%s\u5b57\u53f7\u5e94\u4e3a%s" % (label, _size_name(spec_entry["size_hp"])))
 
 
 def _check_first_line(eff, spec_entry, sets, violations):
@@ -319,7 +352,7 @@ def continuity(records, spec):
                        and r["caption"]["kind"] == kind]
         if not all_of_kind:
             continue
-        numbered_confirmed = []
+        confirmed = []
         for r in all_of_kind:
             cap = r["caption"]
             if cap.get("source") == "pattern":
@@ -330,26 +363,35 @@ def continuity(records, spec):
                     "comment": True,
                 })
                 continue
-            if cap.get("num_raw") is None:
-                # Caption style confirmed (题注/图表标题/... style applied),
-                # but no digit follows -- the number itself is missing, not
-                # merely unrecognized. Same reasoning as heading.missing_number.
-                fixes.append({
-                    "para_index": r["i"], "op": "hint",
-                    "rule_id": "caption.%s.missing_number" % kind,
-                    "rule_text": "%s标题样式已确认，但未识别到编号，请确认是否漏编号" % kname,
-                    "comment": True,
-                })
-                continue
-            numbered_confirmed.append(r)
-        if not numbered_confirmed:
+            # Confirmed caption (题注/图标题/表标题/... style, or model-confirmed).
+            # BOTH numbered and un-numbered (num_raw is None) confirmed captions
+            # join the numbering sequence: an un-numbered one occupies a slot and
+            # gets its 图N/表N number AUTO-INSERTED below -- a caption style is a
+            # reliable enough signal to add the missing number, not merely hint.
+            confirmed.append(r)
+        if not confirmed:
             continue
-        chapter_based = any(any(s in r["caption"]["num_raw"] for s in ("-", ".", "–"))
-                            for r in numbered_confirmed)
+        # chapter-based scheme is inferred only from captions that actually
+        # carry a separator-bearing number ("图1-1"); an un-numbered confirmed
+        # caption (num_raw is None) does not vote here.
+        chapter_based = any(r["caption"]["num_raw"] and
+                            any(s in r["caption"]["num_raw"] for s in ("-", ".", "–"))
+                            for r in confirmed)
         if chapter_based:
             group_counter = {}
-            for r in numbered_confirmed:
+            for r in confirmed:
                 raw = r["caption"]["num_raw"]
+                if raw is None:
+                    # Cannot infer which chapter an un-numbered caption belongs
+                    # to (its "图1-?" prefix is unknown), so hint rather than
+                    # fabricate a chapter prefix.
+                    fixes.append({
+                        "para_index": r["i"], "op": "hint",
+                        "rule_id": "caption.%s.missing_number" % kind,
+                        "rule_text": "%s标题样式已确认，但未识别到编号，请确认是否漏编号" % kname,
+                        "comment": True,
+                    })
+                    continue
                 sep = next((s for s in ("-", ".", "–") if s in raw), "-")
                 prefix = raw.rsplit(sep, 1)[0]
                 group_counter[prefix] = group_counter.get(prefix, 0) + 1
@@ -358,21 +400,30 @@ def continuity(records, spec):
                     fixes.append(_caption_fix(r, kind, expected, raw))
         else:
             n = 0
-            for r in numbered_confirmed:
+            for r in confirmed:
                 n += 1
                 expected = str(n)
-                if r["caption"]["num_raw"] != expected:
-                    fixes.append(_caption_fix(r, kind, expected, r["caption"]["num_raw"]))
+                raw = r["caption"]["num_raw"]
+                if raw is None:
+                    # Confirmed caption with no number at all -> auto-insert
+                    # "图N"/"表N" per the sequence position.
+                    fixes.append(_caption_fix(r, kind, expected, None, insert=True))
+                elif raw != expected:
+                    fixes.append(_caption_fix(r, kind, expected, raw))
     return fixes
 
 
-def _caption_fix(r, kind, new_num, old_num):
-    kname = "\u56fe" if kind == "figure" else "\u8868"
+def _caption_fix(r, kind, new_num, old_num, insert=False):
+    kname = "图" if kind == "figure" else "表"
+    if insert:
+        rule_text = "%s标题缺少编号，已按顺序自动添加为“%s%s”" % (kname, kname, new_num)
+    else:
+        rule_text = "%s编号不连续，应为“%s%s”（原为“%s%s”）" % (kname, kname, new_num, kname, old_num)
     return {
         "para_index": r["i"], "op": "renumber_caption", "kind": kind,
-        "new_num": new_num,
+        "new_num": new_num, "insert": insert,
         "rule_id": "caption.%s.continuity" % kind,
-        "rule_text": "%s\u7f16\u53f7\u4e0d\u8fde\u7eed\uff0c\u5e94\u4e3a\u201c%s%s\u201d\uff08\u539f\u4e3a\u201c%s%s\u201d\uff09" % (kname, kname, new_num, kname, old_num),
+        "rule_text": rule_text,
         "comment": True,
     }
 

@@ -85,6 +85,16 @@
   "first_line_chars": 200,
   "source": "正文 仿宋 三号 首行缩进2字符"
  },
+ "table_body": {
+  "east_asia": "仿宋",
+  "east_asia_match": [
+   "仿宋",
+   "FangSong",
+   "仿宋_GB2312"
+  ],
+  "size_hp": 28,
+  "source": "表格内容 仿宋 14磅（仅校验字体字号，不动缩进/行距）"
+ },
  "page_number": {
   "ascii": "Times New Roman",
   "size_hp": 24,

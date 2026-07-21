@@ -1,0 +1,124 @@
+{
+ "_comment": "AUTHORITATIVE format spec for the self-evaluation report template. All numeric values are PRECOMPUTED (no runtime arithmetic needed). Units: size_hp = half-points (w:sz). twips = 1/1440 inch. chars = hundredths of a character (firstLineChars=200 => 2 chars). Do NOT let a model edit or 'improve' these values.",
+ "units": {
+  "size_hp_note": "16pt(三号)=32, 20pt=40, 12pt(小四)=24",
+  "cm_to_twips": 566.9291338582677
+ },
+ "page_setup": {
+  "margin_top_twips": 1984,
+  "margin_bottom_twips": 1814,
+  "margin_left_twips": 1616,
+  "margin_right_twips": 1616,
+  "header_twips": 850,
+  "footer_twips": 992,
+  "tolerance_twips": 3,
+  "source": "页边距 上3.5cm 下3.2cm 左/右2.85cm；页眉1.5cm 页脚1.75cm"
+ },
+ "line_spacing": {
+  "line_rule": "exact",
+  "line_twips": 560,
+  "source": "行距固定值28磅"
+ },
+ "western_font": "Times New Roman",
+ "title": {
+  "east_asia": "方正小标宋",
+  "east_asia_match": [
+   "小标宋"
+  ],
+  "size_hp": 40,
+  "jc": "center",
+  "source": "题目：方正小标宋 20磅 居中"
+ },
+ "headings": {
+  "1": {
+   "east_asia": "黑体",
+   "east_asia_match": [
+    "黑体",
+    "SimHei"
+   ],
+   "size_hp": 32,
+   "first_line_chars": 200,
+   "source": "一级标题 黑体 三号 首行缩进2字符"
+  },
+  "2": {
+   "east_asia": "楷体",
+   "east_asia_match": [
+    "楷体",
+    "KaiTi",
+    "楷体_GB2312"
+   ],
+   "size_hp": 32,
+   "first_line_chars": 200,
+   "source": "二级标题 楷体 三号 首行缩进2字符"
+  },
+  "3": {
+   "east_asia": "仿宋",
+   "east_asia_match": [
+    "仿宋",
+    "FangSong",
+    "仿宋_GB2312"
+   ],
+   "size_hp": 32,
+   "first_line_chars": 200,
+   "source": "三级标题 仿宋 三号 首行缩进2字符"
+  },
+  "4": {
+   "east_asia": "仿宋",
+   "east_asia_match": [
+    "仿宋",
+    "FangSong",
+    "仿宋_GB2312"
+   ],
+   "size_hp": 32,
+   "first_line_chars": 200,
+   "source": "四级标题 仿宋 三号 首行缩进2字符"
+  }
+ },
+ "body": {
+  "east_asia": "仿宋",
+  "east_asia_match": [
+   "仿宋",
+   "FangSong",
+   "仿宋_GB2312"
+  ],
+  "size_hp": 32,
+  "first_line_chars": 200,
+  "source": "正文 仿宋 三号 首行缩进2字符"
+ },
+ "page_number": {
+  "ascii": "Times New Roman",
+  "size_hp": 24,
+  "source": "页码 Times New Roman 小四号",
+  "hint_only": true
+ },
+ "toc": {
+  "max_level": 3,
+  "source": "目录不超过三级标题",
+  "hint_only": true
+ },
+ "cover": {
+  "required_fields": [
+   "密级",
+   "项目名称",
+   "承担单位",
+   "项目负责人",
+   "起止时间",
+   "编制时间"
+  ],
+  "background_green": true,
+  "source": "封皮：绿色背景；标注密级、项目单位、项目名称、考核年份、项目负责人、起止时间、编制时间",
+  "hint_only": true
+ },
+ "captions": {
+  "figure_prefixes": [
+   "图"
+  ],
+  "table_prefixes": [
+   "表"
+  ],
+  "require_content": true,
+  "source": "图表按顺序编号并标注内容",
+  "renumber": true
+ },
+ "comment_author": "XAgent"
+}

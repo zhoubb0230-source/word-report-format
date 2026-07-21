@@ -18,13 +18,18 @@ Key correctness properties (see skill notes):
   * Detects the TOC region and the cover region and tags them, so目录/封皮
     paragraphs are excluded from heading/caption checks and from continuity
     counting.
+  * Blank/whitespace-only paragraphs are tagged is_blank and never classified
+    as a title/heading/caption/body — an empty line has no format to judge.
+  * Heading LEVEL here is only a best-effort shape/style GUESS (see
+    lib/headings.py). It is not the final answer: run 26_export_review.py /
+    27_apply_review.py afterwards so the model can correct levels the shape
+    heuristic gets wrong before any font/numbering fix is computed from it.
   * Uses the shared iter_body_paragraphs() so indices line up with apply stage.
 
 Deterministic. No model calls.
 """
 import json
 import os
-import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
@@ -33,15 +38,9 @@ from docxcommon import (
     StyleResolver, read_ppr, read_rpr, get_pPr, get_style_id, get_mark_rpr,
     iter_text_runs, run_effective_rpr,
 )
-
-# --- numbering patterns for heading level inference ------------------------
-CN_NUM = "\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e"
-RE_L1 = re.compile(r"^[%s]+\u3001" % CN_NUM)                     # 一、
-RE_L2 = re.compile(r"^[\uff08(]\s*[%s]+\s*[\uff09)]" % CN_NUM)   # （一）
-RE_L3 = re.compile(r"^(\d{1,2})\.(?!\d)")                        # 3.  (not 3.1, not 2024.)
-RE_L4 = re.compile(r"^[\uff08(]\s*(\d{1,2})\s*[\uff09)]")        # （4）
-RE_CAPTION = re.compile(r"^\s*(\u56fe|\u8868)\s*([0-9]+(?:[-\.\u2013][0-9]+)?)(.*)$")
-RE_TOCTITLE = re.compile(r"^\s*\u76ee\s*\u5f55\s*$")            # 目录 / 目 录
+from headings import (
+    RE_CAPTION, RE_TOCTITLE, infer_heading_level, parse_leading_label,
+)
 
 
 def dominant_run_props(p, baseline):
@@ -89,96 +88,6 @@ def in_toc_sdt(p):
     return False
 
 
-def infer_heading_level(style_id, outline, text, resolver):
-    """Return heading level 1..4 (or None)."""
-    # 1) resolved outline level wins
-    if outline is not None:
-        return min(outline + 1, 4)
-    # 2) style whose name/id looks like a heading
-    sid = (style_id or "")
-    name = ""
-    if resolver and sid in resolver.styles:
-        nm = resolver.styles[sid].find(qn("w:name"))
-        if nm is not None:
-            name = nm.get(qn("w:val")) or ""
-    hint = (sid + " " + name).lower()
-    is_hstyle = ("heading" in hint) or ("\u6807\u9898" in (sid + name))
-    # 3) numbering pattern (only trust for short lines)
-    short = len(text.strip()) <= 40
-    if RE_L1.match(text):
-        return 1 if (is_hstyle or short) else None
-    if RE_L2.match(text):
-        return 2 if (is_hstyle or short) else None
-    if RE_L4.match(text):
-        return 4 if (is_hstyle or short) else None
-    if RE_L3.match(text):
-        return 3 if (is_hstyle or short) else None
-    # A "\u56fe1.../\u88681..." caption is NEVER a heading, even when its paragraph
-    # style name happens to contain "\u6807\u9898" (e.g. a custom "\u56fe\u8868\u6807\u9898" caption
-    # style) \u2014 without this guard the generic is_hstyle fallback below claims
-    # it as a level-1 heading, which also hides it from caption continuity
-    # checking (that only runs when level is None).
-    if RE_CAPTION.match(text):
-        return None
-    if is_hstyle:
-        return 1
-    return None
-
-
-# Flexible per-level label regexes used ONLY to *extract the raw leading
-# label* once a paragraph's level is already known (from outlineLvl/style/the
-# strict RE_L* patterns above). Unlike RE_L1/RE_L3 these also accept the
-# "wrong" numeral system (e.g. arabic "3\u3001" for a level-1 heading that should
-# read "\u4e09\u3001"), so a numbering-FORMAT mistake is captured (raw != expected
-# canonical token) instead of being silently skipped because it failed to
-# parse under the strict pattern.
-LABEL_RE = {
-    1: re.compile(r"^([%s]+|\d{1,3})\u3001" % CN_NUM),
-    2: re.compile(r"^[\uff08(]\s*([%s]+|\d{1,2})\s*[\uff09)]" % CN_NUM),
-    3: re.compile(r"^([%s]+|\d{1,2})\.(?!\d)" % CN_NUM),
-    4: re.compile(r"^[\uff08(]\s*([%s]+|\d{1,2})\s*[\uff09)]" % CN_NUM),
-}
-
-
-def parse_num_token(level, text):
-    """Return (raw_label, numeric_value) for continuity/format checks, or
-    (None, None) if no leading label for this level can be found at all."""
-    rx = LABEL_RE.get(level)
-    if rx is None:
-        return None, None
-    m = rx.match(text)
-    if not m:
-        return None, None
-    raw = m.group(0)
-    num_s = m.group(1)
-    val = int(num_s) if num_s.isdigit() else _cn2int(num_s)
-    return raw, val
-
-
-_CN_MAP = {c: i + 1 for i, c in enumerate("\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d")}
-_CN_MAP["\u5341"] = 10
-
-
-def _cn2int(s):
-    s = s.strip()
-    if not s:
-        return None
-    if s == "\u5341":
-        return 10
-    if "\u5341" in s:  # e.g. 十一, 二十, 二十三
-        parts = s.split("\u5341")
-        tens = _CN_MAP.get(parts[0], 1) if parts[0] else 1
-        ones = _CN_MAP.get(parts[1], 0) if len(parts) > 1 and parts[1] else 0
-        return tens * 10 + ones
-    total = 0
-    for ch in s:
-        if ch in _CN_MAP:
-            total = total * 10 + _CN_MAP[ch]
-        else:
-            return None
-    return total or None
-
-
 def main():
     workdir = sys.argv[1]
     shard_size = 400
@@ -201,8 +110,6 @@ def main():
     # ---- page setup (first sectPr) ----
     page_setup = None
     body = doc_root.find(qn("w:body"))
-    sectPrs = body.findall(qn("w:sectPr")) + [
-        s for s in body.iter(qn("w:sectPr"))]
     seen = set()
     first_sect = None
     for s in body.iter(qn("w:sectPr")):
@@ -232,22 +139,23 @@ def main():
         text = para_text(p)
         ea, asc, sz = dominant_run_props(p, rpr)
 
+        is_blank = not text.strip()
         is_toc = bool(sid and sid.lower().startswith("toc")) or has_toc_field(p) or in_toc_sdt(p)
         is_toctitle = bool(RE_TOCTITLE.match(text))
 
         outline = ppr.get("outline")
         level = None
-        if not is_toc and not is_toctitle:
+        if not is_blank and not is_toc and not is_toctitle:
             level = infer_heading_level(sid, outline, text, resolver)
-        num_raw, num_token = parse_num_token(level, text) if level else (None, None)
+        num_raw = parse_leading_label(text) if level else None
 
         caption = None
-        if not is_toc and not is_toctitle and level is None:
+        if not is_blank and not is_toc and not is_toctitle and level is None:
             mc = RE_CAPTION.match(text)
             if mc:
                 rest = mc.group(3).strip()
                 caption = {
-                    "kind": "figure" if mc.group(1) == "\u56fe" else "table",
+                    "kind": "figure" if mc.group(1) == "图" else "table",
                     "num_raw": mc.group(2),
                     "has_content": bool(rest),
                 }
@@ -257,10 +165,10 @@ def main():
             "style_id": sid,
             "text": text[:60],
             "text_len": len(text),
+            "is_blank": is_blank,
             "is_toc": is_toc or is_toctitle,
             "is_heading": level is not None,
             "level": level,
-            "num_token": num_token,
             "num_raw": num_raw,
             "caption": caption,
             "in_table": in_table(p),
@@ -324,12 +232,14 @@ def main():
             "toc": sum(1 for r in records if r["region"] == "toc"),
             "body": sum(1 for r in records if r["region"] == "body"),
         },
+        "blank": sum(1 for r in records if r["is_blank"]),
         "headings": sum(1 for r in records if r["is_heading"]),
         "captions": sum(1 for r in records if r["caption"]),
         "n_shards": len(shard_files),
         "shard_dir": os.path.abspath(shard_dir),
         "shard_files": shard_files,
         "page_setup_found": page_setup is not None,
+        "next_step": "python 26_export_review.py <workdir>  # full-document heading/caption review before checking format",
     }
     print(json.dumps(summary, ensure_ascii=False))
 

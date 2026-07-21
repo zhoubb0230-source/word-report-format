@@ -30,17 +30,15 @@ from lxml import etree
 from docxcommon import (qn, parse_xml, unzip_docx, rezip_docx,
                         iter_body_paragraphs)
 from commentwriter import CommentWriter
+from headings import ANY_LABEL_RE
 
-# --- leading-token strip patterns (MUST mirror LABEL_RE in
-# 20_extract_structure.py: tolerant of the "wrong" numeral system too, so a
-# mis-formatted original label \u2014 e.g. arabic "3\u3001" where a level-1 heading
-# should read "\u4e09\u3001" \u2014 can still be located and replaced with the canonical
-# token, not just gap-only renumbering).
-CN_NUM = "\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e"
-STRIP_L1 = re.compile(r"^([%s]+|\d{1,3})\u3001" % CN_NUM)
-STRIP_L2 = re.compile(r"^[\uff08(]\s*([%s]+|\d{1,2})\s*[\uff09)]" % CN_NUM)
-STRIP_L3 = re.compile(r"^([%s]+|\d{1,2})\.(?!\d)" % CN_NUM)
-STRIP_L4 = re.compile(r"^[\uff08(]\s*([%s]+|\d{1,2})\s*[\uff09)]" % CN_NUM)
+# Level-independent: whatever leading enumeration label a heading currently
+# has (regardless of numeral system / punctuation, and regardless of whether
+# it matches the shape its assigned level "should" use) gets stripped and
+# replaced with the canonical token computed by checks.py. Shared with
+# 20_extract_structure.py / 27_apply_review.py via lib/headings.py so all
+# three never drift out of sync.
+STRIP_HEADING = ANY_LABEL_RE
 STRIP_CAPTION = re.compile(r"^\s*(?:\u56fe|\u8868)\s*[0-9]+(?:[-\.\u2013][0-9]+)?")
 
 
@@ -189,9 +187,7 @@ def _apply_renumber_caption(p, fix):
 
 
 def _apply_renumber_heading(p, fix):
-    lvl = fix.get("level", 1)
-    strip = {1: STRIP_L1, 2: STRIP_L2, 3: STRIP_L3, 4: STRIP_L4}.get(lvl, STRIP_L1)
-    return _replace_leading(p, strip, fix["new_token"])
+    return _replace_leading(p, STRIP_HEADING, fix["new_token"])
 
 
 # ---------------------------------------------------------------------------

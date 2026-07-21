@@ -69,6 +69,9 @@ def _font_ok(actual, spec_entry):
 # ---------------------------------------------------------------------------
 def check_paragraph(rec, spec):
     """Return a combined 'format' fix for this paragraph, or None if compliant/skip."""
+    if rec.get("is_blank"):
+        return None  # an empty line has no format to judge
+
     region = rec.get("region", "body")
     if region == "toc":
         # 目录条目只做字体/字号校验（仿宋 三号）；不动缩进/行距，避免破坏 TOC
@@ -182,7 +185,7 @@ def _mk_format(i, sets, violations):
         return None
     fix = {"para_index": i, "op": "format",
            "rule_id": "combined",
-           "rule_text": "\u3010XAgent\u683c\u5f0f\u3011" + "\uff1b".join(violations),
+           "rule_text": "\uff1b".join(violations),
            "comment": True}
     fix.update(sets)
     return fix
@@ -211,7 +214,7 @@ def check_page_setup(page_setup, spec):
         return None
     return {"op": "section", "set_pgmar": setmar,
             "rule_id": "page.margins",
-            "rule_text": "【XAgent格式】页面边距不符合规范（应：上3.5/下3.2/左右2.85cm，页眉1.5/页脚1.75cm）：" + "\u3001".join(viol),
+            "rule_text": "页面边距不符合规范（应：上3.5/下3.2/左右2.85cm，页眉1.5/页脚1.75cm）：" + "\u3001".join(viol),
             "comment": False}
 
 
@@ -246,7 +249,7 @@ def continuity(records, spec):
                 "para_index": r["i"], "op": "renumber_heading", "level": lvl,
                 "new_token": expected_token,
                 "rule_id": "heading.continuity",
-                "rule_text": "\u3010XAgent\u683c\u5f0f\u3011%d\u7ea7\u6807\u9898\u5e8f\u53f7\u683c\u5f0f\u6216\u8fde\u7eed\u6027\u6709\u8bef\uff0c\u5e94\u4e3a\u201c%s\u201d\uff08\u539f\u4e3a\u201c%s\u201d\uff09" % (lvl, expected_token, raw),
+                "rule_text": "%d\u7ea7\u6807\u9898\u5e8f\u53f7\u683c\u5f0f\u6216\u8fde\u7eed\u6027\u6709\u8bef\uff0c\u5e94\u4e3a\u201c%s\u201d\uff08\u539f\u4e3a\u201c%s\u201d\uff09" % (lvl, expected_token, raw),
                 "comment": True,
             })
             # keep counters at expected (we renumbered to expected)
@@ -285,7 +288,7 @@ def _caption_fix(r, kind, new_num, old_num):
         "para_index": r["i"], "op": "renumber_caption", "kind": kind,
         "new_num": new_num,
         "rule_id": "caption.%s.continuity" % kind,
-        "rule_text": "\u3010XAgent\u683c\u5f0f\u3011%s\u7f16\u53f7\u4e0d\u8fde\u7eed\uff0c\u5e94\u4e3a\u201c%s%s\u201d\uff08\u539f\u4e3a\u201c%s%s\u201d\uff09" % (kname, kname, new_num, kname, old_num),
+        "rule_text": "%s\u7f16\u53f7\u4e0d\u8fde\u7eed\uff0c\u5e94\u4e3a\u201c%s%s\u201d\uff08\u539f\u4e3a\u201c%s%s\u201d\uff09" % (kname, kname, new_num, kname, old_num),
         "comment": True,
     }
 
@@ -318,12 +321,12 @@ def doc_hints(structure, spec):
         if missing:
             hints.append({"para_index": first_cover, "op": "hint",
                           "rule_id": "cover.fields",
-                          "rule_text": "\u3010XAgent\u683c\u5f0f\u3011\u5c01\u76ae\u7f3a\u5c11\u5fc5\u8981\u4fe1\u606f\uff1a" + "\u3001".join(missing),
+                          "rule_text": "\u5c01\u76ae\u7f3a\u5c11\u5fc5\u8981\u4fe1\u606f\uff1a" + "\u3001".join(missing),
                           "comment": True})
         if spec["cover"].get("background_green") and not structure.get("has_background"):
             hints.append({"para_index": first_cover, "op": "hint",
                           "rule_id": "cover.green",
-                          "rule_text": "\u3010XAgent\u683c\u5f0f\u3011\u672a\u68c0\u6d4b\u5230\u5c01\u76ae\u80cc\u666f\u989c\u8272\u8bbe\u7f6e\uff0c\u8bf7\u786e\u8ba4\u5c01\u76ae\u4e3a\u7eff\u8272",
+                          "rule_text": "\u672a\u68c0\u6d4b\u5230\u5c01\u76ae\u80cc\u666f\u989c\u8272\u8bbe\u7f6e\uff0c\u8bf7\u786e\u8ba4\u5c01\u76ae\u4e3a\u7eff\u8272",
                           "comment": True})
     # caption content presence
     for r in records:
@@ -332,6 +335,6 @@ def doc_hints(structure, spec):
             kname = "\u56fe" if cap["kind"] == "figure" else "\u8868"
             hints.append({"para_index": r["i"], "op": "hint",
                           "rule_id": "caption.content",
-                          "rule_text": "\u3010XAgent\u683c\u5f0f\u3011%s\u7f16\u53f7\u540e\u7f3a\u5c11\u5185\u5bb9\u8bf4\u660e" % kname,
+                          "rule_text": "%s\u7f16\u53f7\u540e\u7f3a\u5c11\u5185\u5bb9\u8bf4\u660e" % kname,
                           "comment": True})
     return hints

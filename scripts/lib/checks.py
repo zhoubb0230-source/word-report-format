@@ -71,7 +71,9 @@ def check_paragraph(rec, spec):
     """Return a combined 'format' fix for this paragraph, or None if compliant/skip."""
     region = rec.get("region", "body")
     if region == "toc":
-        return None  # never touch目录 paragraphs' body formatting
+        # 目录条目只做字体/字号校验（仿宋 三号）；不动缩进/行距，避免破坏 TOC
+        # 域代码自身的制表位/悬挂缩进结构。
+        return _check_toc(rec, spec)
 
     # Caption paragraphs (图.../表...) have NO formatting rule in the spec, so we
     # do not touch their font/indent/line spacing here. They are handled only by
@@ -103,6 +105,15 @@ def check_paragraph(rec, spec):
         if eff.get("jc") != "center":
             sets["set_jc"] = "center"
             violations.append("\u9898\u76ee\u5e94\u5c45\u4e2d")
+        # \u9898\u76ee\u5e94\u65e0\u7f29\u8fdb\uff1b\u6b8b\u7559\u7684\u9996\u884c/\u5de6\u7f29\u8fdb\u4f1a\u8ba9 jc=center \u7684\u5c45\u4e2d\u57fa\u51c6\u504f\u79fb\uff0c
+        # \u89c6\u89c9\u4e0a"\u5c45\u4e2d"\u5176\u5b9e\u662f\u76f8\u5bf9\u7f29\u8fdb\u540e\u7684\u53ef\u7528\u5bbd\u5ea6\u5c45\u4e2d\uff0c\u4e0d\u662f\u771f\u6b63\u7684\u9875\u9762\u5c45\u4e2d\u3002
+        indent_keys = ("first_line_chars", "first_line", "left_chars", "left",
+                       "start_chars", "start", "hanging_chars", "hanging")
+        if any(eff.get(k) for k in indent_keys):
+            sets["set_first_line_chars"] = 0
+            sets["clear_left_indent"] = True
+            violations.append(
+                "\u9898\u76ee\u4e0d\u5e94\u6709\u7f29\u8fdb\uff08\u9700\u6e05\u9664\u9996\u884c/\u5de6\u7f29\u8fdb\uff0c\u5426\u5219\u5c45\u4e2d\u4e0d\u51c6\u786e\uff09")
         return _mk_format(rec["i"], sets, violations)
 
     # -- Body region: headings / captions / normal body --
@@ -124,6 +135,19 @@ def check_paragraph(rec, spec):
             violations.append("\u884c\u8ddd\u5e94\u4e3a\u56fa\u5b9a\u503c28\u78c5")
         _check_first_line(eff, b, sets, violations)
 
+    return _mk_format(rec["i"], sets, violations)
+
+
+def _check_toc(rec, spec):
+    t = spec.get("toc") or {}
+    if not t.get("east_asia") or not t.get("size_hp"):
+        return None  # spec not configured for toc fonts; nothing to check
+    eff = rec["eff"]
+    sets = {"set_east_asia": None, "set_ascii": None, "set_size_hp": None,
+            "set_line_exact": None, "set_first_line_chars": None,
+            "clear_left_indent": False, "set_jc": None}
+    violations = []
+    _check_font_size(eff, t, sets, violations, label="目录")
     return _mk_format(rec["i"], sets, violations)
 
 
@@ -208,16 +232,21 @@ def continuity(records, spec):
         for d in range(lvl + 1, 5):
             counters[d] = 0
         expected = counters[lvl]
-        actual = r.get("num_token")
-        if actual is None:
-            continue
-        if actual != expected:
-            new_token = _heading_token(lvl, expected)
+        expected_token = _heading_token(lvl, expected)
+        raw = r.get("num_raw")
+        if raw is None:
+            continue  # no recognizable leading number at all; nothing safe to replace
+        if raw != expected_token:
+            # Covers BOTH kinds of violation with one comparison: sequence gaps
+            # (e.g. "\u4e00\u3001" skipping to "\u4e09\u3001") AND format errors (e.g. arabic
+            # "3\u3001" used where the level-1 spec requires the Chinese numeral
+            # "\u4e09\u3001") \u2014 either way the rendered label differs from the
+            # position-derived canonical token, so it gets corrected.
             fixes.append({
                 "para_index": r["i"], "op": "renumber_heading", "level": lvl,
-                "new_token": new_token,
+                "new_token": expected_token,
                 "rule_id": "heading.continuity",
-                "rule_text": "\u3010XAgent\u683c\u5f0f\u3011%d\u7ea7\u6807\u9898\u5e8f\u53f7\u4e0d\u8fde\u7eed\uff0c\u5e94\u4e3a\u201c%s\u201d\uff08\u539f\u5e8f\u53f7\u4e3a\u7b2c%s\u9879\uff09" % (lvl, new_token, actual),
+                "rule_text": "\u3010XAgent\u683c\u5f0f\u3011%d\u7ea7\u6807\u9898\u5e8f\u53f7\u683c\u5f0f\u6216\u8fde\u7eed\u6027\u6709\u8bef\uff0c\u5e94\u4e3a\u201c%s\u201d\uff08\u539f\u4e3a\u201c%s\u201d\uff09" % (lvl, expected_token, raw),
                 "comment": True,
             })
             # keep counters at expected (we renumbered to expected)

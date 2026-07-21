@@ -31,12 +31,16 @@ from docxcommon import (qn, parse_xml, unzip_docx, rezip_docx,
                         iter_body_paragraphs)
 from commentwriter import CommentWriter
 
-# --- leading-token strip patterns (MUST mirror 20_extract_structure.py) ----
+# --- leading-token strip patterns (MUST mirror LABEL_RE in
+# 20_extract_structure.py: tolerant of the "wrong" numeral system too, so a
+# mis-formatted original label \u2014 e.g. arabic "3\u3001" where a level-1 heading
+# should read "\u4e09\u3001" \u2014 can still be located and replaced with the canonical
+# token, not just gap-only renumbering).
 CN_NUM = "\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341\u767e"
-STRIP_L1 = re.compile(r"^[%s]+\u3001" % CN_NUM)
-STRIP_L2 = re.compile(r"^[\uff08(]\s*[%s]+\s*[\uff09)]" % CN_NUM)
-STRIP_L3 = re.compile(r"^\d{1,2}\.(?!\d)")
-STRIP_L4 = re.compile(r"^[\uff08(]\s*\d{1,2}\s*[\uff09)]")
+STRIP_L1 = re.compile(r"^([%s]+|\d{1,3})\u3001" % CN_NUM)
+STRIP_L2 = re.compile(r"^[\uff08(]\s*([%s]+|\d{1,2})\s*[\uff09)]" % CN_NUM)
+STRIP_L3 = re.compile(r"^([%s]+|\d{1,2})\.(?!\d)" % CN_NUM)
+STRIP_L4 = re.compile(r"^[\uff08(]\s*([%s]+|\d{1,2})\s*[\uff09)]" % CN_NUM)
 STRIP_CAPTION = re.compile(r"^\s*(?:\u56fe|\u8868)\s*[0-9]+(?:[-\.\u2013][0-9]+)?")
 
 
@@ -71,9 +75,20 @@ def get_pPr(p):
 
 
 def _iter_runs(p):
+    # Recurse (w:hyperlink-wrapped runs — e.g. every TOC entry — must be
+    # reached), but skip runs that live inside a nested textbox
+    # (w:txbxContent): those belong to a different logical paragraph and
+    # must not be restyled as a side effect of editing the host paragraph.
     for r in p.iter(qn("w:r")):
-        # skip runs living inside the comment reference we may add later; at
-        # apply time there are none yet, so all runs are content runs.
+        anc = r.getparent()
+        in_txbx = False
+        while anc is not None and anc is not p:
+            if anc.tag == qn("w:txbxContent"):
+                in_txbx = True
+                break
+            anc = anc.getparent()
+        if in_txbx:
+            continue
         yield r
 
 

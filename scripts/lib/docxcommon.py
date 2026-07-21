@@ -346,8 +346,28 @@ def get_mark_rpr(p):
 
 
 def iter_text_runs(p):
-    """Yield (run_el, text) for runs that carry visible text (skip markers)."""
-    for run in p.findall(qn("w:r")):
+    """Yield (run_el, text) for runs that carry visible text (skip markers).
+
+    Recurses into wrapper elements (w:hyperlink, w:ins, w:smartTag, ...) via
+    p.iter() rather than only direct children — a shallow findall() would see
+    ZERO runs for a paragraph whose entire text is wrapped in <w:hyperlink>,
+    which is exactly how Word emits every auto-generated TOC entry. That
+    previously made font/size detection blind to TOC (and any hyperlinked
+    text), silently falling back to the style baseline. para_text() and the
+    apply-stage run editor already recurse this way; this now matches them.
+    Runs inside a nested textbox (w:txbxContent) are excluded since they
+    belong to a different logical paragraph.
+    """
+    for run in p.iter(qn("w:r")):
+        anc = run.getparent()
+        in_txbx = False
+        while anc is not None and anc is not p:
+            if anc.tag == qn("w:txbxContent"):
+                in_txbx = True
+                break
+            anc = anc.getparent()
+        if in_txbx:
+            continue
         txt = "".join((t.text or "") for t in run.findall(qn("w:t")))
         if txt:
             yield run, txt

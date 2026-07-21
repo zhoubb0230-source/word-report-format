@@ -113,26 +113,46 @@ def infer_heading_level(style_id, outline, text, resolver):
         return 4 if (is_hstyle or short) else None
     if RE_L3.match(text):
         return 3 if (is_hstyle or short) else None
+    # A "\u56fe1.../\u88681..." caption is NEVER a heading, even when its paragraph
+    # style name happens to contain "\u6807\u9898" (e.g. a custom "\u56fe\u8868\u6807\u9898" caption
+    # style) \u2014 without this guard the generic is_hstyle fallback below claims
+    # it as a level-1 heading, which also hides it from caption continuity
+    # checking (that only runs when level is None).
+    if RE_CAPTION.match(text):
+        return None
     if is_hstyle:
         return 1
     return None
 
 
+# Flexible per-level label regexes used ONLY to *extract the raw leading
+# label* once a paragraph's level is already known (from outlineLvl/style/the
+# strict RE_L* patterns above). Unlike RE_L1/RE_L3 these also accept the
+# "wrong" numeral system (e.g. arabic "3\u3001" for a level-1 heading that should
+# read "\u4e09\u3001"), so a numbering-FORMAT mistake is captured (raw != expected
+# canonical token) instead of being silently skipped because it failed to
+# parse under the strict pattern.
+LABEL_RE = {
+    1: re.compile(r"^([%s]+|\d{1,3})\u3001" % CN_NUM),
+    2: re.compile(r"^[\uff08(]\s*([%s]+|\d{1,2})\s*[\uff09)]" % CN_NUM),
+    3: re.compile(r"^([%s]+|\d{1,2})\.(?!\d)" % CN_NUM),
+    4: re.compile(r"^[\uff08(]\s*([%s]+|\d{1,2})\s*[\uff09)]" % CN_NUM),
+}
+
+
 def parse_num_token(level, text):
-    """Extract the numeric ordinal for continuity checks."""
-    if level == 1:
-        m = RE_L1.match(text)
-        return _cn2int(m.group(0)[:-1]) if m else None
-    if level == 2:
-        m = RE_L2.match(text)
-        return _cn2int(re.sub(r"[\uff08()\uff09\s]", "", m.group(0))) if m else None
-    if level == 3:
-        m = RE_L3.match(text)
-        return int(m.group(1)) if m else None
-    if level == 4:
-        m = RE_L4.match(text)
-        return int(m.group(1)) if m else None
-    return None
+    """Return (raw_label, numeric_value) for continuity/format checks, or
+    (None, None) if no leading label for this level can be found at all."""
+    rx = LABEL_RE.get(level)
+    if rx is None:
+        return None, None
+    m = rx.match(text)
+    if not m:
+        return None, None
+    raw = m.group(0)
+    num_s = m.group(1)
+    val = int(num_s) if num_s.isdigit() else _cn2int(num_s)
+    return raw, val
 
 
 _CN_MAP = {c: i + 1 for i, c in enumerate("\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d")}
@@ -219,7 +239,7 @@ def main():
         level = None
         if not is_toc and not is_toctitle:
             level = infer_heading_level(sid, outline, text, resolver)
-        num_token = parse_num_token(level, text) if level else None
+        num_raw, num_token = parse_num_token(level, text) if level else (None, None)
 
         caption = None
         if not is_toc and not is_toctitle and level is None:
@@ -241,6 +261,7 @@ def main():
             "is_heading": level is not None,
             "level": level,
             "num_token": num_token,
+            "num_raw": num_raw,
             "caption": caption,
             "in_table": in_table(p),
             "eff": {

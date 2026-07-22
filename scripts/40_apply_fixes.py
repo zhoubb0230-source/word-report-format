@@ -396,6 +396,54 @@ def _patch_toc_styles(pkg_dir, toc_spec):
     return patched
 
 
+def _clean_caption_numbering(pkg_dir):
+    """Un-hide auto-generated caption numbers (图N/表N).
+
+    Some templates give the caption-numbering LEVEL run properties that hide
+    the number: a solid dark shading (w:shd fill=000000 -> a black block over
+    it) and/or a zero font size (w:sz val=0). The number is really there and
+    stays continuous (auto-numbered, 方案一) -- it's just invisible. For any
+    numbering level whose lvlText produces a caption number (contains 图/表),
+    strip that hiding shading and zero size so "表1"/"图1" renders normally.
+    Returns the number of levels cleaned."""
+    path = os.path.join(pkg_dir, "word", "numbering.xml")
+    if not os.path.exists(path):
+        return 0
+    tree = parse_xml(path)
+    root = tree.getroot()
+    cleaned = 0
+    for lvl in root.iter(qn("w:lvl")):
+        lt = lvl.find(qn("w:lvlText"))
+        txt = (lt.get(qn("w:val")) if lt is not None else "") or ""
+        if "图" not in txt and "表" not in txt:
+            continue
+        rpr = lvl.find(qn("w:rPr"))
+        if rpr is None:
+            continue
+        changed = False
+        shd = rpr.find(qn("w:shd"))
+        if shd is not None:
+            fill = (shd.get(qn("w:fill")) or "auto").lower()
+            if fill not in ("auto", "ffffff"):
+                rpr.remove(shd)
+                changed = True
+        for tag in ("w:sz", "w:szCs"):
+            el = rpr.find(qn(tag))
+            if el is not None and (el.get(qn("w:val")) or "0") == "0":
+                rpr.remove(el)
+                changed = True
+        # a white/near-invisible number colour would also hide it on white
+        clr = rpr.find(qn("w:color"))
+        if clr is not None and (clr.get(qn("w:val")) or "").lower() in ("ffffff", "auto"):
+            rpr.remove(clr)
+            changed = True
+        if changed:
+            cleaned += 1
+    if cleaned:
+        tree.write(path, xml_declaration=True, encoding="UTF-8", standalone=True)
+    return cleaned
+
+
 def _set_update_fields(pkg_dir):
     path = os.path.join(pkg_dir, "word", "settings.xml")
     if not os.path.exists(path):
@@ -502,6 +550,10 @@ def main():
         applied["toc_styles"] = _patch_toc_styles(out_pkg, _spec.get("toc"))
     except (OSError, ValueError):
         applied["toc_styles"] = 0
+
+    # Un-hide auto-generated caption numbers (图N/表N) obscured by a black
+    # shading / zero size in the caption numbering definition.
+    applied["caption_num_unhidden"] = _clean_caption_numbering(out_pkg)
 
     _set_update_fields(out_pkg)
 

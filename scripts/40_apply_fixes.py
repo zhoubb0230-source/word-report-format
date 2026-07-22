@@ -205,18 +205,94 @@ def _set_jc(pPr, val):
 # ---------------------------------------------------------------------------
 # text renumbering (collapse to first w:t; labels are single-style lines)
 # ---------------------------------------------------------------------------
+XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
+
+
+def _field_run_spans(p):
+    """[(begin_idx, end_idx)] into list(p) for each top-level field
+    (w:fldChar begin..matching end). Handles nesting via a depth counter."""
+    kids = list(p)
+    spans, depth, start = [], 0, None
+    for idx, ch in enumerate(kids):
+        if ch.tag != qn("w:r"):
+            continue
+        fc = ch.find(qn("w:fldChar"))
+        if fc is None:
+            continue
+        typ = fc.get(qn("w:fldCharType"))
+        if typ == "begin":
+            if depth == 0:
+                start = idx
+            depth += 1
+        elif typ == "end" and depth > 0:
+            depth -= 1
+            if depth == 0 and start is not None:
+                spans.append((start, idx))
+                start = None
+    return spans, kids
+
+
 def _replace_leading(p, strip_re, new_prefix):
-    ts = [t for t in p.iter(qn("w:t"))]
-    if not ts:
+    """Replace a paragraph's leading numbering label with new_prefix.
+
+    Field-aware: when the leading number is produced by a Word FIELD (e.g.
+    a heading numbered by "{ = 1 \\* Arabic }" — the digit lives in the field
+    RESULT, not as typed text), the whole field is deleted. Otherwise Word
+    would regenerate the number from the field code on the next field refresh
+    (we set updateFields=true), wiping our replacement AND, because the old
+    code collapsed all text into that field-result run, the real title text
+    with it — leaving only the recomputed "1". After removing any label field,
+    the remaining leading separator whitespace is trimmed and the new token is
+    prepended to the actual content run."""
+    all_t = [t for t in p.iter(qn("w:t"))]
+    if not all_t:
         return False
-    full = "".join(t.text or "" for t in ts)
+    full = "".join(t.text or "" for t in all_t)
     m = strip_re.match(full)
     if not m:
         return False
-    newfull = new_prefix + full[m.end():]
-    ts[0].text = newfull
-    ts[0].set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-    for t in ts[1:]:
+    end = m.end()
+
+    # char range of each w:t within the concatenated text
+    off, pos = {}, 0
+    for t in all_t:
+        L = len(t.text or "")
+        off[id(t)] = pos
+        pos += L
+
+    # delete every field whose visible result falls inside the leading label
+    spans, kids = _field_run_spans(p)
+    for s, e in spans:
+        field_runs = kids[s:e + 1]
+        field_ts = [t for r in field_runs for t in r.iter(qn("w:t"))]
+        starts = [off[id(t)] for t in field_ts if id(t) in off]
+        if starts and min(starts) < end:
+            # Remove only the field's RUNS (begin/instrText/separate/result/end);
+            # keep any bookmarkStart/End that sit inside the field span — those
+            # are the heading's TOC anchor and must survive, or the TOC entry
+            # breaks.
+            for r in field_runs:
+                if r.tag != qn("w:r"):
+                    continue
+                parent = r.getparent()
+                if parent is not None:
+                    parent.remove(r)
+
+    rem_t = [t for t in p.iter(qn("w:t"))]
+    if not rem_t:
+        r = etree.SubElement(p, qn("w:r"))
+        t = etree.SubElement(r, qn("w:t"))
+        t.text = new_prefix
+        t.set(XML_SPACE, "preserve")
+        return True
+    full2 = "".join(t.text or "" for t in rem_t)
+    m2 = strip_re.match(full2)
+    # if the label survived as text, strip it; if it was entirely inside the
+    # deleted field, only its trailing separator whitespace remains -> trim it
+    rest = full2[m2.end():] if m2 else full2.lstrip(" \t　")
+    rem_t[0].text = new_prefix + rest
+    rem_t[0].set(XML_SPACE, "preserve")
+    for t in rem_t[1:]:
         t.text = ""
     return True
 

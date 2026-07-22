@@ -54,6 +54,20 @@ RE_L4 = re.compile(r"^[（(]\s*(\d{1,2})\s*[）)]")        # （4）
 RE_CAPTION = re.compile(r"^\s*(图|表)\s*([0-9]+(?:[-\.–][0-9]+)?)(.*)$")
 RE_TOCTITLE = re.compile(r"^\s*目\s*录\s*$")            # 目录 / 目 录
 
+# --- level number carried by a heading STYLE NAME -------------------------
+# "标题 1" / "Heading 1" / "一级标题" / "1级标题" all state the level
+# explicitly. When a heading style says which level it is, that is far more
+# reliable than guessing the level from the numbering SHAPE of the text —
+# e.g. a genuine level-1 heading written "1. 项目进展" mechanically looks like
+# the level-3 shape ("digit + dot"), and if the shape wins, the heading is
+# mis-leveled to 3, its ordinal "1." then looks correct for level 3, and it
+# never gets renumbered to the level-1 form "一、". So the style-name level
+# takes precedence over the shape guess (an actual w:outlineLvl still wins
+# over both — it is the most authoritative signal).
+_LVL_NAME_RE = re.compile(r"(?:heading|标题)\s*([1-9])", re.I)
+_LVL_AR_RE = re.compile(r"([1-9])\s*级")
+_LVL_CN_RE = re.compile(r"([一二三四五六七八九])\s*级")
+
 # Paragraph style name/id substrings that specifically mean "this is a
 # figure/table caption", as distinct from the generic "heading" hint below.
 # Deliberately checked BEFORE outline/heading-style so a caption paragraph
@@ -124,6 +138,21 @@ def caption_kind_from_style(style_id, resolver):
     return None
 
 
+def heading_level_from_style_name(style_id, name):
+    """Level (1..4) explicitly stated by a heading style NAME/ID
+    ('标题 1'/'Heading 1'/'一级标题'/'1级标题'), or None if the name carries
+    no level number. Higher-than-4 levels clamp to 4 (the spec only defines
+    four heading levels)."""
+    s = (style_id or "") + " " + (name or "")
+    m = _LVL_NAME_RE.search(s) or _LVL_AR_RE.search(s)
+    if m:
+        return min(int(m.group(1)), 4)
+    m = _LVL_CN_RE.search(s)
+    if m:
+        return min("一二三四五六七八九".index(m.group(1)) + 1, 4)
+    return None
+
+
 def infer_heading_level(style_id, outline, text, resolver):
     """Return (level, source). level is 1..4 or None; source is
     "outline"/"style"/"pattern" when level is not None, else None. See
@@ -134,22 +163,27 @@ def infer_heading_level(style_id, outline, text, resolver):
     # override this unambiguous signal (see CAPTION_STYLE_HINTS docstring).
     if RE_CAPTION.match(text) or looks_like_caption_style(style_id, resolver):
         return None, None
-    # 1) resolved outline level wins
+    # 1) resolved outline level wins (most authoritative)
     if outline is not None:
         return min(outline + 1, 4), "outline"
     # 2) style whose name/id looks like a heading
     sid, name = _style_name(style_id, resolver)
     hint = (sid + " " + name).lower()
     is_hstyle = ("heading" in hint) or ("标题" in (sid + name))
+    # A heading style whose NAME states the level (标题 1 / 一级标题) pins the
+    # level directly — this beats the numbering-shape guess below, so a
+    # level-1 heading written "1." is not mis-read as level 3 (see
+    # _LVL_NAME_RE docstring).
+    name_level = heading_level_from_style_name(sid, name) if is_hstyle else None
     # 3) numbering pattern (only trust for short lines when no style backs it)
     short = len(text.strip()) <= 40
     for rx, lvl in ((RE_L1, 1), (RE_L2, 2), (RE_L4, 4), (RE_L3, 3)):
         if rx.match(text):
             if is_hstyle:
-                return lvl, "style"
+                return (name_level or lvl), "style"
             if short:
                 return lvl, "pattern"
             return None, None
     if is_hstyle:
-        return 1, "style"
+        return (name_level or 1), "style"
     return None, None

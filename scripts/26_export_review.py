@@ -16,31 +16,59 @@ seeing how ALL the headings in the document relate to each other. That is
 why this step is NEVER sharded — read the whole list, in document order,
 before deciding anything (see SKILL.md).
 
+Every heading/caption candidate carries a trust tier (see lib/headings.py):
+  - CONFIRMED (level_source/caption source "outline" or "style"): a real
+    w:outlineLvl or a heading/caption-ish paragraph style backs the
+    classification. checks.py auto-renumbers these on mismatch without
+    further confirmation — the model's only job for these is correcting the
+    LEVEL/KIND when the shape guess is wrong (e.g. "1." guessed as level 3
+    should really be level 1 in this document).
+  - UNCONFIRMED ("pattern"): matched only because the text happens to look
+    like a numbering shape, with no style/outline behind it. checks.py NEVER
+    auto-edits these — only a review hint. They stay hint-only unless this
+    review step explicitly confirms them via overrides.json (which stamps
+    them "model_confirmed" and makes them auto-fixable from then on).
+  - possible_missed_headings: not even pattern-matched — no number, no
+    heading-ish style, nothing regex/style can catch — surfaced only via a
+    font signal (see below). Also only ever promoted through an explicit
+    override.
+
 Usage:
     python 26_export_review.py <workdir>
 
 Reads  <workdir>/structure.json, spec/format_spec.json
-Writes <workdir>/review_candidates.json — three full-document-order lists:
-    "headings": [{"i", "level" (current guess), "text", "style_id", "outline"}]
-        Already detected as a heading by outline/style/number-shape; the
-        level shown is only the pre-review guess (see 20_extract_structure.py).
-    "captions": [{"i", "kind", "num_raw", "text"}]
-        Already detected as a numbered 图/表 caption.
+Writes <workdir>/review_candidates.json:
+    "headings_confirmed":   [{"i", "level", "text", "style_id", "outline"}]
+        outline/style-backed; model should correct the LEVEL if the shape
+        guess is wrong, or set null if this was misclassified entirely
+        (e.g. a caption that slipped through — should already be rare after
+        the caption-style/shape guard, but double-check chapter/appendix
+        titles etc.). Auto-renumbered once level is confirmed correct.
+    "headings_unconfirmed": [{"i", "level" (guess), "text", "style_id"}]
+        pattern-only; model should confirm/correct the level to promote it
+        (auto-fixable from then on) or leave it alone (stays hint-only,
+        never auto-edited).
+    "captions_confirmed":   [{"i", "kind", "num_raw", "text"}]
+        caption-style-backed (题注/图表标题/...); num_raw null means the
+        style is confirmed but no digit was found (missing number).
+    "captions_unconfirmed": [{"i", "kind", "num_raw", "text"}]
+        matched only by the "图/表 + 数字" text shape, no caption style.
     "possible_missed_headings": [{"i", "text", "font", "suggested_level"}]
         NOT detected as a heading by regex/style/outline at all, but its
         dominant font is one the spec reserves for headings only (黑体 for
         level 1, 楷体 for level 2 — body text is always 仿宋, so either font
         showing up on an unlabeled line is a strong non-regex signal that a
-        heading's number went missing, or was never added). This list is
-        exactly the "don't rely on regex alone" net: it's how a heading with
-        no number and no heading-ish style still gets a chance to be found.
+        heading's number went missing, or was never added).
 Prints a compact summary (counts only) plus the review file path.
 
-After reading review_candidates.json, if every entry's classification
-already looks right and possible_missed_headings has nothing worth
-promoting, no further action is needed — 31_check_global.py will use the
-auto-detected levels as-is. Only write an overrides file (see
-27_apply_review.py) for the entries that need correcting or promoting.
+After reading review_candidates.json: correct any wrong levels/kinds in the
+*_confirmed lists (auto-applies once fixed). For *_unconfirmed and
+possible_missed_headings, decide case by case whether each is really a
+heading/caption that needs promoting via overrides.json, or should be left
+alone (in which case it just stays a review hint in the output — never
+silently modified). If nothing needs correcting or promoting, proceed
+straight to step 3; 31_check_global.py will use the current classification
+as-is.
 """
 import json
 import os
@@ -77,7 +105,7 @@ def _find_possible_missed_headings(records, spec):
         if r.get("region") == "toc" or r.get("is_blank"):
             continue
         if r.get("is_heading") or r.get("caption"):
-            continue  # already accounted for in the other two lists
+            continue  # already accounted for in the other lists
         if r.get("text_len", 0) > MAX_CANDIDATE_LEN:
             continue
         ea = r.get("eff", {}).get("east_asia")
@@ -99,41 +127,57 @@ def main():
     with open(SPEC_PATH, encoding="utf-8") as f:
         spec = json.load(f)
 
-    headings = [
-        {"i": r["i"], "level": r["level"], "text": r["text"],
-         "style_id": r.get("style_id"), "outline": r["eff"].get("outline")}
-        for r in records if r.get("region") == "body" and r.get("is_heading")
-    ]
-    captions = [
-        {"i": r["i"], "kind": r["caption"]["kind"],
-         "num_raw": r["caption"]["num_raw"], "text": r["text"]}
-        for r in records if r.get("region") == "body" and r.get("caption")
-    ]
+    headings_confirmed, headings_unconfirmed = [], []
+    for r in records:
+        if r.get("region") != "body" or not r.get("is_heading"):
+            continue
+        entry = {"i": r["i"], "level": r["level"], "text": r["text"],
+                 "style_id": r.get("style_id"), "outline": r["eff"].get("outline")}
+        if r.get("level_source") == "pattern":
+            headings_unconfirmed.append(entry)
+        else:
+            headings_confirmed.append(entry)
+
+    captions_confirmed, captions_unconfirmed = [], []
+    for r in records:
+        if r.get("region") != "body" or not r.get("caption"):
+            continue
+        cap = r["caption"]
+        entry = {"i": r["i"], "kind": cap["kind"], "num_raw": cap["num_raw"], "text": r["text"]}
+        if cap.get("source") == "pattern":
+            captions_unconfirmed.append(entry)
+        else:
+            captions_confirmed.append(entry)
+
     possible_missed = _find_possible_missed_headings(records, spec)
 
     out_path = os.path.join(workdir, "review_candidates.json")
     with open(out_path, "w", encoding="utf-8") as f:
-        json.dump({"headings": headings, "captions": captions,
-                  "possible_missed_headings": possible_missed}, f,
-                  ensure_ascii=False, indent=1)
+        json.dump({
+            "headings_confirmed": headings_confirmed,
+            "headings_unconfirmed": headings_unconfirmed,
+            "captions_confirmed": captions_confirmed,
+            "captions_unconfirmed": captions_unconfirmed,
+            "possible_missed_headings": possible_missed,
+        }, f, ensure_ascii=False, indent=1)
 
     print(json.dumps({
         "status": "ok",
-        "n_headings": len(headings),
-        "n_captions": len(captions),
+        "n_headings_confirmed": len(headings_confirmed),
+        "n_headings_unconfirmed": len(headings_unconfirmed),
+        "n_captions_confirmed": len(captions_confirmed),
+        "n_captions_unconfirmed": len(captions_unconfirmed),
         "n_possible_missed_headings": len(possible_missed),
         "review_candidates": out_path,
-        "next_step": ("Read review_candidates.json in full (it is small — "
-                       "headings/captions/possible_missed_headings only, not "
-                       "the whole document). For 'headings'/'captions', judge "
-                       "each entry's level/kind from CONTEXT (numbering "
-                       "sequence, nesting, surrounding headings). For "
-                       "'possible_missed_headings', decide whether each really "
-                       "is a heading that lost its number (promote it) or just "
-                       "emphasized body text (leave it alone). Write any "
-                       "corrections to overrides.json and run "
-                       "27_apply_review.py before checking format; if nothing "
-                       "needs correcting, proceed straight to step 3."),
+        "next_step": ("Read review_candidates.json in full (it is small). "
+                       "*_confirmed: correct level/kind from CONTEXT if the "
+                       "shape guess is wrong (auto-applies once corrected). "
+                       "*_unconfirmed and possible_missed_headings: decide "
+                       "per entry whether to promote it via overrides.json "
+                       "(never modified otherwise -- stays a review hint). "
+                       "Then run 27_apply_review.py before checking format; "
+                       "if nothing needs correcting, proceed straight to "
+                       "step 3."),
     }, ensure_ascii=False))
 
 

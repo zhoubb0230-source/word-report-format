@@ -85,6 +85,16 @@
   "first_line_chars": 200,
   "source": "正文 仿宋 三号 首行缩进2字符"
  },
+ "table_body": {
+  "east_asia": "仿宋",
+  "east_asia_match": [
+   "仿宋",
+   "FangSong",
+   "仿宋_GB2312"
+  ],
+  "size_hp": 28,
+  "source": "表格内容 仿宋 14磅（仅校验字体字号，不动缩进/行距）"
+ },
  "page_number": {
   "ascii": "Times New Roman",
   "size_hp": 24,
@@ -98,10 +108,20 @@
    "FangSong",
    "仿宋_GB2312"
   ],
-  "size_hp": 32,
+  "size_hp": 28,
   "max_level": 3,
-  "source": "目录：仿宋 三号；不超过三级标题（层级为提示项，字体字号可自动修正）",
+  "indent_chars_by_level": {
+   "1": 0,
+   "2": 200,
+   "3": 400
+  },
+  "source": "目录：仿宋 14磅；一级不缩进/二级缩进2字符/三级缩进4字符（leftChars 0/200/400）；不超过三级标题",
   "hint_only": true
+ },
+ "caption_format": {
+  "jc": "center",
+  "no_indent": true,
+  "source": "图表标题 居中 无任何缩进（首行/左/右全部清零）"
  },
  "cover": {
   "required_fields": [

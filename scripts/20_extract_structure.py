@@ -36,10 +36,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
 from docxcommon import (
     qn, parse_xml, unzip_docx, iter_body_paragraphs, para_text, in_table,
     StyleResolver, read_ppr, read_rpr, get_pPr, get_style_id, get_mark_rpr,
-    iter_text_runs, run_effective_rpr,
+    iter_text_runs, run_effective_rpr, load_numbering_levels, INDENT_KEYS,
 )
 from headings import (
     RE_CAPTION, RE_TOCTITLE, infer_heading_level, parse_leading_label,
+    looks_like_caption_style, caption_kind_from_style, toc_level_from_style,
 )
 
 
@@ -107,6 +108,10 @@ def main():
     styles_root = parse_xml(styles_path).getroot() if os.path.exists(styles_path) else None
     resolver = StyleResolver(styles_root)
 
+    numbering_path = os.path.join(unpack, "word", "numbering.xml")
+    numbering_root = parse_xml(numbering_path).getroot() if os.path.exists(numbering_path) else None
+    numbering_levels = load_numbering_levels(numbering_root)
+
     # ---- page setup (first sectPr) ----
     page_setup = None
     body = doc_root.find(qn("w:body"))
@@ -139,26 +144,74 @@ def main():
         text = para_text(p)
         ea, asc, sz = dominant_run_props(p, rpr)
 
+        # Automatic list numbering (w:numPr, possibly inherited from the style
+        # chain). numId "0" is the explicit "no numbering" override. When a
+        # paragraph IS auto-numbered, its visible number ("一、") is generated
+        # by Word and does NOT appear in the text, and its indent frequently
+        # comes from the numbering LEVEL definition rather than the paragraph.
+        # Pull that level's indent in as a fallback so the effective indent we
+        # judge/clear reflects what the reader actually sees.
+        num_id = ppr.get("num_id")
+        auto_num = bool(num_id and num_id != "0")
+        if auto_num:
+            try:
+                ilvl = int(ppr.get("ilvl") or 0)
+            except ValueError:
+                ilvl = 0
+            lvl_ppr = numbering_levels.get(num_id, {}).get(ilvl, {})
+            for k in INDENT_KEYS:
+                if ppr.get(k) is None and lvl_ppr.get(k) is not None:
+                    ppr[k] = lvl_ppr[k]
+
         is_blank = not text.strip()
         is_toc = bool(sid and sid.lower().startswith("toc")) or has_toc_field(p) or in_toc_sdt(p)
         is_toctitle = bool(RE_TOCTITLE.match(text))
+        toc_level = toc_level_from_style(sid, resolver) if (is_toc and not is_toctitle) else None
 
         outline = ppr.get("outline")
         level = None
+        level_source = None
         if not is_blank and not is_toc and not is_toctitle:
-            level = infer_heading_level(sid, outline, text, resolver)
+            level, level_source = infer_heading_level(sid, outline, text, resolver)
         num_raw = parse_leading_label(text) if level else None
 
         caption = None
         if not is_blank and not is_toc and not is_toctitle and level is None:
             mc = RE_CAPTION.match(text)
+            style_says_caption = looks_like_caption_style(sid, resolver)
             if mc:
                 rest = mc.group(3).strip()
                 caption = {
                     "kind": "figure" if mc.group(1) == "图" else "table",
                     "num_raw": mc.group(2),
                     "has_content": bool(rest),
+                    "source": "style" if style_says_caption else "pattern",
                 }
+            elif style_says_caption:
+                # Caption style confirmed (题注/图标题/表标题/...), but the text
+                # does not match the "图/表 + 数字" shape -- either it starts
+                # with 图/表 yet has no digit, OR it carries no 图/表 prefix at
+                # all (e.g. a "表标题"-styled line reading just "设备清单").
+                # Either way the paragraph IS a caption whose number is missing,
+                # not merely unrecognized, so it is kept as a caption record
+                # (num_raw=None) rather than dropped -- continuity() then
+                # auto-inserts the correct 图N/表N number (confirmed captions
+                # are auto-fixable). The kind comes from the 图/表 prefix when
+                # present, else from the style name.
+                first = text[:1]
+                if first in ("图", "表"):
+                    kind = "figure" if first == "图" else "table"
+                    content = text[1:].strip()
+                else:
+                    kind = caption_kind_from_style(sid, resolver)
+                    content = text.strip()
+                if kind:
+                    caption = {
+                        "kind": kind,
+                        "num_raw": None,
+                        "has_content": bool(content),
+                        "source": "style",
+                    }
 
         rec = {
             "i": i,
@@ -167,8 +220,11 @@ def main():
             "text_len": len(text),
             "is_blank": is_blank,
             "is_toc": is_toc or is_toctitle,
+            "toc_level": toc_level,
+            "auto_num": auto_num,
             "is_heading": level is not None,
             "level": level,
+            "level_source": level_source,
             "num_raw": num_raw,
             "caption": caption,
             "in_table": in_table(p),
@@ -179,6 +235,8 @@ def main():
                 "first_line": ppr.get("first_line"),
                 "left_chars": ppr.get("left_chars"), "left": ppr.get("left"),
                 "start_chars": ppr.get("start_chars"), "start": ppr.get("start"),
+                "right_chars": ppr.get("right_chars"), "right": ppr.get("right"),
+                "end_chars": ppr.get("end_chars"), "end": ppr.get("end"),
                 "hanging_chars": ppr.get("hanging_chars"), "hanging": ppr.get("hanging"),
                 "jc": ppr.get("jc"), "outline": outline,
             },
@@ -234,7 +292,9 @@ def main():
         },
         "blank": sum(1 for r in records if r["is_blank"]),
         "headings": sum(1 for r in records if r["is_heading"]),
+        "headings_unconfirmed": sum(1 for r in records if r["is_heading"] and r["level_source"] == "pattern"),
         "captions": sum(1 for r in records if r["caption"]),
+        "captions_unconfirmed": sum(1 for r in records if r["caption"] and r["caption"].get("source") == "pattern"),
         "n_shards": len(shard_files),
         "shard_dir": os.path.abspath(shard_dir),
         "shard_files": shard_files,

@@ -32,6 +32,17 @@ from docxcommon import (qn, parse_xml, unzip_docx, rezip_docx,
 from commentwriter import CommentWriter
 from headings import ANY_LABEL_RE
 
+SPEC_PATH = os.path.join(os.path.dirname(__file__), "..", "spec", "format_spec.json")
+
+# Paragraph styles that format the AUTO-GENERATED table-of-contents entries.
+# Word regenerates these paragraphs from their style (not from direct
+# formatting) whenever the TOC field refreshes — and we set updateFields=true
+# so it refreshes on open — so the only way to make the TOC font/size/indent
+# actually stick is to patch the styles themselves, not just the current
+# entry runs.
+RE_TOC_STYLE_ID = re.compile(r"^toc\s*\d+$", re.IGNORECASE)
+RE_TOC_STYLE_NAME = re.compile(r"^(?:toc|目录)\s*\d+$", re.IGNORECASE)
+
 # Level-independent: whatever leading enumeration label a heading currently
 # has (regardless of numeral system / punctuation, and regardless of whether
 # it matches the shape its assigned level "should" use) gets stripped and
@@ -142,7 +153,8 @@ def _set_line_exact(pPr, line_twips):
             del sp.attrib[qn(a)]
 
 
-def _set_first_line_and_clear_left(pPr, first_line_chars, clear_left):
+def _set_first_line_and_clear_left(pPr, first_line_chars, clear_left, clear_right=False,
+                                   set_left_chars=None):
     ind = _get_or_make(pPr, "w:ind")
     if first_line_chars is not None:
         ind.set(qn("w:firstLineChars"), str(first_line_chars))
@@ -150,8 +162,37 @@ def _set_first_line_and_clear_left(pPr, first_line_chars, clear_left):
         for a in ("w:firstLine", "w:hanging", "w:hangingChars"):
             if ind.get(qn(a)) is not None:
                 del ind.attrib[qn(a)]
-    if clear_left:
-        for a in ("w:leftChars", "w:left", "w:startChars", "w:start"):
+    if set_left_chars is not None:
+        # Set the left indent to a SPECIFIC character count (TOC per-level
+        # indent: 0/200/400). leftChars governs (char-based, East-Asian aware);
+        # the absolute w:left is zeroed and the w:start synonyms dropped so
+        # nothing overrides it.
+        ind.set(qn("w:leftChars"), str(set_left_chars))
+        ind.set(qn("w:left"), "0")
+        for a in ("w:startChars", "w:start"):
+            if ind.get(qn(a)) is not None:
+                del ind.attrib[qn(a)]
+    elif clear_left:
+        # Force the left indent to 0 rather than merely deleting the direct
+        # attribute: the indent we need to override is frequently INHERITED
+        # from the paragraph style (a title style, or the TOC1/2/3 styles),
+        # and deleting a direct attribute that isn't there leaves the style's
+        # indent in effect. An explicit direct 0 wins over the inherited value.
+        # The w:start/w:startChars synonyms are removed so they can't re-supply
+        # a non-zero left indent alongside our 0.
+        ind.set(qn("w:leftChars"), "0")
+        ind.set(qn("w:left"), "0")
+        for a in ("w:startChars", "w:start"):
+            if ind.get(qn(a)) is not None:
+                del ind.attrib[qn(a)]
+    if clear_right:
+        # Same reasoning for the right indent. Zeroing this (title/TOC only) is
+        # what makes jc=center actually center on the full page width instead
+        # of the width left after an un-cleared (often style-inherited) right
+        # indent narrows it asymmetrically.
+        ind.set(qn("w:rightChars"), "0")
+        ind.set(qn("w:right"), "0")
+        for a in ("w:endChars", "w:end"):
             if ind.get(qn(a)) is not None:
                 del ind.attrib[qn(a)]
 
@@ -180,8 +221,29 @@ def _replace_leading(p, strip_re, new_prefix):
     return True
 
 
+def _prepend_text(p, prefix):
+    """Insert `prefix` at the very start of a paragraph's text without
+    disturbing existing runs. Used to ADD a caption number (\u56feN/\u8868N) to a
+    caption-styled paragraph that has no leading \u56fe/\u8868 label to replace."""
+    ts = [t for t in p.iter(qn("w:t"))]
+    if ts:
+        ts[0].text = prefix + (ts[0].text or "")
+        ts[0].set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        return True
+    # No text runs at all: create a minimal run carrying the number.
+    r = etree.SubElement(p, qn("w:r"))
+    t = etree.SubElement(r, qn("w:t"))
+    t.text = prefix
+    t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    return True
+
+
 def _apply_renumber_caption(p, fix):
     kname = "\u56fe" if fix.get("kind") == "figure" else "\u8868"
+    if fix.get("insert"):
+        # The caption had no \u56fe/\u8868+\u6570\u5b57 label to replace -- add one (with a
+        # trailing space before the existing content).
+        return _prepend_text(p, kname + str(fix["new_num"]) + " ")
     new_prefix = kname + str(fix["new_num"])
     return _replace_leading(p, STRIP_CAPTION, new_prefix)
 
@@ -206,6 +268,58 @@ def _apply_section(doc_root, setmar):
 # ---------------------------------------------------------------------------
 # settings.xml : force TOC field refresh on open
 # ---------------------------------------------------------------------------
+def _toc_style_level(sid, name):
+    """Trailing digit of a TOC style id/name ('TOC1'/'toc 2') -> its level."""
+    m = re.search(r"(?:toc|目录)\s*([1-9])", sid + " " + name, re.IGNORECASE)
+    return int(m.group(1)) if m else None
+
+
+def _patch_toc_styles(pkg_dir, toc_spec):
+    """Force the TOC entry styles (toc 1..N) to the spec's font/size and the
+    per-level indent (一级0/二级2字符/三级4字符), so a REFRESHED TOC renders
+    per spec. Returns the number of styles patched. No-op when styles.xml or
+    the toc spec is missing."""
+    if not toc_spec or not toc_spec.get("east_asia") or not toc_spec.get("size_hp"):
+        return 0
+    path = os.path.join(pkg_dir, "word", "styles.xml")
+    if not os.path.exists(path):
+        return 0
+    tree = parse_xml(path)
+    root = tree.getroot()
+    ea = toc_spec["east_asia"]
+    sz = str(toc_spec["size_hp"])
+    by_level = toc_spec.get("indent_chars_by_level") or {}
+    patched = 0
+    for st in root.findall(qn("w:style")):
+        if st.get(qn("w:type")) != "paragraph":
+            continue
+        sid = st.get(qn("w:styleId")) or ""
+        nm_el = st.find(qn("w:name"))
+        name = (nm_el.get(qn("w:val")) if nm_el is not None else "") or ""
+        if not (RE_TOC_STYLE_ID.match(sid) or RE_TOC_STYLE_NAME.match(name)):
+            continue
+        # rPr: east-asian font + size
+        rpr = _get_or_make(st, "w:rPr", before_tags=())
+        _set_fonts(rpr, east_asia=ea)
+        _set_size(rpr, int(sz))
+        # pPr: left indent per this style's level; no first-line/hanging indent
+        lvl = _toc_style_level(sid, name)
+        want_left = by_level.get(str(lvl), 0) if (lvl is not None) else 0
+        ppr = _get_or_make(st, "w:pPr", before_tags=("w:rPr",))
+        ind = _get_or_make(ppr, "w:ind")
+        ind.set(qn("w:leftChars"), str(want_left))
+        ind.set(qn("w:left"), "0")
+        for a in ("w:firstLineChars", "w:firstLine"):
+            ind.set(qn(a), "0")
+        for a in ("w:startChars", "w:start", "w:hanging", "w:hangingChars"):
+            if ind.get(qn(a)) is not None:
+                del ind.attrib[qn(a)]
+        patched += 1
+    if patched:
+        tree.write(path, xml_declaration=True, encoding="UTF-8", standalone=True)
+    return patched
+
+
 def _set_update_fields(pkg_dir):
     path = os.path.join(pkg_dir, "word", "settings.xml")
     if not os.path.exists(path):
@@ -269,10 +383,14 @@ def main():
             pPr = get_pPr(p)
             if fix.get("set_line_exact") is not None:
                 _set_line_exact(pPr, fix["set_line_exact"])
-            if fix.get("set_first_line_chars") is not None or fix.get("clear_left_indent"):
+            if (fix.get("set_first_line_chars") is not None
+                    or fix.get("clear_left_indent") or fix.get("clear_right_indent")
+                    or fix.get("set_left_chars") is not None):
                 _set_first_line_and_clear_left(
                     pPr, fix.get("set_first_line_chars"),
-                    bool(fix.get("clear_left_indent")))
+                    bool(fix.get("clear_left_indent")),
+                    bool(fix.get("clear_right_indent")),
+                    fix.get("set_left_chars"))
             if fix.get("set_jc") is not None:
                 _set_jc(pPr, fix["set_jc"])
             applied["format"] += 1
@@ -298,6 +416,17 @@ def main():
             applied["comments"] += 1
 
     cw.flush()
+
+    # Patch the TOC entry styles so a refreshed TOC keeps the spec font/size
+    # and no indent (the direct formatting applied above is otherwise wiped
+    # when Word rebuilds the field on open).
+    try:
+        with open(SPEC_PATH, encoding="utf-8") as f:
+            _spec = json.load(f)
+        applied["toc_styles"] = _patch_toc_styles(out_pkg, _spec.get("toc"))
+    except (OSError, ValueError):
+        applied["toc_styles"] = 0
+
     _set_update_fields(out_pkg)
 
     tree.write(doc_path, xml_declaration=True, encoding="UTF-8", standalone=True)

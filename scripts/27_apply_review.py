@@ -17,6 +17,13 @@ matching cannot see it; 26_export_review.py's possible_missed_headings list,
 built from font signals instead, is one way to find candidates worth
 promoting here, but any real para_index in the document may be targeted).
 
+Every heading/caption this script touches is stamped level_source /
+caption["source"] = "model_confirmed". That matters downstream: checks.py's
+continuity() only ever auto-renumbers confirmed entries (outline/style/
+model_confirmed) — a "pattern"-only entry (matched a numbering shape with no
+style/outline backing) is NEVER auto-edited, only hint-flagged, until this
+script's explicit "model_confirmed" stamp promotes it.
+
 Usage:
     python 27_apply_review.py <workdir> <overrides.json>
 
@@ -141,10 +148,16 @@ def main():
         if v is None:
             r["is_heading"] = False
             r["level"] = None
+            r["level_source"] = None
             r["num_raw"] = None
         else:
             r["is_heading"] = True
             r["level"] = v
+            # The model just explicitly reviewed this paragraph with full
+            # document context — that is strictly more reliable than a bare
+            # style/outline match, so it is auto-fixable from here on
+            # (continuity() only ever hint-flags "pattern"-sourced entries).
+            r["level_source"] = "model_confirmed"
             r["num_raw"] = parse_leading_label(_full_text(r))
 
     for k, v in captions_ov.items():
@@ -158,6 +171,7 @@ def main():
                 "kind": v,
                 "num_raw": mc.group(2) if mc else None,
                 "has_content": bool(rest),
+                "source": "model_confirmed",
             }
 
     _retag_regions(records)

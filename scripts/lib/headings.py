@@ -90,7 +90,14 @@ CAPTION_STYLE_HINTS = ("题注", "caption", "图表标题", "表格标题",
 # between the ORIGINAL punctuation/numeral system and what the (possibly
 # model-corrected) level requires can still be found and replaced wholesale.
 #
-# The THIRD alternative handles ordinals with NO punctuation, separated from
+# The FIRST alternative handles multi-level dotted numbers ("1.1", "1.1.1",
+# "2.3", optionally with a trailing dot) which the single-dot alternative below
+# deliberately rejects (its (?!\d) guard fails on "1.1"). A confirmed heading
+# numbered "1.1" is a real, selectable ordinal that must be renumbered to the
+# level's spec token (a level-2 "1.1  目标…" -> "（一）目标…"), not treated as
+# "no number".
+# The (later) whitespace alternative handles ordinals with NO punctuation,
+# separated from
 # the title only by whitespace — "5 项目运行管理情况", "2\t背景", "一 概述".
 # It is deliberately limited to a 1–2 digit arabic number (or a CN numeral),
 # so a title that merely STARTS with a year or long number ("2024 年度总结")
@@ -102,7 +109,8 @@ CAPTION_STYLE_HINTS = ("题注", "caption", "图表标题", "表格标题",
 # "5 " in ordinary body text can't turn that paragraph into a heading.
 ANY_LABEL_RE = re.compile(
     r"^(?:"
-    r"(?:[%s]+|\d{1,4})[、.．](?!\d)"
+    r"(?:\d+[.．])+\d+[.．]?[ \t　]*"
+    r"|(?:[%s]+|\d{1,4})[、.．](?!\d)"
     r"|[（(]\s*(?:[%s]+|\d{1,3})\s*[）)]"
     r"|(?:[%s]+|\d{1,2})[ \t　]+"
     r")" % (CN_NUM, CN_NUM, CN_NUM)

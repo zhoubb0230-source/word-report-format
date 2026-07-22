@@ -54,6 +54,10 @@ RE_L4 = re.compile(r"^[（(]\s*(\d{1,2})\s*[）)]")        # （4）
 RE_CAPTION = re.compile(r"^\s*(图|表)\s*([0-9]+(?:[-\.–][0-9]+)?)(.*)$")
 RE_TOCTITLE = re.compile(r"^\s*目\s*录\s*$")            # 目录 / 目 录
 
+# TOC entry level from its style ("TOC1"/"toc 2"/"目录 3"): the trailing
+# digit is the level, used to pick that level's target indent.
+_TOC_LVL_RE = re.compile(r"(?:toc|目录)\s*([1-9])", re.I)
+
 # --- level number carried by a heading STYLE NAME -------------------------
 # "标题 1" / "Heading 1" / "一级标题" / "1级标题" all state the level
 # explicitly. When a heading style says which level it is, that is far more
@@ -82,14 +86,26 @@ CAPTION_STYLE_HINTS = ("题注", "caption", "图表标题", "表格标题",
                        "图标题", "表标题", "图题", "表题")
 
 # --- level-independent leading-label matcher --------------------------------
-# Any of the four canonical shapes, in either numeral system, so a mismatch
+# Any of the canonical shapes, in either numeral system, so a mismatch
 # between the ORIGINAL punctuation/numeral system and what the (possibly
 # model-corrected) level requires can still be found and replaced wholesale.
+#
+# The THIRD alternative handles ordinals with NO punctuation, separated from
+# the title only by whitespace — "5 项目运行管理情况", "2\t背景", "一 概述".
+# It is deliberately limited to a 1–2 digit arabic number (or a CN numeral),
+# so a title that merely STARTS with a year or long number ("2024 年度总结")
+# is NOT mistaken for an ordinal — 2024 is four digits and can never match.
+# The trailing whitespace is consumed so replacing the ordinal leaves clean
+# text ("5 项目…" -> "二、项目…", not "二、 项目…"). This matcher only ever
+# feeds ordinal parsing / the renumber text-strip of an ALREADY-confirmed
+# heading, never the decision of whether a paragraph is a heading, so a bare
+# "5 " in ordinary body text can't turn that paragraph into a heading.
 ANY_LABEL_RE = re.compile(
     r"^(?:"
     r"(?:[%s]+|\d{1,4})[、.．](?!\d)"
     r"|[（(]\s*(?:[%s]+|\d{1,3})\s*[）)]"
-    r")" % (CN_NUM, CN_NUM)
+    r"|(?:[%s]+|\d{1,2})[ \t　]+"
+    r")" % (CN_NUM, CN_NUM, CN_NUM)
 )
 
 
@@ -118,6 +134,14 @@ def looks_like_caption_style(style_id, resolver):
     sid, name = _style_name(style_id, resolver)
     hint = (sid + " " + name).lower()
     return any(h.lower() in hint for h in CAPTION_STYLE_HINTS)
+
+
+def toc_level_from_style(style_id, resolver):
+    """Level (1..N) of a TOC entry from its style id/name ('TOC1'/'toc 2'/
+    '目录 3'), or None if it can't be determined."""
+    sid, name = _style_name(style_id, resolver)
+    m = _TOC_LVL_RE.search(sid + " " + name)
+    return int(m.group(1)) if m else None
 
 
 def caption_kind_from_style(style_id, resolver):

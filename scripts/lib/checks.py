@@ -87,12 +87,11 @@ def check_paragraph(rec, spec):
         # 域代码自身的制表位/悬挂缩进结构。
         return _check_toc(rec, spec)
 
-    # Caption paragraphs (图.../表...) have NO formatting rule in the spec, so we
-    # do not touch their font/indent/line spacing here. They are handled only by
-    # continuity (renumber) and the content-presence hint — this avoids inventing
-    # rules the spec does not state.
+    # Caption paragraphs (图.../表...): center them and remove all indent
+    # (spec.caption_format). Font/size are left alone (the spec states no
+    # caption font rule). Numbering is handled separately by continuity().
     if rec.get("caption"):
-        return None
+        return _check_caption_format(rec, spec)
 
     # Table-cell content has its OWN font/size rule (仿宋 14磅), distinct from
     # ordinary body text (仿宋 三号). Without this a cell paragraph would be
@@ -177,20 +176,60 @@ def _check_table_body(rec, spec):
     return _mk_format(rec["i"], sets, violations)
 
 
+def _check_caption_format(rec, spec):
+    """图表标题：居中、无任何缩进（首行/左/右全部清零）。字体字号规范未定义，不动。"""
+    cf = spec.get("caption_format")
+    if not cf:
+        return None
+    eff = rec["eff"]
+    sets = {"set_east_asia": None, "set_ascii": None, "set_size_hp": None,
+            "set_line_exact": None, "set_first_line_chars": None,
+            "clear_left_indent": False, "clear_right_indent": False, "set_jc": None}
+    violations = []
+    want_jc = cf.get("jc")
+    if want_jc and eff.get("jc") != want_jc:
+        sets["set_jc"] = want_jc
+        violations.append("图表标题应居中")
+    if cf.get("no_indent"):
+        _check_no_indent(eff, sets, violations, "图表标题")
+    return _mk_format(rec["i"], sets, violations)
+
+
 def _check_toc(rec, spec):
     t = spec.get("toc") or {}
     if not t.get("east_asia") or not t.get("size_hp"):
         return None  # spec not configured for toc fonts; nothing to check
     eff = rec["eff"]
     sets = {"set_east_asia": None, "set_ascii": None, "set_size_hp": None,
-            "set_line_exact": None, "set_first_line_chars": None,
+            "set_line_exact": None, "set_first_line_chars": None, "set_left_chars": None,
             "clear_left_indent": False, "clear_right_indent": False, "set_jc": None}
     violations = []
     _check_font_size(eff, t, sets, violations, label="目录")
-    # 目录条目不需要缩进。只清 w:ind（首行/左/右），不碰 w:tabs（TOC 域自身
-    # 用来对齐点线号+页码的制表位，与 w:ind 是两套独立机制，清 w:ind 不会
-    # 破坏它）。
-    _check_no_indent(eff, sets, violations, "目录")
+    # 目录按级缩进：一级 0 / 二级 2 字符 / 三级 4 字符（leftChars 0/200/400）。
+    # 只动 w:ind（首行/左/右），不碰 w:tabs（TOC 域自身用来对齐点线号+页码的
+    # 制表位，与 w:ind 是两套独立机制，清 w:ind 不会破坏它）。
+    by_level = t.get("indent_chars_by_level") or {}
+    lvl = rec.get("toc_level")
+    want_left = by_level.get(str(lvl)) if (lvl is not None) else None
+    if want_left is None:
+        want_left = 0  # 级别未知时按不缩进的安全默认
+    # 首行/悬挂缩进一律清零
+    if any(eff.get(k) for k in ("first_line_chars", "first_line", "hanging_chars", "hanging")):
+        sets["set_first_line_chars"] = 0
+        violations.append("目录不应有首行缩进")
+    # 左缩进设为该级目标值（字符数）
+    cur_left_chars = eff.get("left_chars") or 0
+    has_abs_left = bool(eff.get("left") or eff.get("start") or eff.get("start_chars"))
+    if cur_left_chars != want_left or has_abs_left:
+        sets["set_left_chars"] = want_left
+        if want_left:
+            violations.append("目录%s级应缩进%d字符" % (lvl, want_left // 100))
+        else:
+            violations.append("目录一级不应缩进")
+    # 右缩进清零
+    if any(eff.get(k) for k in ("right_chars", "right", "end_chars", "end")):
+        sets["clear_right_indent"] = True
+        violations.append("目录不应有右缩进")
     return _mk_format(rec["i"], sets, violations)
 
 
@@ -225,13 +264,19 @@ def _check_first_line(eff, spec_entry, sets, violations):
     if eff.get("first_line_chars") != want:
         sets["set_first_line_chars"] = want
         violations.append("\u9996\u884c\u7f29\u8fdb\u5e94\u4e3a2\u5b57\u7b26")
-    # left indent must NOT be stacked on top of first-line indent
+    # left/right indent must NOT be stacked on top of the first-line indent:
+    # an existing left indent makes the first line indent by (left + 2 chars),
+    # i.e. more than the required 2 characters, so any left/right indent is
+    # zeroed and only the 2-char first-line indent is kept.
     if any(eff.get(k) for k in ("left_chars", "left", "start_chars", "start")):
         sets["clear_left_indent"] = True
         if "\u9996\u884c\u7f29\u8fdb\u5e94\u4e3a2\u5b57\u7b26" not in violations:
             violations.append("\u5e94\u4ec5\u4fdd\u7559\u9996\u884c\u7f29\u8fdb\uff0c\u9700\u6e05\u9664\u5de6\u7f29\u8fdb")
         else:
             violations.append("\u540c\u65f6\u9700\u6e05\u9664\u5de6\u7f29\u8fdb\uff08\u4e0d\u5e94\u4e0e\u9996\u884c\u7f29\u8fdb\u53e0\u52a0\uff09")
+    if any(eff.get(k) for k in ("right_chars", "right", "end_chars", "end")):
+        sets["clear_right_indent"] = True
+        violations.append("\u9700\u6e05\u9664\u53f3\u7f29\u8fdb")
 
 
 def _mk_format(i, sets, violations):
@@ -340,7 +385,7 @@ def continuity(records, spec):
                 "para_index": r["i"], "op": "renumber_heading", "level": lvl,
                 "new_token": expected_token,
                 "rule_id": "heading.continuity",
-                "rule_text": "%d级标题序号格式或连续性有误，应为“%s”（原为“%s”）" % (lvl, expected_token, raw),
+                "rule_text": "%d级标题序号格式或连续性有误，应为“%s”（原为“%s”）" % (lvl, expected_token, raw.rstrip()),
                 "comment": True,
             })
             # keep counters at expected (we renumbered to expected)

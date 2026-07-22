@@ -40,7 +40,7 @@ from docxcommon import (
 )
 from headings import (
     RE_CAPTION, RE_TOCTITLE, infer_heading_level, parse_leading_label,
-    looks_like_caption_style, caption_kind_from_style,
+    looks_like_caption_style, caption_kind_from_style, toc_level_from_style,
 )
 
 
@@ -143,6 +143,7 @@ def main():
         is_blank = not text.strip()
         is_toc = bool(sid and sid.lower().startswith("toc")) or has_toc_field(p) or in_toc_sdt(p)
         is_toctitle = bool(RE_TOCTITLE.match(text))
+        toc_level = toc_level_from_style(sid, resolver) if (is_toc and not is_toctitle) else None
 
         outline = ppr.get("outline")
         level = None
@@ -196,6 +197,7 @@ def main():
             "text_len": len(text),
             "is_blank": is_blank,
             "is_toc": is_toc or is_toctitle,
+            "toc_level": toc_level,
             "is_heading": level is not None,
             "level": level,
             "level_source": level_source,

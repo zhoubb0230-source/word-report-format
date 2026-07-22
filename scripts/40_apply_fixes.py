@@ -153,7 +153,8 @@ def _set_line_exact(pPr, line_twips):
             del sp.attrib[qn(a)]
 
 
-def _set_first_line_and_clear_left(pPr, first_line_chars, clear_left, clear_right=False):
+def _set_first_line_and_clear_left(pPr, first_line_chars, clear_left, clear_right=False,
+                                   set_left_chars=None):
     ind = _get_or_make(pPr, "w:ind")
     if first_line_chars is not None:
         ind.set(qn("w:firstLineChars"), str(first_line_chars))
@@ -161,7 +162,17 @@ def _set_first_line_and_clear_left(pPr, first_line_chars, clear_left, clear_righ
         for a in ("w:firstLine", "w:hanging", "w:hangingChars"):
             if ind.get(qn(a)) is not None:
                 del ind.attrib[qn(a)]
-    if clear_left:
+    if set_left_chars is not None:
+        # Set the left indent to a SPECIFIC character count (TOC per-level
+        # indent: 0/200/400). leftChars governs (char-based, East-Asian aware);
+        # the absolute w:left is zeroed and the w:start synonyms dropped so
+        # nothing overrides it.
+        ind.set(qn("w:leftChars"), str(set_left_chars))
+        ind.set(qn("w:left"), "0")
+        for a in ("w:startChars", "w:start"):
+            if ind.get(qn(a)) is not None:
+                del ind.attrib[qn(a)]
+    elif clear_left:
         # Force the left indent to 0 rather than merely deleting the direct
         # attribute: the indent we need to override is frequently INHERITED
         # from the paragraph style (a title style, or the TOC1/2/3 styles),
@@ -257,10 +268,17 @@ def _apply_section(doc_root, setmar):
 # ---------------------------------------------------------------------------
 # settings.xml : force TOC field refresh on open
 # ---------------------------------------------------------------------------
+def _toc_style_level(sid, name):
+    """Trailing digit of a TOC style id/name ('TOC1'/'toc 2') -> its level."""
+    m = re.search(r"(?:toc|目录)\s*([1-9])", sid + " " + name, re.IGNORECASE)
+    return int(m.group(1)) if m else None
+
+
 def _patch_toc_styles(pkg_dir, toc_spec):
-    """Force the TOC entry styles (toc 1..N) to the spec's font/size and no
-    indent, so a refreshed TOC renders per spec. Returns the number of styles
-    patched. No-op when styles.xml or the toc spec is missing."""
+    """Force the TOC entry styles (toc 1..N) to the spec's font/size and the
+    per-level indent (一级0/二级2字符/三级4字符), so a REFRESHED TOC renders
+    per spec. Returns the number of styles patched. No-op when styles.xml or
+    the toc spec is missing."""
     if not toc_spec or not toc_spec.get("east_asia") or not toc_spec.get("size_hp"):
         return 0
     path = os.path.join(pkg_dir, "word", "styles.xml")
@@ -270,6 +288,7 @@ def _patch_toc_styles(pkg_dir, toc_spec):
     root = tree.getroot()
     ea = toc_spec["east_asia"]
     sz = str(toc_spec["size_hp"])
+    by_level = toc_spec.get("indent_chars_by_level") or {}
     patched = 0
     for st in root.findall(qn("w:style")):
         if st.get(qn("w:type")) != "paragraph":
@@ -283,10 +302,14 @@ def _patch_toc_styles(pkg_dir, toc_spec):
         rpr = _get_or_make(st, "w:rPr", before_tags=())
         _set_fonts(rpr, east_asia=ea)
         _set_size(rpr, int(sz))
-        # pPr: no indent at all (entries flush-left per spec)
+        # pPr: left indent per this style's level; no first-line/hanging indent
+        lvl = _toc_style_level(sid, name)
+        want_left = by_level.get(str(lvl), 0) if (lvl is not None) else 0
         ppr = _get_or_make(st, "w:pPr", before_tags=("w:rPr",))
         ind = _get_or_make(ppr, "w:ind")
-        for a in ("w:leftChars", "w:left", "w:firstLineChars", "w:firstLine"):
+        ind.set(qn("w:leftChars"), str(want_left))
+        ind.set(qn("w:left"), "0")
+        for a in ("w:firstLineChars", "w:firstLine"):
             ind.set(qn(a), "0")
         for a in ("w:startChars", "w:start", "w:hanging", "w:hangingChars"):
             if ind.get(qn(a)) is not None:
@@ -361,11 +384,13 @@ def main():
             if fix.get("set_line_exact") is not None:
                 _set_line_exact(pPr, fix["set_line_exact"])
             if (fix.get("set_first_line_chars") is not None
-                    or fix.get("clear_left_indent") or fix.get("clear_right_indent")):
+                    or fix.get("clear_left_indent") or fix.get("clear_right_indent")
+                    or fix.get("set_left_chars") is not None):
                 _set_first_line_and_clear_left(
                     pPr, fix.get("set_first_line_chars"),
                     bool(fix.get("clear_left_indent")),
-                    bool(fix.get("clear_right_indent")))
+                    bool(fix.get("clear_right_indent")),
+                    fix.get("set_left_chars"))
             if fix.get("set_jc") is not None:
                 _set_jc(pPr, fix["set_jc"])
             applied["format"] += 1

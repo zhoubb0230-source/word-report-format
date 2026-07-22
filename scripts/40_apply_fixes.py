@@ -30,7 +30,7 @@ from lxml import etree
 from docxcommon import (qn, parse_xml, unzip_docx, rezip_docx,
                         iter_body_paragraphs)
 from commentwriter import CommentWriter
-from headings import ANY_LABEL_RE
+from headings import ANY_LABEL_RE, CAPTION_STYLE_HINTS
 
 SPEC_PATH = os.path.join(os.path.dirname(__file__), "..", "spec", "format_spec.json")
 
@@ -396,49 +396,119 @@ def _patch_toc_styles(pkg_dir, toc_spec):
     return patched
 
 
+def _style_name_is_caption(name_or_id):
+    s = (name_or_id or "").lower()
+    return any(h.lower() in s for h in CAPTION_STYLE_HINTS)
+
+
+def _unhide_number_rpr(rpr):
+    """Strip run properties that make an auto-generated number invisible:
+    a solid non-white shading (a coloured block over it), a zero font size,
+    hidden-text flags, and a white/auto text colour. Returns True if changed.
+    Only ever REMOVES hiding — the number then inherits normal formatting."""
+    if rpr is None:
+        return False
+    changed = False
+    shd = rpr.find(qn("w:shd"))
+    if shd is not None:
+        fill = (shd.get(qn("w:fill")) or "auto").lower()
+        if fill not in ("auto", "ffffff"):
+            rpr.remove(shd)
+            changed = True
+    for tag in ("w:sz", "w:szCs"):
+        el = rpr.find(qn(tag))
+        if el is not None and (el.get(qn("w:val")) or "0") == "0":
+            rpr.remove(el)
+            changed = True
+    for tag in ("w:vanish", "w:specVanish", "w:webHidden"):
+        el = rpr.find(qn(tag))
+        if el is not None and (el.get(qn("w:val")) or "true").lower() not in ("0", "false"):
+            rpr.remove(el)
+            changed = True
+    clr = rpr.find(qn("w:color"))
+    if clr is not None and (clr.get(qn("w:val")) or "").lower() in ("ffffff", "auto"):
+        rpr.remove(clr)
+        changed = True
+    return changed
+
+
+def _caption_abstract_num_ids(num_root, styles_root):
+    """abstractNumIds that drive figure/table CAPTION numbering, found three
+    ways so template variants are all covered:
+      1. a caption paragraph style (name/id like 题注/图表标题/表标题/…) whose
+         numPr → numId → abstractNum;
+      2. a numbering level whose w:pStyle points at a caption style;
+      3. a numbering level whose lvlText literally contains 图/表.
+    """
+    # styleId -> (name, numId used by that style)
+    style_name, style_numid = {}, {}
+    if styles_root is not None:
+        for st in styles_root.findall(qn("w:style")):
+            if st.get(qn("w:type")) != "paragraph":
+                continue
+            sid = st.get(qn("w:styleId"))
+            nm = st.find(qn("w:name"))
+            style_name[sid] = (nm.get(qn("w:val")) if nm is not None else "") or ""
+            npr = st.find(qn("w:pPr") + "/" + qn("w:numPr") + "/" + qn("w:numId"))
+            if npr is not None:
+                style_numid[sid] = npr.get(qn("w:val"))
+    caption_style_ids = {sid for sid, nm in style_name.items()
+                         if _style_name_is_caption((sid or "") + " " + nm)}
+
+    num2abs = {}
+    for num in num_root.findall(qn("w:num")):
+        a = num.find(qn("w:abstractNumId"))
+        if a is not None:
+            num2abs[num.get(qn("w:numId"))] = a.get(qn("w:val"))
+
+    abstracts = set()
+    for sid in caption_style_ids:                     # way 1
+        nid = style_numid.get(sid)
+        if nid and nid in num2abs:
+            abstracts.add(num2abs[nid])
+    for anum in num_root.findall(qn("w:abstractNum")):
+        aid = anum.get(qn("w:abstractNumId"))
+        for lvl in anum.findall(qn("w:lvl")):
+            ps = lvl.find(qn("w:pStyle"))
+            psid = ps.get(qn("w:val")) if ps is not None else None
+            lt = lvl.find(qn("w:lvlText"))
+            txt = (lt.get(qn("w:val")) if lt is not None else "") or ""
+            if (psid in caption_style_ids                       # way 2
+                    or _style_name_is_caption((psid or "") + " " + style_name.get(psid, ""))
+                    or "图" in txt or "表" in txt):               # way 3
+                abstracts.add(aid)
+                break
+    return abstracts
+
+
 def _clean_caption_numbering(pkg_dir):
     """Un-hide auto-generated caption numbers (图N/表N).
 
     Some templates give the caption-numbering LEVEL run properties that hide
-    the number: a solid dark shading (w:shd fill=000000 -> a black block over
-    it) and/or a zero font size (w:sz val=0). The number is really there and
-    stays continuous (auto-numbered, 方案一) -- it's just invisible. For any
-    numbering level whose lvlText produces a caption number (contains 图/表),
-    strip that hiding shading and zero size so "表1"/"图1" renders normally.
-    Returns the number of levels cleaned."""
+    the number — a solid dark shading (w:shd fill=000000, a black block over
+    it), a zero font size, hidden-text flags, or a white colour. The number is
+    really there and stays continuous (auto-numbered, 方案一); it is merely
+    invisible. Every numbering level belonging to a caption abstractNum (found
+    via caption styles / level pStyle / lvlText — see _caption_abstract_num_ids)
+    has its hiding run properties stripped so 表1/图1 renders normally. The
+    numId, num→abstractNum mapping and the styles' numPr are left untouched, so
+    Word keeps auto-numbering. Returns the number of levels cleaned."""
     path = os.path.join(pkg_dir, "word", "numbering.xml")
     if not os.path.exists(path):
         return 0
     tree = parse_xml(path)
     root = tree.getroot()
+    styles_path = os.path.join(pkg_dir, "word", "styles.xml")
+    styles_root = parse_xml(styles_path).getroot() if os.path.exists(styles_path) else None
+
+    caption_abstracts = _caption_abstract_num_ids(root, styles_root)
     cleaned = 0
-    for lvl in root.iter(qn("w:lvl")):
-        lt = lvl.find(qn("w:lvlText"))
-        txt = (lt.get(qn("w:val")) if lt is not None else "") or ""
-        if "图" not in txt and "表" not in txt:
+    for anum in root.findall(qn("w:abstractNum")):
+        if anum.get(qn("w:abstractNumId")) not in caption_abstracts:
             continue
-        rpr = lvl.find(qn("w:rPr"))
-        if rpr is None:
-            continue
-        changed = False
-        shd = rpr.find(qn("w:shd"))
-        if shd is not None:
-            fill = (shd.get(qn("w:fill")) or "auto").lower()
-            if fill not in ("auto", "ffffff"):
-                rpr.remove(shd)
-                changed = True
-        for tag in ("w:sz", "w:szCs"):
-            el = rpr.find(qn(tag))
-            if el is not None and (el.get(qn("w:val")) or "0") == "0":
-                rpr.remove(el)
-                changed = True
-        # a white/near-invisible number colour would also hide it on white
-        clr = rpr.find(qn("w:color"))
-        if clr is not None and (clr.get(qn("w:val")) or "").lower() in ("ffffff", "auto"):
-            rpr.remove(clr)
-            changed = True
-        if changed:
-            cleaned += 1
+        for lvl in anum.findall(qn("w:lvl")):
+            if _unhide_number_rpr(lvl.find(qn("w:rPr"))):
+                cleaned += 1
     if cleaned:
         tree.write(path, xml_declaration=True, encoding="UTF-8", standalone=True)
     return cleaned

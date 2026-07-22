@@ -286,12 +286,21 @@ def read_ppr(ppr):
          "right_chars": None, "right": None,
          "end_chars": None, "end": None,
          "hanging_chars": None, "hanging": None,
+         "num_id": None, "ilvl": None,
          "style_id": None}
     if ppr is None:
         return d
     ps = ppr.find(qn("w:pStyle"))
     if ps is not None:
         d["style_id"] = ps.get(qn("w:val"))
+    npr = ppr.find(qn("w:numPr"))
+    if npr is not None:
+        ni = npr.find(qn("w:numId"))
+        il = npr.find(qn("w:ilvl"))
+        if ni is not None and ni.get(qn("w:val")) is not None:
+            d["num_id"] = ni.get(qn("w:val"))
+        if il is not None and il.get(qn("w:val")) is not None:
+            d["ilvl"] = il.get(qn("w:val"))
     jc = ppr.find(qn("w:jc"))
     if jc is not None:
         d["jc"] = jc.get(qn("w:val"))
@@ -330,6 +339,42 @@ def read_ppr(ppr):
                 except ValueError:
                     d[key] = v
     return d
+
+
+def load_numbering_levels(numbering_root):
+    """Map numId -> {ilvl(int): pPr_dict} from numbering.xml, so a paragraph
+    that gets its number (and often its indent) from an automatic list can be
+    resolved. Only the per-level w:pPr is read (that's where the list's indent
+    lives). numId -> abstractNumId -> level pPr. w:lvlOverride is ignored
+    (rare; the base level's indent is a good enough signal for our purpose)."""
+    if numbering_root is None:
+        return {}
+    abstract = {}   # abstractNumId -> {ilvl: pPr_dict}
+    for anum in numbering_root.findall(qn("w:abstractNum")):
+        aid = anum.get(qn("w:abstractNumId"))
+        levels = {}
+        for lvl in anum.findall(qn("w:lvl")):
+            il = lvl.get(qn("w:ilvl"))
+            ppr_el = lvl.find(qn("w:pPr"))
+            if il is not None and ppr_el is not None:
+                try:
+                    levels[int(il)] = read_ppr(ppr_el)
+                except ValueError:
+                    pass
+        abstract[aid] = levels
+    out = {}
+    for num in numbering_root.findall(qn("w:num")):
+        nid = num.get(qn("w:numId"))
+        a = num.find(qn("w:abstractNumId"))
+        if nid is not None and a is not None:
+            out[nid] = abstract.get(a.get(qn("w:val")), {})
+    return out
+
+
+# Indentation keys shared by extraction / numbering-fallback / apply.
+INDENT_KEYS = ("first_line_chars", "first_line", "left_chars", "left",
+               "start_chars", "start", "right_chars", "right",
+               "end_chars", "end", "hanging_chars", "hanging")
 
 
 def get_pPr(p):

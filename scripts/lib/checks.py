@@ -354,6 +354,14 @@ def continuity(records, spec):
                 "comment": True,
             })
             continue
+        if r.get("auto_num"):
+            # 自动编号（Word 多级列表）：序号由 Word 生成、不在文字里，且自动
+            # 保持连续。占一个序位以便与手动编号的兄弟标题衔接，但绝不重排、
+            # 也不报“漏编号”——那个序号根本没丢，只是不在文本里（方案1）。
+            counters[lvl] += 1
+            for d in range(lvl + 1, 5):
+                counters[d] = 0
+            continue
         counters[lvl] += 1
         for d in range(lvl + 1, 5):
             counters[d] = 0
@@ -407,6 +415,10 @@ def continuity(records, spec):
                     "rule_text": "疑似%s标题（仅按“%s+数字”格式识别，未见题注样式），请人工确认是否为标题" % (kname, kname),
                     "comment": True,
                 })
+                continue
+            if r.get("auto_num"):
+                # 自动编号的图表标题（少见，但存在）：编号由 Word 生成并保持
+                # 连续，跳过——不插入也不重排（方案1）。
                 continue
             # Confirmed caption (题注/图标题/表标题/... style, or model-confirmed).
             # BOTH numbered and un-numbered (num_raw is None) confirmed captions

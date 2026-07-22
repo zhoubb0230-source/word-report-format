@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
 from docxcommon import (
     qn, parse_xml, unzip_docx, iter_body_paragraphs, para_text, in_table,
     StyleResolver, read_ppr, read_rpr, get_pPr, get_style_id, get_mark_rpr,
-    iter_text_runs, run_effective_rpr,
+    iter_text_runs, run_effective_rpr, load_numbering_levels, INDENT_KEYS,
 )
 from headings import (
     RE_CAPTION, RE_TOCTITLE, infer_heading_level, parse_leading_label,
@@ -108,6 +108,10 @@ def main():
     styles_root = parse_xml(styles_path).getroot() if os.path.exists(styles_path) else None
     resolver = StyleResolver(styles_root)
 
+    numbering_path = os.path.join(unpack, "word", "numbering.xml")
+    numbering_root = parse_xml(numbering_path).getroot() if os.path.exists(numbering_path) else None
+    numbering_levels = load_numbering_levels(numbering_root)
+
     # ---- page setup (first sectPr) ----
     page_setup = None
     body = doc_root.find(qn("w:body"))
@@ -139,6 +143,25 @@ def main():
         ppr, rpr = resolver.resolve(sid, ppr_el, mark_rpr)
         text = para_text(p)
         ea, asc, sz = dominant_run_props(p, rpr)
+
+        # Automatic list numbering (w:numPr, possibly inherited from the style
+        # chain). numId "0" is the explicit "no numbering" override. When a
+        # paragraph IS auto-numbered, its visible number ("一、") is generated
+        # by Word and does NOT appear in the text, and its indent frequently
+        # comes from the numbering LEVEL definition rather than the paragraph.
+        # Pull that level's indent in as a fallback so the effective indent we
+        # judge/clear reflects what the reader actually sees.
+        num_id = ppr.get("num_id")
+        auto_num = bool(num_id and num_id != "0")
+        if auto_num:
+            try:
+                ilvl = int(ppr.get("ilvl") or 0)
+            except ValueError:
+                ilvl = 0
+            lvl_ppr = numbering_levels.get(num_id, {}).get(ilvl, {})
+            for k in INDENT_KEYS:
+                if ppr.get(k) is None and lvl_ppr.get(k) is not None:
+                    ppr[k] = lvl_ppr[k]
 
         is_blank = not text.strip()
         is_toc = bool(sid and sid.lower().startswith("toc")) or has_toc_field(p) or in_toc_sdt(p)
@@ -198,6 +221,7 @@ def main():
             "is_blank": is_blank,
             "is_toc": is_toc or is_toctitle,
             "toc_level": toc_level,
+            "auto_num": auto_num,
             "is_heading": level is not None,
             "level": level,
             "level_source": level_source,

@@ -36,10 +36,10 @@ SPEC_PATH = os.path.join(os.path.dirname(__file__), "..", "spec", "format_spec.j
 
 # Paragraph styles that format the AUTO-GENERATED table-of-contents entries.
 # Word regenerates these paragraphs from their style (not from direct
-# formatting) whenever the TOC field refreshes — and we mark the TOC field
-# dirty so it refreshes on open — so the only way to make the TOC
-# font/size/indent actually stick is to patch the styles themselves, not just
-# the current entry runs.
+# formatting) whenever the TOC field refreshes — and we set updateFields=true
+# so it refreshes on open — so the only way to make the TOC font/size/indent
+# actually stick is to patch the styles themselves, not just the current
+# entry runs.
 RE_TOC_STYLE_ID = re.compile(r"^toc\s*\d+$", re.IGNORECASE)
 RE_TOC_STYLE_NAME = re.compile(r"^(?:toc|目录)\s*\d+$", re.IGNORECASE)
 
@@ -245,7 +245,7 @@ def _replace_leading(p, strip_re, new_prefix, residue_re=None):
     a heading numbered by "{ = 1 \\* Arabic }" — the digit lives in the field
     RESULT, not as typed text), the whole field is deleted. Otherwise Word
     would regenerate the number from the field code on the next field refresh
-    (dirty TOC / manual F9), wiping our replacement AND, because the old
+    (we set updateFields=true), wiping our replacement AND, because the old
     code collapsed all text into that field-result run, the real title text
     with it — leaving only the recomputed "1". After removing any label field,
     the remaining leading separator whitespace is trimmed and the new token is
@@ -563,45 +563,29 @@ def _clean_caption_numbering(pkg_dir):
     return cleaned
 
 
-def _disable_update_fields(pkg_dir):
-    """Ensure settings.xml does NOT carry a global updateFields=true.
+def _set_update_fields(pkg_dir):
+    """Set settings.xml <w:updateFields w:val="true"/> so Word refreshes the TOC
+    (renumbered headings + new page numbers) when the document is opened.
 
-    A document-level <w:updateFields w:val="true"/> makes Word pop the dialog
-    "该文档包含的域可能引用了其他文件。是否更新该文档中的这些域？" on EVERY open.
-    We refresh the TOC via a per-field dirty mark instead (see
-    _mark_toc_fields_dirty), which updates only the TOC without that prompt, so
-    any updateFields flag (ours from an older run, or one the template shipped)
-    is forced to false. No-op if settings.xml or the flag is absent (absent
-    already means "do not auto-update")."""
+    Trade-off (chosen deliberately): Word shows the "该文档包含的域可能引用了其他
+    文件。是否更新…" prompt once per open, and clicking 是 rebuilds the TOC to match
+    the corrected body. In Word there is no document setting that auto-refreshes
+    the TOC WITHOUT this prompt — a per-field w:dirty mark triggers the very same
+    dialog — so the only prompt-free alternative is to leave the TOC stale until
+    the user presses Ctrl+A then F9. We take the native, exact refresh here.
+    If the prompt appears for OTHER reasons (external INCLUDE/LINK/DDE fields,
+    external relationships, OLE), run scripts/diagnose_fields.py on the output."""
     path = os.path.join(pkg_dir, "word", "settings.xml")
     if not os.path.exists(path):
         return
     tree = parse_xml(path)
     root = tree.getroot()
     uf = root.find(qn("w:updateFields"))
-    if uf is not None:
-        uf.set(qn("w:val"), "false")
-        tree.write(path, xml_declaration=True, encoding="UTF-8", standalone=True)
-
-
-def _clear_field_dirty(doc_root):
-    """Remove any w:dirty flag from every field (complex begin w:fldChar and
-    simple w:fldSimple).
-
-    A dirty field makes Word prompt "该文档包含的域可能引用了其他文件。是否更新…"
-    on open, exactly like the global updateFields flag does. To guarantee ZERO
-    prompt we neither set updateFields=true NOR mark any field dirty: the TOC is
-    left with its cached result and the user refreshes it manually (Ctrl+A → F9)
-    when they want the renumbered headings / new page numbers reflected. This
-    also strips any dirty flag the source template happened to ship with.
-    Returns the count cleared."""
-    n = 0
-    dirty_attr = qn("w:dirty")
-    for el in doc_root.iter(qn("w:fldChar"), qn("w:fldSimple")):
-        if el.get(dirty_attr) is not None:
-            del el.attrib[dirty_attr]
-            n += 1
-    return n
+    if uf is None:
+        uf = etree.Element(qn("w:updateFields"))
+        root.insert(0, uf)
+    uf.set(qn("w:val"), "true")
+    tree.write(path, xml_declaration=True, encoding="UTF-8", standalone=True)
 
 
 # ---------------------------------------------------------------------------
@@ -701,12 +685,10 @@ def main():
     # shading / zero size in the caption numbering definition.
     applied["caption_num_unhidden"] = _clean_caption_numbering(out_pkg)
 
-    # Guarantee NO "update fields?" prompt on open: neither the global
-    # updateFields flag nor any per-field dirty mark is left set (both trigger
-    # the "该文档包含的域可能引用了其他文件…" dialog). The TOC keeps its cached
-    # result; the user refreshes it manually (Ctrl+A → F9) when needed.
-    applied["field_dirty_cleared"] = _clear_field_dirty(root)
-    _disable_update_fields(out_pkg)
+    # Refresh the TOC on open (renumbered headings + page numbers) via the global
+    # updateFields flag. Word prompts once on open; clicking 是 rebuilds the TOC
+    # to match the corrected body (see _set_update_fields for the trade-off).
+    _set_update_fields(out_pkg)
 
     tree.write(doc_path, xml_declaration=True, encoding="UTF-8", standalone=True)
 

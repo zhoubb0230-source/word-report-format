@@ -30,8 +30,22 @@ Usage:
 overrides.json (write this yourself — schema is intentionally tiny):
 {
   "headings": {"<para_index>": 1|2|3|4|null, ...},
-  "captions": {"<para_index>": "figure"|"table"|null, ...}
+  "captions": {"<para_index>": "figure"|"table"|null, ...},
+  "cover":    {"<para_index>": "title"|"classification"|"field"|"other"|null, ...},
+  "cover_present": ["密级", "项目名称", "考核年份", ...]
 }
+"cover_present" (optional) is the model's semantic verdict of which required
+cover items are actually FILLED IN (not just which labels appear) — the reliable
+source for title-derived 项目名称/考核年份 and for spotting a still-placeholder
+title. When present it drives the "missing cover info" hint; when omitted, a
+deterministic baseline is used.
+The "cover" section assigns each cover paragraph its FORMATTING role (checks.py
+then applies the spec font/size for that role deterministically): "title" ->
+方正小标宋/20磅/居中, "classification" (密级·文本编号 line) -> 仿宋/16磅,
+"field" (项目名称/承担单位/…) -> 方正黑体/15磅, "other" -> leave untouched. Use
+it whenever the heuristic guess_role in review_candidates.json is wrong -- e.g.
+a 密级/文本编号 line with no key ("机密  202501323023") the keyword heuristic
+missed. null clears the override (fall back to the heuristic).
 Only list paragraphs that need correcting; omitted ones keep their
 auto-detected classification from 20_extract_structure.py. Any para_index
 that names a real paragraph in the document is accepted — this both
@@ -61,13 +75,18 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
 from headings import RE_CAPTION, parse_leading_label
 
 
+_COVER_ROLES = ("title", "classification", "field", "other")
+
+
 def _validate(overrides, records_by_i):
     if not isinstance(overrides, dict):
         raise ValueError("overrides.json must be a JSON object")
     headings = overrides.get("headings") or {}
     captions = overrides.get("captions") or {}
-    if not isinstance(headings, dict) or not isinstance(captions, dict):
-        raise ValueError("'headings' and 'captions' must be objects")
+    cover = overrides.get("cover") or {}
+    if not isinstance(headings, dict) or not isinstance(captions, dict) \
+            or not isinstance(cover, dict):
+        raise ValueError("'headings', 'captions' and 'cover' must be objects")
     for k, v in headings.items():
         i = int(k)  # raises ValueError if not int-like
         if i not in records_by_i:
@@ -80,7 +99,14 @@ def _validate(overrides, records_by_i):
             raise ValueError("captions override references unknown para_index %s" % k)
         if v is not None and v not in ("figure", "table"):
             raise ValueError("captions override kind must be 'figure'/'table'/null, got %r for %s" % (v, k))
-    return headings, captions
+    for k, v in cover.items():
+        i = int(k)
+        if i not in records_by_i:
+            raise ValueError("cover override references unknown para_index %s" % k)
+        if v is not None and v not in _COVER_ROLES:
+            raise ValueError("cover override role must be one of %s or null, got %r for %s"
+                             % (_COVER_ROLES, v, k))
+    return headings, captions, cover
 
 
 def _full_text(r):
@@ -141,7 +167,7 @@ def main():
 
     with open(overrides_path, encoding="utf-8") as f:
         overrides = json.load(f)
-    headings_ov, captions_ov = _validate(overrides, records_by_i)
+    headings_ov, captions_ov, cover_ov = _validate(overrides, records_by_i)
 
     for k, v in headings_ov.items():
         r = records_by_i[int(k)]
@@ -174,6 +200,28 @@ def main():
                 "source": "model_confirmed",
             }
 
+    for k, v in cover_ov.items():
+        r = records_by_i[int(k)]
+        if v is None:
+            # clear the override -> fall back to the heuristic cover_role()
+            r["cover_role"] = None
+        else:
+            r["cover_role"] = v
+            # keep is_title consistent so the title-block flag and the cover role
+            # never disagree (checks.cover_role treats an explicit role as
+            # authoritative, but is_title is also read elsewhere).
+            r["is_title"] = (v == "title")
+
+    # Optional AI top-level semantic completeness verdict: the required cover
+    # items the model confirms are actually filled in (esp. title-derived
+    # 项目名称/考核年份, which no substring match can verify). Authoritative for
+    # the "missing cover info" hint when present.
+    cover_present = overrides.get("cover_present")
+    if cover_present is not None:
+        if not isinstance(cover_present, list) or not all(isinstance(x, str) for x in cover_present):
+            raise ValueError("cover_present must be a list of field-name strings")
+        structure["cover_present"] = cover_present
+
     _retag_regions(records)
 
     bak = os.path.join(workdir, "structure.pre_review.json")
@@ -188,6 +236,7 @@ def main():
         "status": "ok",
         "n_heading_overrides": len(headings_ov),
         "n_caption_overrides": len(captions_ov),
+        "n_cover_overrides": len(cover_ov),
     }, ensure_ascii=False))
 
 

@@ -28,6 +28,7 @@ section fix (page setup, document level):
 """
 import json
 import os
+import re
 
 CN_DIGITS = "\u96f6\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d"
 
@@ -93,6 +94,39 @@ def is_unnumbered_section(text, num_raw):
     return t.startswith(UNNUMBERED_HEADING_PREFIX)
 
 
+def cover_role(rec, spec):
+    """Formatting role of a cover paragraph: 'title' | 'classification' |
+    'field' | 'other'.
+
+    An explicit rec['cover_role'] (set by the step-2.5 AI review via
+    27_apply_review.py) always wins -- that is how an arbitrary cover layout, or
+    a 密级/文本编号 line with NO key (just "机密  202501323023"), is classified
+    when the heuristics below cannot. Otherwise:
+      * title          -- extraction's is_title block, or a per-paragraph
+                          fallback (centered & large, or exactly the title size);
+      * classification -- text contains a 密级/文本编号 keyword (spec-configured,
+                          incl. common 密级 values so a key-less line still hits);
+      * field          -- every other non-blank cover line (项目名称/承担单位/…).
+    Shared by check_paragraph() and 26_export_review.py so the guess shown to the
+    model and the one used to format never drift apart."""
+    forced = rec.get("cover_role")
+    if forced:
+        return forced
+    eff = rec.get("eff", {})
+    if rec.get("is_title") \
+            or (eff.get("jc") == "center" and (eff.get("size_hp") or 0) >= 36) \
+            or (eff.get("size_hp") == spec.get("title", {}).get("size_hp")):
+        return "title"
+    text = rec.get("text") or ""
+    kws = (spec.get("cover") or {}).get("classification_keywords") or []
+    # classification if it carries a 密级/文本编号 keyword OR it sits above the
+    # title (the template's fixed position for that line — catches the key-less
+    # "机密  202501323023" case).
+    if rec.get("above_title") or any(k in text for k in kws):
+        return "classification"
+    return "field"
+
+
 def _size_name(hp):
     """Half-point value -> a human-readable Chinese size label for comments."""
     names = {40: "20磅", 36: "小一", 32: "三号",
@@ -147,27 +181,40 @@ def check_paragraph(rec, spec):
             "clear_left_indent": False, "clear_right_indent": False, "set_jc": None}
     violations = []
 
-    # -- Title on the cover --
+    # -- Cover region: title / classification (\u5bc6\u7ea7\u00b7\u6587\u672c\u7f16\u53f7) / other fields --
     if region == "cover":
-        looks_title = (eff.get("jc") == "center" and (eff.get("size_hp") or 0) >= 36) \
-            or (eff.get("size_hp") == spec["title"]["size_hp"])
-        if not looks_title:
-            return None  # other cover lines: content handled by doc-level hints
-        t = spec["title"]
-        if not _font_ok(eff.get("east_asia"), t):
-            sets["set_east_asia"] = t["east_asia"]
-            violations.append("\u9898\u76ee\u5b57\u4f53\u5e94\u4e3a%s\uff08\u5b9e\u9645\uff1a%s\uff09"
-                              % (t["east_asia"], eff.get("east_asia")))
-        if eff.get("size_hp") != t["size_hp"]:
-            sets["set_size_hp"] = t["size_hp"]
-            violations.append("\u9898\u76ee\u5b57\u53f7\u5e94\u4e3a20\u78c5")
-        if eff.get("jc") != "center":
-            sets["set_jc"] = "center"
-            violations.append("\u9898\u76ee\u5e94\u5c45\u4e2d")
-        # \u9898\u76ee\u5e94\u65e0\u7f29\u8fdb\uff1b\u6b8b\u7559\u7684\u9996\u884c/\u5de6/\u53f3\u7f29\u8fdb\u90fd\u4f1a\u8ba9 jc=center \u7684\u5c45\u4e2d\u57fa\u51c6\u504f\u79fb
-        # \uff08center \u662f\u76f8\u5bf9\u5de6\u53f3\u7f29\u8fdb\u4e4b\u540e\u7684\u53ef\u7528\u5bbd\u5ea6\u5c45\u4e2d\uff0c\u4e0d\u662f\u76f8\u5bf9\u6574\u4e2a\u9875\u9762\u5bbd\u5ea6\uff09\uff0c
-        # \u53ea\u6e05\u5de6\u7f29\u8fdb\u3001\u7559\u7740\u53f3\u7f29\u8fdb\u4e00\u6837\u4f1a\u5bfc\u81f4\u89c6\u89c9\u4e0a\u4e0d\u662f\u771f\u6b63\u5c45\u4e2d\u3002
-        _check_no_indent(eff, sets, violations, "\u9898\u76ee")
+        role = cover_role(rec, spec)
+        if role == "other":
+            return None  # AI explicitly exempted this line; leave it untouched
+        if role == "title":
+            t = spec["title"]
+            if not _font_ok(eff.get("east_asia"), t):
+                sets["set_east_asia"] = t["east_asia"]
+                violations.append("\u9898\u76ee\u5b57\u4f53\u5e94\u4e3a%s\uff08\u5b9e\u9645\uff1a%s\uff09"
+                                  % (t["east_asia"], eff.get("east_asia")))
+            if eff.get("size_hp") != t["size_hp"]:
+                sets["set_size_hp"] = t["size_hp"]
+                violations.append("\u9898\u76ee\u5b57\u53f7\u5e94\u4e3a20\u78c5")
+            if eff.get("jc") != "center":
+                sets["set_jc"] = "center"
+                violations.append("\u9898\u76ee\u5e94\u5c45\u4e2d")
+            # \u9898\u76ee\u5e94\u65e0\u7f29\u8fdb\uff1b\u6b8b\u7559\u7684\u9996\u884c/\u5de6/\u53f3\u7f29\u8fdb\u90fd\u4f1a\u8ba9 jc=center \u7684\u5c45\u4e2d\u57fa\u51c6\u504f\u79fb
+            # \uff08center \u662f\u76f8\u5bf9\u5de6\u53f3\u7f29\u8fdb\u4e4b\u540e\u7684\u53ef\u7528\u5bbd\u5ea6\u5c45\u4e2d\uff0c\u4e0d\u662f\u76f8\u5bf9\u6574\u4e2a\u9875\u9762\u5bbd\u5ea6\uff09\uff0c
+            # \u53ea\u6e05\u5de6\u7f29\u8fdb\u3001\u7559\u7740\u53f3\u7f29\u8fdb\u4e00\u6837\u4f1a\u5bfc\u81f4\u89c6\u89c9\u4e0a\u4e0d\u662f\u771f\u6b63\u5c45\u4e2d\u3002
+            _check_no_indent(eff, sets, violations, "\u9898\u76ee")
+            return _mk_format(rec["i"], sets, violations)
+        # classification (\u5bc6\u7ea7/\u6587\u672c\u7f16\u53f7) and field roles: font/size only, per spec.
+        # Alignment/indent are NOT enforced -- the spec states nothing about them
+        # for these cover lines, and their leading spaces are template layout.
+        if role == "classification":
+            entry = spec.get("cover_classification")
+            label = "\u5c01\u9762\u5bc6\u7ea7/\u6587\u672c\u7f16\u53f7"
+        else:  # "field"
+            entry = spec.get("cover_field")
+            label = "\u5c01\u9762\u8981\u7d20"
+        if not entry or not entry.get("east_asia") or not entry.get("size_hp"):
+            return None  # spec not configured for this cover role; nothing to check
+        _check_font_size(eff, entry, sets, violations, label=label)
         return _mk_format(rec["i"], sets, violations)
 
     # -- Body region: headings / captions / normal body --
@@ -564,12 +611,61 @@ def _heading_token(level, n):
 # Document-level hints (comment only): cover content, green bg, caption content,
 # TOC depth, page-number font (best-effort).
 # ---------------------------------------------------------------------------
+def _cover_missing_fields(structure, spec):
+    """Required cover items that appear to be MISSING.
+
+    If the step-2.5 AI review supplied structure['cover_present'] (the items it
+    semantically confirmed are actually filled in \u2014 the reliable source for
+    title-derived items like \u9879\u76ee\u540d\u79f0/\u8003\u6838\u5e74\u4efd, or a still-placeholder title),
+    that is authoritative. Otherwise fall back to a best-effort deterministic
+    baseline: title-derived items come from the detected title block / a real
+    year, the rest from a label substring match on the cover text."""
+    records = structure["records"]
+    cov = spec.get("cover", {})
+    required = cov.get("required_fields", [])
+    ai_present = structure.get("cover_present")
+    if isinstance(ai_present, list):
+        present = set(ai_present)
+        return [f for f in required if f not in present]
+    cover_recs = [r for r in records if r.get("region") == "cover" and not r.get("is_blank")]
+    cover_text = "".join(r.get("text") or "" for r in cover_recs)
+    title_text = "".join(r.get("text") or "" for r in cover_recs if r.get("is_title"))
+    title_derived = set(cov.get("title_derived_fields", []))
+    has_title = bool(title_text.strip())
+    has_year = bool(re.search(r"(?:19|20)\d{2}", cover_text)) or ("\u5e74\u5ea6" in title_text)
+    secrecy_values = cov.get("secrecy_values", [])
+    present = set()
+    for f in required:
+        if f == "\u9879\u76ee\u540d\u79f0" and f in title_derived:
+            if has_title:
+                present.add(f)
+        elif f == "\u8003\u6838\u5e74\u4efd" and f in title_derived:
+            if has_year:
+                present.add(f)
+        elif f == "\u5bc6\u7ea7":
+            # \u5bc6\u7ea7 is often written as its VALUE (\u673a\u5bc6/\u79d8\u5bc6/\u2026) with no "\u5bc6\u7ea7"
+            # label, so accept either.
+            if "\u5bc6\u7ea7" in cover_text or any(v in cover_text for v in secrecy_values):
+                present.add(f)
+        elif f in cover_text:
+            present.add(f)
+    return [f for f in required if f not in present]
+
+
+def _cover_placeholder(structure, spec):
+    """True if the title still contains an un-replaced template placeholder
+    (XXXX / \u00d7\u00d7\u00d7\u00d7 / \u6a21\u677f)."""
+    markers = (spec.get("cover") or {}).get("placeholder_markers") or []
+    title_text = "".join(r.get("text") or "" for r in structure["records"]
+                         if r.get("region") == "cover" and r.get("is_title"))
+    return any(m and m in title_text for m in markers)
+
+
 def doc_hints(structure, spec):
     records = structure["records"]
     hints = []
-    # cover content presence
-    cover_text = "".join(r["text"] for r in records if r.get("region") == "cover")
-    missing = [f for f in spec["cover"]["required_fields"] if f not in cover_text]
+    # cover content presence (AI-verified when available, else best-effort)
+    missing = _cover_missing_fields(structure, spec)
     # attach cover hints to the first cover paragraph
     first_cover = next((r["i"] for r in records if r.get("region") == "cover"), None)
     if first_cover is not None:
@@ -577,6 +673,11 @@ def doc_hints(structure, spec):
             hints.append({"para_index": first_cover, "op": "hint",
                           "rule_id": "cover.fields",
                           "rule_text": "\u5c01\u76ae\u7f3a\u5c11\u5fc5\u8981\u4fe1\u606f\uff1a" + "\u3001".join(missing),
+                          "comment": True})
+        if _cover_placeholder(structure, spec):
+            hints.append({"para_index": first_cover, "op": "hint",
+                          "rule_id": "cover.placeholder",
+                          "rule_text": "\u5c01\u9762\u6807\u9898\u7591\u4f3c\u4ecd\u4e3a\u6a21\u677f\u5360\u4f4d\u7b26\uff08\u5982 XXXX/\u6a21\u677f\uff09\uff0c\u8bf7\u66ff\u6362\u4e3a\u5b9e\u9645\u9879\u76ee\u540d\u79f0\u4e0e\u8003\u6838\u5e74\u4efd",
                           "comment": True})
         if spec["cover"].get("background_green") and not structure.get("has_background"):
             hints.append({"para_index": first_cover, "op": "hint",

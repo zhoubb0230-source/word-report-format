@@ -149,7 +149,12 @@ def check_paragraph(rec, spec):
 
     # -- Title on the cover --
     if region == "cover":
-        looks_title = (eff.get("jc") == "center" and (eff.get("size_hp") or 0) >= 36) \
+        # is_title is set by extraction's whole-document title-block detector
+        # (handles a title that WRAPS across paragraphs, where a continuation
+        # line may have lost its centering). The per-paragraph heuristic is kept
+        # as a fallback for any record extracted before that flag existed.
+        looks_title = rec.get("is_title") \
+            or (eff.get("jc") == "center" and (eff.get("size_hp") or 0) >= 36) \
             or (eff.get("size_hp") == spec["title"]["size_hp"])
         if not looks_title:
             return None  # other cover lines: content handled by doc-level hints

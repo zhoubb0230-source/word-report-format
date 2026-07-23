@@ -89,6 +89,63 @@ def in_toc_sdt(p):
     return False
 
 
+# Font size (half-points) at/above which a cover line is "large" enough to be
+# part of the report title. Body text is 三号 (32); the title band starts at
+# 小一 (36), so 36 cleanly separates title lines from ordinary cover text.
+TITLE_LARGE_HP = 36
+
+
+def _title_candidate(r):
+    """A cover paragraph that could be a title line: large font, short, and not
+    a labelled cover field (密级：/项目名称：… — those carry a colon)."""
+    if r.get("region") != "cover" or r.get("is_blank"):
+        return False
+    if (r["eff"].get("size_hp") or 0) < TITLE_LARGE_HP:
+        return False
+    if (r.get("text_len") or 0) > 40:
+        return False
+    t = r.get("text") or ""
+    return ("：" not in t) and (":" not in t)
+
+
+def _mark_title_block(records):
+    """Tag the report-title paragraph(s) on the cover with is_title=True.
+
+    The title is the largest text on the cover and often WRAPS across two or
+    more paragraphs ("先进项目" / "2024年度自评价报告"); a wrapped line may have
+    lost its centering, so per-paragraph "looks centered & large" detection
+    misses it. Here we have the whole document: take contiguous run(s) of
+    large, short, non-field cover lines and, for any run that contains a
+    confident anchor (a line at the max title size, or a centered large line),
+    tag every line in that run — so a wrapped title is captured whole and each
+    line gets centered/re-fonted downstream. Blank lines between title lines do
+    not break the run (blanks are already excluded from the candidate list)."""
+    cover = [r for r in records if r.get("region") == "cover" and not r.get("is_blank")]
+    cands = [r for r in cover if _title_candidate(r)]
+    if not cands:
+        return
+    maxsz = max((r["eff"].get("size_hp") or 0) for r in cands)
+
+    def is_anchor(r):
+        return (r["eff"].get("size_hp") or 0) == maxsz or r["eff"].get("jc") == "center"
+
+    candset = {id(r) for r in cands}
+    n = len(cover)
+    i = 0
+    while i < n:
+        if id(cover[i]) in candset:
+            j = i
+            while j + 1 < n and id(cover[j + 1]) in candset:
+                j += 1
+            run = cover[i:j + 1]
+            if any(is_anchor(r) for r in run):
+                for r in run:
+                    r["is_title"] = True
+            i = j + 1
+        else:
+            i += 1
+
+
 def main():
     workdir = sys.argv[1]
     shard_size = 400
@@ -222,6 +279,7 @@ def main():
             "is_toc": is_toc or is_toctitle,
             "toc_level": toc_level,
             "auto_num": auto_num,
+            "is_title": False,   # set by _mark_title_block() after region tagging
             "is_heading": level is not None,
             "level": level,
             "level_source": level_source,
@@ -254,6 +312,9 @@ def main():
             r["region"] = "cover"
         else:
             r["region"] = "body"
+
+    # ---- title block on the cover (may wrap across paragraphs) ----
+    _mark_title_block(records)
 
     # ---- page background (for cover green hint) ----
     bg = doc_root.find(qn("w:background"))

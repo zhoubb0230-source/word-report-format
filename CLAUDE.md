@@ -35,17 +35,26 @@
    `is_title / cover_role`。不需要真实 docx。
 2. **端到端**：手搓一个最小 docx（`[Content_Types].xml`、`_rels/.rels`、`word/document.xml`，
    **别忘了 `word/_rels/document.xml.rels`——`40` 的 CommentWriter 会读它，缺了会报错**），
-   然后按顺序：
+   然后按顺序（`<workdir>` 用 `05_new_workdir.py` 建的唯一目录，别手写路径）：
    ```
+   python3 scripts/05_new_workdir.py                 # 打印 {workdir}；下面的 <workdir> 全用它
    python3 scripts/10_prepare_input.py <src.docx> <workdir>
    python3 scripts/20_extract_structure.py <workdir>
    python3 scripts/30_check_format.py <workdir>     # 全量模式，直接写 workdir/fixes.json
    python3 scripts/40_apply_fixes.py <workdir>       # 产出 workdir/formatted.docx + out_pkg/
    python3 scripts/45_validate_output.py <workdir>   # 自检：ok=true 才算过（坏了退 2）
+   python3 scripts/50_finalize.py <workdir> <out_dir> # <out_dir> 须在 workdir 之外
+   python3 scripts/59_cleanup.py <workdir>            # 交付后删掉工作目录（过程件全清）
    ```
 
 ## 流水线陷阱（真踩过）
 
+- **工作目录唯一 + 交付后清理**：所有过程件都落在 `05_new_workdir.py` 建的**唯一** `<workdir>`
+  （`<cwd>/.word_report_work/run_<时间戳>_<随机>/`，`tempfile.mkdtemp` 原子创建，多 session 并发不冲突），
+  交付后由 `59_cleanup.py` 整体删除。两条铁律：① `50_finalize.py <workdir> <out_dir>` 的 `<out_dir>`
+  **必须在 workdir 之外**——成品若留在 workdir 里会被 `59` 一并删掉；② `59_cleanup.py` 有安全护栏，
+  只删名字含 `.word_report_work` 的目录、且不删基目录本身，别绕过它去 `rmtree` 别的路径。基目录/护栏
+  逻辑在 `scripts/lib/workdir.py`（`base_dir()` / `is_inside_base()`），改路径约定要同步改这里。
 - **区域划分**：`cover` = 第一个 TOC / 第一个标题**之前**的所有段落。测试 docx 若既无目录又无标题，
   封面段落会全部落到 `body`——要放一个带 `outlineLvl` 的标题段来界定封面结束。
 - **`30` 有两套模式**：全量模式**直接写 `fixes.json`**；`--shard` 模式写 `fixes_parts/`，之后才用

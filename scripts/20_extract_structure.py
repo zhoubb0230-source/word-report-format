@@ -280,6 +280,7 @@ def main():
             "toc_level": toc_level,
             "auto_num": auto_num,
             "is_title": False,   # set by _mark_title_block() after region tagging
+            "cover_role": None,  # set only by the step-2.5 AI review (27_apply_review.py)
             "is_heading": level is not None,
             "level": level,
             "level_source": level_source,

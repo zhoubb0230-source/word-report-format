@@ -74,6 +74,9 @@ import json
 import os
 import sys
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
+from checks import cover_role
+
 SPEC_PATH = os.path.join(os.path.dirname(__file__), "..", "spec", "format_spec.json")
 MAX_CANDIDATE_LEN = 40  # a heading-length line; mirrors the "short" heuristic
                         # infer_heading_level() already uses for pattern-based guesses
@@ -151,6 +154,21 @@ def main():
 
     possible_missed = _find_possible_missed_headings(records, spec)
 
+    # Cover paragraphs (whole cover, verbatim -- it is small): the model reads
+    # these and assigns each a role in overrides.json["cover"] when the
+    # heuristic guess is wrong. Covers have no fixed layout, so this is a
+    # genuine full-page judgment (title may wrap; the 密级/文本编号 line may have
+    # no key). guess_role is checks.cover_role's current classification.
+    cover_paragraphs = []
+    for r in records:
+        if r.get("region") != "cover" or r.get("is_blank"):
+            continue
+        cover_paragraphs.append({
+            "i": r["i"], "text": r["text"],
+            "font": r["eff"].get("east_asia"), "size_hp": r["eff"].get("size_hp"),
+            "jc": r["eff"].get("jc"), "guess_role": cover_role(r, spec),
+        })
+
     out_path = os.path.join(workdir, "review_candidates.json")
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump({
@@ -159,6 +177,7 @@ def main():
             "captions_confirmed": captions_confirmed,
             "captions_unconfirmed": captions_unconfirmed,
             "possible_missed_headings": possible_missed,
+            "cover_paragraphs": cover_paragraphs,
         }, f, ensure_ascii=False, indent=1)
 
     print(json.dumps({
@@ -168,6 +187,7 @@ def main():
         "n_captions_confirmed": len(captions_confirmed),
         "n_captions_unconfirmed": len(captions_unconfirmed),
         "n_possible_missed_headings": len(possible_missed),
+        "n_cover_paragraphs": len(cover_paragraphs),
         "review_candidates": out_path,
         "next_step": ("Read review_candidates.json in full (it is small). "
                        "*_confirmed: correct level/kind from CONTEXT if the "
@@ -175,6 +195,10 @@ def main():
                        "*_unconfirmed and possible_missed_headings: decide "
                        "per entry whether to promote it via overrides.json "
                        "(never modified otherwise -- stays a review hint). "
+                       "cover_paragraphs: check each guess_role (title/"
+                       "classification/field); fix any wrong one in "
+                       "overrides.json['cover'] ({para_index: role}); role "
+                       "'other' exempts a line from cover formatting. "
                        "Then run 27_apply_review.py before checking format; "
                        "if nothing needs correcting, proceed straight to "
                        "step 3."),

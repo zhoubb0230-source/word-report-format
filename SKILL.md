@@ -96,6 +96,14 @@ python scripts/20_extract_structure.py <workdir> [--shard-size 400]
   换行行可能丢了居中，逐段"看着像标题"会漏掉——脚本取封面上连续的大字号短行（排除带冒号的字段行、
   过长行），只要其中有一行是可信锚点（最大字号或居中），整块都打 `is_title`，从而每一行都会被居中并
   规范字体字号。
+- **封面各要素按"角色"套格式**（封面无固定版式，可由第 2.5 步 AI 复核精确判定，见下）：
+  - `title` 报告标题 → 方正小标宋 / 20磅 / 居中 / 清缩进；
+  - `classification` 密级·文本编号行（同一行，**可能没有 key**，如「机密  202501323023」）→ 仿宋 / 16磅；
+  - `field` 其余要素（项目名称/承担单位/项目负责人/起止时间/编制时间等）→ 方正黑体 / 15磅；
+  - `other` → 不动。
+  角色先由启发式默认（标题块 / `spec.cover.classification_keywords` 关键词 / 其余归 field），AI 复核可覆盖。
+  字体字号值全部在 `spec`（`title`/`cover_classification`/`cover_field`），可调；密级/字段只校验字体字号，
+  不动对齐与缩进。
 - 空白段落打 `is_blank`，不参与标题/图表识别与后续任何格式判定。
 - 产出：`structure.json`（完整，**留在磁盘、不要读进模型上下文**）与 `shards/shard_NNN.json`（分片切片）。
 - `structure.json` 里每条标题记录的 `level` 只是**形状/样式的默认猜测**，不是最终答案——下一步必做。
@@ -107,7 +115,7 @@ python scripts/20_extract_structure.py <workdir> [--shard-size 400]
 python scripts/26_export_review.py <workdir>
 ```
 
-- 产出 `<workdir>/review_candidates.json`，五份按文档顺序排列的清单，这个文件通常远小于全文，
+- 产出 `<workdir>/review_candidates.json`，六份按文档顺序排列的清单，这个文件通常远小于全文，
   **直接读入模型上下文**审阅：
   - `headings_confirmed`：有 `outlineLvl` 或标题样式撑腰的标题候选，每条含当前的（形状猜测）层级、
     原文本、样式名/`outlineLvl`。这类**层级判对了就不用管**；判错了改一下会**直接自动应用**（无需
@@ -126,6 +134,11 @@ python scripts/26_export_review.py <workdir>
     也无标题样式名、也没有任何可辨识的编号形状），但字体是规范里标题专属的字体（一级黑体/二级楷体，
     正文固定仿宋、不会用到这两种字体）的短行。这类多半是标题丢了编号或作者没编号，纯靠序号/样式正则
     永远发现不了，只能靠这个字体信号交给模型判断；同样只提示不改，除非被模型明确提升。
+  - `cover_paragraphs`：**整页封面**的非空段落（封面无固定版式，是全页级判断），每条含原文本、字体、
+    字号、对齐和启发式猜的角色 `guess_role`（`title`/`classification`/`field`）。逐条看猜得对不对：标题
+    是否漏了/多认了行、密级·文本编号行有没有认出（**可能没 key**，只有「机密 202501…」这种，关键词启发式
+    会漏——正靠这里由模型认出）。判错的写进 `overrides.json` 的 `cover` 段；`other` 可让某行**不被套用**
+    任何封面格式。角色定了，字体字号仍由脚本按 `spec` 确定性套用。
 - **必须通读全部候选后再下结论**——标题层级是全文级的结构判断：同一个「1.」在这份文档里到底是几级标题，
   只有看清楚它和前后其它标题的层级关系（有没有更高层的「一、」「（一）」把它们统领起来、序号是否在同一序列
   里连续递增）才能确定，脚本的形状猜测经常覆盖不了每份文档的实际写法。图表标题的分组（是否按章节前缀分组、
@@ -141,13 +154,16 @@ python scripts/26_export_review.py <workdir>
   ```json
   {
     "headings": {"12": 1, "45": 2, "60": 1},
-    "captions": {"30": "table"}
+    "captions": {"30": "table"},
+    "cover": {"3": "title", "1": "classification", "8": "field", "9": "other"}
   }
   ```
   层级取值只能是 `1`/`2`/`3`/`4`/`null`（`null` = 这条其实不是标题）；图表种类只能是
-  `"figure"`/`"table"`/`null`（`null` = 这条其实不是图表标题）。`para_index` 可以是文档里任意一个真实
-  存在的段落序号——既能修正 `*_confirmed`/`*_unconfirmed` 里已识别到的候选，**也能把
-  `possible_missed_headings` 里判断为真标题的段落直接提升为标题**（不局限于已被识别到的候选）。
+  `"figure"`/`"table"`/`null`（`null` = 这条其实不是图表标题）；封面角色只能是
+  `"title"`/`"classification"`/`"field"`/`"other"`/`null`（`null` = 清除覆盖、回退启发式）。`para_index`
+  可以是文档里任意一个真实存在的段落序号——既能修正 `*_confirmed`/`*_unconfirmed`/`cover_paragraphs` 里
+  已识别到的候选，**也能把 `possible_missed_headings` 里判断为真标题的段落直接提升为标题**（不局限于已被
+  识别到的候选）。
   ```bash
   python scripts/27_apply_review.py <workdir> <overrides.json路径>
   ```

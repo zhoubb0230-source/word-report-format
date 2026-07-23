@@ -123,6 +123,24 @@
   "no_indent": true,
   "source": "图表标题 居中 无任何缩进（首行/左/右全部清零）"
  },
+ "cover_classification": {
+  "east_asia": "仿宋",
+  "east_asia_match": [
+   "仿宋",
+   "FangSong",
+   "仿宋_GB2312"
+  ],
+  "size_hp": 32,
+  "source": "封面 密级/文本编号行 仿宋 16磅（仅校验字体字号）"
+ },
+ "cover_field": {
+  "east_asia": "方正黑体",
+  "east_asia_match": [
+   "方正黑体"
+  ],
+  "size_hp": 30,
+  "source": "封面 其余要素（项目名称/承担单位/项目负责人/起止时间/编制时间等）方正黑体 15磅（仅校验字体字号）"
+ },
  "cover": {
   "required_fields": [
    "密级",
@@ -131,6 +149,17 @@
    "项目负责人",
    "起止时间",
    "编制时间"
+  ],
+  "classification_keywords": [
+   "密级",
+   "文本编号",
+   "文本编码",
+   "编号",
+   "绝密",
+   "机密",
+   "秘密",
+   "内部",
+   "公开"
   ],
   "background_green": true,
   "source": "封皮：绿色背景；标注密级、项目单位、项目名称、考核年份、项目负责人、起止时间、编制时间",

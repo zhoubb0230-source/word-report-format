@@ -93,6 +93,36 @@ def is_unnumbered_section(text, num_raw):
     return t.startswith(UNNUMBERED_HEADING_PREFIX)
 
 
+def cover_role(rec, spec):
+    """Formatting role of a cover paragraph: 'title' | 'classification' |
+    'field' | 'other'.
+
+    An explicit rec['cover_role'] (set by the step-2.5 AI review via
+    27_apply_review.py) always wins -- that is how an arbitrary cover layout, or
+    a 密级/文本编号 line with NO key (just "机密  202501323023"), is classified
+    when the heuristics below cannot. Otherwise:
+      * title          -- extraction's is_title block, or a per-paragraph
+                          fallback (centered & large, or exactly the title size);
+      * classification -- text contains a 密级/文本编号 keyword (spec-configured,
+                          incl. common 密级 values so a key-less line still hits);
+      * field          -- every other non-blank cover line (项目名称/承担单位/…).
+    Shared by check_paragraph() and 26_export_review.py so the guess shown to the
+    model and the one used to format never drift apart."""
+    forced = rec.get("cover_role")
+    if forced:
+        return forced
+    eff = rec.get("eff", {})
+    if rec.get("is_title") \
+            or (eff.get("jc") == "center" and (eff.get("size_hp") or 0) >= 36) \
+            or (eff.get("size_hp") == spec.get("title", {}).get("size_hp")):
+        return "title"
+    text = rec.get("text") or ""
+    kws = (spec.get("cover") or {}).get("classification_keywords") or []
+    if any(k in text for k in kws):
+        return "classification"
+    return "field"
+
+
 def _size_name(hp):
     """Half-point value -> a human-readable Chinese size label for comments."""
     names = {40: "20磅", 36: "小一", 32: "三号",
@@ -147,32 +177,40 @@ def check_paragraph(rec, spec):
             "clear_left_indent": False, "clear_right_indent": False, "set_jc": None}
     violations = []
 
-    # -- Title on the cover --
+    # -- Cover region: title / classification (\u5bc6\u7ea7\u00b7\u6587\u672c\u7f16\u53f7) / other fields --
     if region == "cover":
-        # is_title is set by extraction's whole-document title-block detector
-        # (handles a title that WRAPS across paragraphs, where a continuation
-        # line may have lost its centering). The per-paragraph heuristic is kept
-        # as a fallback for any record extracted before that flag existed.
-        looks_title = rec.get("is_title") \
-            or (eff.get("jc") == "center" and (eff.get("size_hp") or 0) >= 36) \
-            or (eff.get("size_hp") == spec["title"]["size_hp"])
-        if not looks_title:
-            return None  # other cover lines: content handled by doc-level hints
-        t = spec["title"]
-        if not _font_ok(eff.get("east_asia"), t):
-            sets["set_east_asia"] = t["east_asia"]
-            violations.append("\u9898\u76ee\u5b57\u4f53\u5e94\u4e3a%s\uff08\u5b9e\u9645\uff1a%s\uff09"
-                              % (t["east_asia"], eff.get("east_asia")))
-        if eff.get("size_hp") != t["size_hp"]:
-            sets["set_size_hp"] = t["size_hp"]
-            violations.append("\u9898\u76ee\u5b57\u53f7\u5e94\u4e3a20\u78c5")
-        if eff.get("jc") != "center":
-            sets["set_jc"] = "center"
-            violations.append("\u9898\u76ee\u5e94\u5c45\u4e2d")
-        # \u9898\u76ee\u5e94\u65e0\u7f29\u8fdb\uff1b\u6b8b\u7559\u7684\u9996\u884c/\u5de6/\u53f3\u7f29\u8fdb\u90fd\u4f1a\u8ba9 jc=center \u7684\u5c45\u4e2d\u57fa\u51c6\u504f\u79fb
-        # \uff08center \u662f\u76f8\u5bf9\u5de6\u53f3\u7f29\u8fdb\u4e4b\u540e\u7684\u53ef\u7528\u5bbd\u5ea6\u5c45\u4e2d\uff0c\u4e0d\u662f\u76f8\u5bf9\u6574\u4e2a\u9875\u9762\u5bbd\u5ea6\uff09\uff0c
-        # \u53ea\u6e05\u5de6\u7f29\u8fdb\u3001\u7559\u7740\u53f3\u7f29\u8fdb\u4e00\u6837\u4f1a\u5bfc\u81f4\u89c6\u89c9\u4e0a\u4e0d\u662f\u771f\u6b63\u5c45\u4e2d\u3002
-        _check_no_indent(eff, sets, violations, "\u9898\u76ee")
+        role = cover_role(rec, spec)
+        if role == "other":
+            return None  # AI explicitly exempted this line; leave it untouched
+        if role == "title":
+            t = spec["title"]
+            if not _font_ok(eff.get("east_asia"), t):
+                sets["set_east_asia"] = t["east_asia"]
+                violations.append("\u9898\u76ee\u5b57\u4f53\u5e94\u4e3a%s\uff08\u5b9e\u9645\uff1a%s\uff09"
+                                  % (t["east_asia"], eff.get("east_asia")))
+            if eff.get("size_hp") != t["size_hp"]:
+                sets["set_size_hp"] = t["size_hp"]
+                violations.append("\u9898\u76ee\u5b57\u53f7\u5e94\u4e3a20\u78c5")
+            if eff.get("jc") != "center":
+                sets["set_jc"] = "center"
+                violations.append("\u9898\u76ee\u5e94\u5c45\u4e2d")
+            # \u9898\u76ee\u5e94\u65e0\u7f29\u8fdb\uff1b\u6b8b\u7559\u7684\u9996\u884c/\u5de6/\u53f3\u7f29\u8fdb\u90fd\u4f1a\u8ba9 jc=center \u7684\u5c45\u4e2d\u57fa\u51c6\u504f\u79fb
+            # \uff08center \u662f\u76f8\u5bf9\u5de6\u53f3\u7f29\u8fdb\u4e4b\u540e\u7684\u53ef\u7528\u5bbd\u5ea6\u5c45\u4e2d\uff0c\u4e0d\u662f\u76f8\u5bf9\u6574\u4e2a\u9875\u9762\u5bbd\u5ea6\uff09\uff0c
+            # \u53ea\u6e05\u5de6\u7f29\u8fdb\u3001\u7559\u7740\u53f3\u7f29\u8fdb\u4e00\u6837\u4f1a\u5bfc\u81f4\u89c6\u89c9\u4e0a\u4e0d\u662f\u771f\u6b63\u5c45\u4e2d\u3002
+            _check_no_indent(eff, sets, violations, "\u9898\u76ee")
+            return _mk_format(rec["i"], sets, violations)
+        # classification (\u5bc6\u7ea7/\u6587\u672c\u7f16\u53f7) and field roles: font/size only, per spec.
+        # Alignment/indent are NOT enforced -- the spec states nothing about them
+        # for these cover lines, and their leading spaces are template layout.
+        if role == "classification":
+            entry = spec.get("cover_classification")
+            label = "\u5c01\u9762\u5bc6\u7ea7/\u6587\u672c\u7f16\u53f7"
+        else:  # "field"
+            entry = spec.get("cover_field")
+            label = "\u5c01\u9762\u8981\u7d20"
+        if not entry or not entry.get("east_asia") or not entry.get("size_hp"):
+            return None  # spec not configured for this cover role; nothing to check
+        _check_font_size(eff, entry, sets, violations, label=label)
         return _mk_format(rec["i"], sets, violations)
 
     # -- Body region: headings / captions / normal body --

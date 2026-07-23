@@ -144,11 +144,30 @@
  "cover": {
   "required_fields": [
    "密级",
+   "文本编号",
    "项目名称",
+   "考核年份",
    "承担单位",
    "项目负责人",
    "起止时间",
    "编制时间"
+  ],
+  "title_derived_fields": [
+   "项目名称",
+   "考核年份"
+  ],
+  "secrecy_values": [
+   "绝密",
+   "机密",
+   "秘密",
+   "内部",
+   "公开"
+  ],
+  "placeholder_markers": [
+   "XXXX",
+   "xxxx",
+   "××××",
+   "模板"
   ],
   "classification_keywords": [
    "密级",

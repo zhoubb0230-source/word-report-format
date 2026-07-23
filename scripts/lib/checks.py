@@ -28,6 +28,7 @@ section fix (page setup, document level):
 """
 import json
 import os
+import re
 
 CN_DIGITS = "\u96f6\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d"
 
@@ -118,7 +119,10 @@ def cover_role(rec, spec):
         return "title"
     text = rec.get("text") or ""
     kws = (spec.get("cover") or {}).get("classification_keywords") or []
-    if any(k in text for k in kws):
+    # classification if it carries a 密级/文本编号 keyword OR it sits above the
+    # title (the template's fixed position for that line — catches the key-less
+    # "机密  202501323023" case).
+    if rec.get("above_title") or any(k in text for k in kws):
         return "classification"
     return "field"
 
@@ -607,12 +611,61 @@ def _heading_token(level, n):
 # Document-level hints (comment only): cover content, green bg, caption content,
 # TOC depth, page-number font (best-effort).
 # ---------------------------------------------------------------------------
+def _cover_missing_fields(structure, spec):
+    """Required cover items that appear to be MISSING.
+
+    If the step-2.5 AI review supplied structure['cover_present'] (the items it
+    semantically confirmed are actually filled in \u2014 the reliable source for
+    title-derived items like \u9879\u76ee\u540d\u79f0/\u8003\u6838\u5e74\u4efd, or a still-placeholder title),
+    that is authoritative. Otherwise fall back to a best-effort deterministic
+    baseline: title-derived items come from the detected title block / a real
+    year, the rest from a label substring match on the cover text."""
+    records = structure["records"]
+    cov = spec.get("cover", {})
+    required = cov.get("required_fields", [])
+    ai_present = structure.get("cover_present")
+    if isinstance(ai_present, list):
+        present = set(ai_present)
+        return [f for f in required if f not in present]
+    cover_recs = [r for r in records if r.get("region") == "cover" and not r.get("is_blank")]
+    cover_text = "".join(r.get("text") or "" for r in cover_recs)
+    title_text = "".join(r.get("text") or "" for r in cover_recs if r.get("is_title"))
+    title_derived = set(cov.get("title_derived_fields", []))
+    has_title = bool(title_text.strip())
+    has_year = bool(re.search(r"(?:19|20)\d{2}", cover_text)) or ("\u5e74\u5ea6" in title_text)
+    secrecy_values = cov.get("secrecy_values", [])
+    present = set()
+    for f in required:
+        if f == "\u9879\u76ee\u540d\u79f0" and f in title_derived:
+            if has_title:
+                present.add(f)
+        elif f == "\u8003\u6838\u5e74\u4efd" and f in title_derived:
+            if has_year:
+                present.add(f)
+        elif f == "\u5bc6\u7ea7":
+            # \u5bc6\u7ea7 is often written as its VALUE (\u673a\u5bc6/\u79d8\u5bc6/\u2026) with no "\u5bc6\u7ea7"
+            # label, so accept either.
+            if "\u5bc6\u7ea7" in cover_text or any(v in cover_text for v in secrecy_values):
+                present.add(f)
+        elif f in cover_text:
+            present.add(f)
+    return [f for f in required if f not in present]
+
+
+def _cover_placeholder(structure, spec):
+    """True if the title still contains an un-replaced template placeholder
+    (XXXX / \u00d7\u00d7\u00d7\u00d7 / \u6a21\u677f)."""
+    markers = (spec.get("cover") or {}).get("placeholder_markers") or []
+    title_text = "".join(r.get("text") or "" for r in structure["records"]
+                         if r.get("region") == "cover" and r.get("is_title"))
+    return any(m and m in title_text for m in markers)
+
+
 def doc_hints(structure, spec):
     records = structure["records"]
     hints = []
-    # cover content presence
-    cover_text = "".join(r["text"] for r in records if r.get("region") == "cover")
-    missing = [f for f in spec["cover"]["required_fields"] if f not in cover_text]
+    # cover content presence (AI-verified when available, else best-effort)
+    missing = _cover_missing_fields(structure, spec)
     # attach cover hints to the first cover paragraph
     first_cover = next((r["i"] for r in records if r.get("region") == "cover"), None)
     if first_cover is not None:
@@ -620,6 +673,11 @@ def doc_hints(structure, spec):
             hints.append({"para_index": first_cover, "op": "hint",
                           "rule_id": "cover.fields",
                           "rule_text": "\u5c01\u76ae\u7f3a\u5c11\u5fc5\u8981\u4fe1\u606f\uff1a" + "\u3001".join(missing),
+                          "comment": True})
+        if _cover_placeholder(structure, spec):
+            hints.append({"para_index": first_cover, "op": "hint",
+                          "rule_id": "cover.placeholder",
+                          "rule_text": "\u5c01\u9762\u6807\u9898\u7591\u4f3c\u4ecd\u4e3a\u6a21\u677f\u5360\u4f4d\u7b26\uff08\u5982 XXXX/\u6a21\u677f\uff09\uff0c\u8bf7\u66ff\u6362\u4e3a\u5b9e\u9645\u9879\u76ee\u540d\u79f0\u4e0e\u8003\u6838\u5e74\u4efd",
                           "comment": True})
         if spec["cover"].get("background_green") and not structure.get("has_background"):
             hints.append({"para_index": first_cover, "op": "hint",

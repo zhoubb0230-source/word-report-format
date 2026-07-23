@@ -31,8 +31,14 @@ overrides.json (write this yourself — schema is intentionally tiny):
 {
   "headings": {"<para_index>": 1|2|3|4|null, ...},
   "captions": {"<para_index>": "figure"|"table"|null, ...},
-  "cover":    {"<para_index>": "title"|"classification"|"field"|"other"|null, ...}
+  "cover":    {"<para_index>": "title"|"classification"|"field"|"other"|null, ...},
+  "cover_present": ["密级", "项目名称", "考核年份", ...]
 }
+"cover_present" (optional) is the model's semantic verdict of which required
+cover items are actually FILLED IN (not just which labels appear) — the reliable
+source for title-derived 项目名称/考核年份 and for spotting a still-placeholder
+title. When present it drives the "missing cover info" hint; when omitted, a
+deterministic baseline is used.
 The "cover" section assigns each cover paragraph its FORMATTING role (checks.py
 then applies the spec font/size for that role deterministically): "title" ->
 方正小标宋/20磅/居中, "classification" (密级·文本编号 line) -> 仿宋/16磅,
@@ -205,6 +211,16 @@ def main():
             # never disagree (checks.cover_role treats an explicit role as
             # authoritative, but is_title is also read elsewhere).
             r["is_title"] = (v == "title")
+
+    # Optional AI top-level semantic completeness verdict: the required cover
+    # items the model confirms are actually filled in (esp. title-derived
+    # 项目名称/考核年份, which no substring match can verify). Authoritative for
+    # the "missing cover info" hint when present.
+    cover_present = overrides.get("cover_present")
+    if cover_present is not None:
+        if not isinstance(cover_present, list) or not all(isinstance(x, str) for x in cover_present):
+            raise ValueError("cover_present must be a list of field-name strings")
+        structure["cover_present"] = cover_present
 
     _retag_regions(records)
 

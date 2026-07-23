@@ -101,9 +101,12 @@ python scripts/20_extract_structure.py <workdir> [--shard-size 400]
   - `classification` 密级·文本编号行（同一行，**可能没有 key**，如「机密  202501323023」）→ 仿宋 / 16磅；
   - `field` 其余要素（项目名称/承担单位/项目负责人/起止时间/编制时间等）→ 方正黑体 / 15磅；
   - `other` → 不动。
-  角色先由启发式默认（标题块 / `spec.cover.classification_keywords` 关键词 / 其余归 field），AI 复核可覆盖。
-  字体字号值全部在 `spec`（`title`/`cover_classification`/`cover_field`），可调；密级/字段只校验字体字号，
-  不动对齐与缩进。
+  角色先由启发式默认（标题块 → title；**位于标题上方的行或含 `spec.cover.classification_keywords` 关键词**
+  → classification；其余 → field），AI 复核可覆盖。字体字号值全部在 `spec`（`title`/`cover_classification`/
+  `cover_field`），可调；密级/字段只校验字体字号，不动对齐与缩进。
+- **封面必备信息**（缺项提示、非自动改）：`项目名称`/`考核年份` 来自标题（常两行＝项目名称＋考核年份），
+  密级可写成值（机密/秘密…）；确定性基线尽量不误报，AI 复核可用 `cover_present` 给出语义裁决权威覆盖；
+  标题若仍是 `XXXX/模板` 占位符会单独提示未替换。
 - 空白段落打 `is_blank`，不参与标题/图表识别与后续任何格式判定。
 - 产出：`structure.json`（完整，**留在磁盘、不要读进模型上下文**）与 `shards/shard_NNN.json`（分片切片）。
 - `structure.json` 里每条标题记录的 `level` 只是**形状/样式的默认猜测**，不是最终答案——下一步必做。
@@ -136,9 +139,15 @@ python scripts/26_export_review.py <workdir>
     永远发现不了，只能靠这个字体信号交给模型判断；同样只提示不改，除非被模型明确提升。
   - `cover_paragraphs`：**整页封面**的非空段落（封面无固定版式，是全页级判断），每条含原文本、字体、
     字号、对齐和启发式猜的角色 `guess_role`（`title`/`classification`/`field`）。逐条看猜得对不对：标题
-    是否漏了/多认了行、密级·文本编号行有没有认出（**可能没 key**，只有「机密 202501…」这种，关键词启发式
-    会漏——正靠这里由模型认出）。判错的写进 `overrides.json` 的 `cover` 段；`other` 可让某行**不被套用**
-    任何封面格式。角色定了，字体字号仍由脚本按 `spec` 确定性套用。
+    是否漏了/多认了行、密级·文本编号行有没有认出（该行**固定在标题上方**、**可能没 key**，只有
+    「机密 202501…」这种——脚本已按"标题上方"位置默认判为 `classification`，但若版式特殊仍需你确认）。
+    判错的写进 `overrides.json` 的 `cover` 段；`other` 可让某行**不被套用**任何封面格式。角色定了，
+    字体字号仍由脚本按 `spec` 确定性套用。
+  - `cover_required_fields` / `cover_missing_guess`：封面必备信息，以及**确定性基线**猜的缺项。基线对
+    「项目名称/考核年份」这类**藏在标题里**、以及密级写成值（机密/秘密…）而非标签的情况会不准——**通读
+    封面后按语义判断**：报告标题常分两行＝第一行项目名称、第二行考核年份（但要兼容其它写法），标题若还是
+    `XXXX/模板` 占位符则视为未填。把**确实已填**的必备项写进 `overrides.json` 的 `cover_present`（数组），
+    它会**权威覆盖**基线，决定"封皮缺少必要信息"提示。
 - **必须通读全部候选后再下结论**——标题层级是全文级的结构判断：同一个「1.」在这份文档里到底是几级标题，
   只有看清楚它和前后其它标题的层级关系（有没有更高层的「一、」「（一）」把它们统领起来、序号是否在同一序列
   里连续递增）才能确定，脚本的形状猜测经常覆盖不了每份文档的实际写法。图表标题的分组（是否按章节前缀分组、
@@ -155,12 +164,14 @@ python scripts/26_export_review.py <workdir>
   {
     "headings": {"12": 1, "45": 2, "60": 1},
     "captions": {"30": "table"},
-    "cover": {"3": "title", "1": "classification", "8": "field", "9": "other"}
+    "cover": {"3": "title", "1": "classification", "8": "field", "9": "other"},
+    "cover_present": ["密级", "文本编号", "项目名称", "考核年份", "承担单位", "项目负责人", "起止时间", "编制时间"]
   }
   ```
   层级取值只能是 `1`/`2`/`3`/`4`/`null`（`null` = 这条其实不是标题）；图表种类只能是
   `"figure"`/`"table"`/`null`（`null` = 这条其实不是图表标题）；封面角色只能是
-  `"title"`/`"classification"`/`"field"`/`"other"`/`null`（`null` = 清除覆盖、回退启发式）。`para_index`
+  `"title"`/`"classification"`/`"field"`/`"other"`/`null`（`null` = 清除覆盖、回退启发式）；
+  `cover_present` 是**确实已填**的封面必备项数组（可选，给了就权威覆盖缺项基线）。`para_index`
   可以是文档里任意一个真实存在的段落序号——既能修正 `*_confirmed`/`*_unconfirmed`/`cover_paragraphs` 里
   已识别到的候选，**也能把 `possible_missed_headings` 里判断为真标题的段落直接提升为标题**（不局限于已被
   识别到的候选）。

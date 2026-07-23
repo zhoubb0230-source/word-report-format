@@ -75,7 +75,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
-from checks import cover_role
+from checks import cover_role, _cover_missing_fields
 
 SPEC_PATH = os.path.join(os.path.dirname(__file__), "..", "spec", "format_spec.json")
 MAX_CANDIDATE_LEN = 40  # a heading-length line; mirrors the "short" heuristic
@@ -169,6 +169,12 @@ def main():
             "jc": r["eff"].get("jc"), "guess_role": cover_role(r, spec),
         })
 
+    # Cover completeness: which required items the deterministic baseline thinks
+    # are missing. The model refines this semantically (esp. title-derived
+    # 项目名称/考核年份, or a still-placeholder title) via overrides["cover_present"].
+    cover_required = (spec.get("cover") or {}).get("required_fields", [])
+    cover_missing_guess = _cover_missing_fields(structure, spec)
+
     out_path = os.path.join(workdir, "review_candidates.json")
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump({
@@ -178,6 +184,8 @@ def main():
             "captions_unconfirmed": captions_unconfirmed,
             "possible_missed_headings": possible_missed,
             "cover_paragraphs": cover_paragraphs,
+            "cover_required_fields": cover_required,
+            "cover_missing_guess": cover_missing_guess,
         }, f, ensure_ascii=False, indent=1)
 
     print(json.dumps({
@@ -188,6 +196,7 @@ def main():
         "n_captions_unconfirmed": len(captions_unconfirmed),
         "n_possible_missed_headings": len(possible_missed),
         "n_cover_paragraphs": len(cover_paragraphs),
+        "cover_missing_guess": cover_missing_guess,
         "review_candidates": out_path,
         "next_step": ("Read review_candidates.json in full (it is small). "
                        "*_confirmed: correct level/kind from CONTEXT if the "
@@ -199,6 +208,12 @@ def main():
                        "classification/field); fix any wrong one in "
                        "overrides.json['cover'] ({para_index: role}); role "
                        "'other' exempts a line from cover formatting. "
+                       "cover_missing_guess is a deterministic baseline -- read "
+                       "the whole cover and, if it can be judged semantically "
+                       "(项目名称/考核年份 come from the title lines; a title still "
+                       "reading XXXX/模板 is NOT filled in), set "
+                       "overrides.json['cover_present'] to the required items "
+                       "actually filled in (overrides the baseline). "
                        "Then run 27_apply_review.py before checking format; "
                        "if nothing needs correcting, proceed straight to "
                        "step 3."),

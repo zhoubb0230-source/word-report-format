@@ -145,6 +145,16 @@ def _mark_title_block(records):
         else:
             i += 1
 
+    # Positional signal: the 密级/文本编号 line sits ABOVE the title (fixed by the
+    # template, though not necessarily the very first line). Tag every non-blank
+    # cover line before the first title line so cover_role() can default it to
+    # "classification" even when the line has no 密级/文本编号 keyword (e.g. just
+    # "机密  202501323023"). The AI review can still override.
+    first_title_pos = next((idx for idx, r in enumerate(cover) if r.get("is_title")), None)
+    if first_title_pos is not None:
+        for r in cover[:first_title_pos]:
+            r["above_title"] = True
+
 
 def main():
     workdir = sys.argv[1]
@@ -279,8 +289,9 @@ def main():
             "is_toc": is_toc or is_toctitle,
             "toc_level": toc_level,
             "auto_num": auto_num,
-            "is_title": False,   # set by _mark_title_block() after region tagging
-            "cover_role": None,  # set only by the step-2.5 AI review (27_apply_review.py)
+            "is_title": False,     # set by _mark_title_block() after region tagging
+            "above_title": False,  # cover line positioned above the title block
+            "cover_role": None,    # set only by the step-2.5 AI review (27_apply_review.py)
             "is_heading": level is not None,
             "level": level,
             "level_source": level_source,

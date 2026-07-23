@@ -51,6 +51,12 @@ RE_TOC_STYLE_NAME = re.compile(r"^(?:toc|目录)\s*\d+$", re.IGNORECASE)
 # three never drift out of sync.
 STRIP_HEADING = ANY_LABEL_RE
 STRIP_CAPTION = re.compile(r"^\s*(?:\u56fe|\u8868)\s*[0-9]+(?:[-\.\u2013][0-9]+)?")
+# A bare \u56fe/\u8868 prefix with NO number. Used to strip the residual prefix left
+# behind when a caption's number lived in a Word field that gets deleted (the
+# static "\u56fe/\u8868" survives the field removal), or a \u8868\u6807\u9898-styled line that
+# carries the \u56fe/\u8868 word but no digit -- so writing the new \u56feN/\u8868N never
+# doubles the prefix ("\u56fe1\u56fe \u8bf4\u660e").
+STRIP_CAPTION_RESIDUE = re.compile(r"^\s*(?:\u56fe|\u8868)")
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +238,7 @@ def _field_run_spans(p):
     return spans, kids
 
 
-def _replace_leading(p, strip_re, new_prefix):
+def _replace_leading(p, strip_re, new_prefix, residue_re=None):
     """Replace a paragraph's leading numbering label with new_prefix.
 
     Field-aware: when the leading number is produced by a Word FIELD (e.g.
@@ -287,9 +293,16 @@ def _replace_leading(p, strip_re, new_prefix):
         return True
     full2 = "".join(t.text or "" for t in rem_t)
     m2 = strip_re.match(full2)
-    # if the label survived as text, strip it; if it was entirely inside the
-    # deleted field, only its trailing separator whitespace remains -> trim it
-    rest = full2[m2.end():] if m2 else full2.lstrip(" \t　")
+    # if the label survived as text, strip it; if only a bare prefix survived
+    # (the number was inside a now-deleted field), strip that residual prefix;
+    # if it was entirely inside the deleted field, only its trailing separator
+    # whitespace remains -> trim it
+    if m2:
+        rest = full2[m2.end():]
+    elif residue_re is not None and residue_re.match(full2):
+        rest = full2[residue_re.match(full2).end():]
+    else:
+        rest = full2.lstrip(" \t　")
     rem_t[0].text = new_prefix + rest
     rem_t[0].set(XML_SPACE, "preserve")
     for t in rem_t[1:]:
@@ -314,17 +327,53 @@ def _prepend_text(p, prefix):
     return True
 
 
+def _suppress_auto_numbering(p):
+    """Cancel any inherited (style-level) or direct Word automatic list
+    numbering on this paragraph by writing a direct numId=0 override (the OOXML
+    "no numbering" value), so a caption we renumber to static \u56feN/\u8868N text is not
+    ALSO auto-numbered by Word (which would stack two numbers)."""
+    pPr = get_pPr(p)
+    for npr in pPr.findall(qn("w:numPr")):
+        pPr.remove(npr)
+    numPr = _get_or_make(pPr, "w:numPr",
+                         before_tags=("w:spacing", "w:ind", "w:jc", "w:rPr", "w:sectPr"))
+    numId = _get_or_make(numPr, "w:numId")
+    numId.set(qn("w:val"), "0")
+
+
 def _apply_renumber_caption(p, fix):
+    if fix.get("strip_auto"):
+        # Original number came from Word automatic numbering (w:numPr); cancel it
+        # so the static \u56feN/\u8868N we write below is the only number that renders.
+        _suppress_auto_numbering(p)
     kname = "\u56fe" if fix.get("kind") == "figure" else "\u8868"
-    if fix.get("insert"):
-        # The caption had no \u56fe/\u8868+\u6570\u5b57 label to replace -- add one (with a
-        # trailing space before the existing content).
-        return _prepend_text(p, kname + str(fix["new_num"]) + " ")
     new_prefix = kname + str(fix["new_num"])
-    return _replace_leading(p, STRIP_CAPTION, new_prefix)
+    # 1) a proper \u56fe/\u8868 + number label (typed, or a field whose result is in
+    #    the text) -- replace it; residue_re cleans a bare \u56fe/\u8868 left if the
+    #    number was a field that got deleted, so we never double the prefix.
+    if _replace_leading(p, STRIP_CAPTION, new_prefix, residue_re=STRIP_CAPTION_RESIDUE):
+        return True
+    # 2) a bare \u56fe/\u8868 prefix with no number (style-detected caption whose number
+    #    was missing) -- replace just that prefix.
+    if _replace_leading(p, STRIP_CAPTION_RESIDUE, new_prefix):
+        return True
+    # 3) no \u56fe/\u8868 label in the text at all (auto-numbered caption whose number
+    #    lived only in numPr, or a \u8868\u6807\u9898 line reading just "\u8bbe\u5907\u6e05\u5355") -- add one.
+    return _prepend_text(p, new_prefix + " ")
+
+
+def _heading_insert_prefix(token):
+    """Prefix used when INSERTING a missing heading number. Arabic dotted tokens
+    ("1.") read better with a trailing space before the title; full-width
+    punctuation tokens ("\u4e00\u3001"/"\uff08\u4e00\uff09"/"\uff081\uff09") need none."""
+    return token + " " if token.endswith(".") else token
 
 
 def _apply_renumber_heading(p, fix):
+    if fix.get("insert"):
+        # Confirmed heading that lost its number entirely -- prepend the
+        # position token (there is no existing label to replace).
+        return _prepend_text(p, _heading_insert_prefix(fix["new_token"]))
     return _replace_leading(p, STRIP_HEADING, fix["new_token"])
 
 

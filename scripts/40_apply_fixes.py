@@ -208,6 +208,40 @@ def _set_jc(pPr, val):
     jc.set(qn("w:val"), val)
 
 
+# whitespace stripped from a paragraph's ends (space / tab / full-width /
+# no-break space). Internal runs of these are left alone -- only the leading
+# and/or trailing padding is removed.
+_STRIP_WS = " \t　   "
+
+
+def _strip_para_ws(p, mode):
+    """Strip leading and/or trailing whitespace from a paragraph's visible text.
+
+    mode: 'leading' | 'trailing' | 'both'. Operates on the w:t elements of the
+    paragraph's content runs in document order, so multi-run text is handled
+    correctly. Internal whitespace (e.g. the fill-in blanks in
+    "20   年   月至20   年   月") is preserved -- only the padding at the very
+    start and/or very end of the paragraph is removed. Leaves each surviving
+    w:t's xml:space attribute untouched."""
+    ts = [t for r in _iter_runs(p) for t in r.findall(qn("w:t"))]
+    if not ts:
+        return
+    if mode in ("leading", "both"):
+        for t in ts:
+            s = t.text or ""
+            stripped = s.lstrip(_STRIP_WS)
+            t.text = stripped
+            if stripped:
+                break  # first run with real content reached; stop
+    if mode in ("trailing", "both"):
+        for t in reversed(ts):
+            s = t.text or ""
+            stripped = s.rstrip(_STRIP_WS)
+            t.text = stripped
+            if stripped:
+                break
+
+
 # ---------------------------------------------------------------------------
 # text renumbering (collapse to first w:t; labels are single-style lines)
 # ---------------------------------------------------------------------------
@@ -647,6 +681,8 @@ def main():
                     fix.get("set_left_chars"))
             if fix.get("set_jc") is not None:
                 _set_jc(pPr, fix["set_jc"])
+            if fix.get("strip_text"):
+                _strip_para_ws(p, fix["strip_text"])
             applied["format"] += 1
         elif op == "renumber_caption":
             ok = _apply_renumber_caption(p, fix)

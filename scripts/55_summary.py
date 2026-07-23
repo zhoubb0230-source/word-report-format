@@ -166,6 +166,9 @@ def main():
     lines.append("")
     lines.append("> 已修正项已在 `formatted.docx` 中改好并逐处附 XAgent 批注；"
                  "「提示」「应用失败」项脚本未擅自改动，需人工核实。")
+    lines.append(">")
+    lines.append("> 目录（TOC）为避免打开文档时弹出“是否更新域”对话框，未设为自动刷新；"
+                 "如需让目录反映改后的标题序号与页码，请在 Word 中 **Ctrl+A 全选后按 F9** 手动更新一次。")
     lines.append("")
 
     lines.append("## 按类别统计")

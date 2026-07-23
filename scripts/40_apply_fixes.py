@@ -584,38 +584,22 @@ def _disable_update_fields(pkg_dir):
         tree.write(path, xml_declaration=True, encoding="UTF-8", standalone=True)
 
 
-def _mark_toc_fields_dirty(doc_root):
-    """Mark every TOC field dirty so Word rebuilds the table of contents on open
-    WITHOUT the global "update fields?" dialog.
+def _clear_field_dirty(doc_root):
+    """Remove any w:dirty flag from every field (complex begin w:fldChar and
+    simple w:fldSimple).
 
-    We renumber headings and restyle paragraphs, so the TOC entries (their text
-    and page numbers) must refresh or they go stale. Rather than the global
-    updateFields flag (which prompts on open), each TOC field is flagged
-    individually with w:dirty="true": Word refreshes just those fields silently.
-    Handles both complex fields (a begin w:fldChar whose following instrText
-    contains "TOC") and simple fields (w:fldSimple with a TOC instr). A stack
-    matches begin/end across the many paragraphs a TOC field spans, and pairs
-    the instrText with the innermost open field. Returns the count marked."""
+    A dirty field makes Word prompt "该文档包含的域可能引用了其他文件。是否更新…"
+    on open, exactly like the global updateFields flag does. To guarantee ZERO
+    prompt we neither set updateFields=true NOR mark any field dirty: the TOC is
+    left with its cached result and the user refreshes it manually (Ctrl+A → F9)
+    when they want the renumbered headings / new page numbers reflected. This
+    also strips any dirty flag the source template happened to ship with.
+    Returns the count cleared."""
     n = 0
-    stack = []
-    for r in doc_root.iter(qn("w:r")):
-        fc = r.find(qn("w:fldChar"))
-        if fc is not None:
-            typ = fc.get(qn("w:fldCharType"))
-            if typ == "begin":
-                stack.append({"fldChar": fc, "instr": ""})
-            elif typ == "end" and stack:
-                item = stack.pop()
-                if "TOC" in item["instr"].upper():
-                    item["fldChar"].set(qn("w:dirty"), "true")
-                    n += 1
-            continue
-        it = r.find(qn("w:instrText"))
-        if it is not None and stack:
-            stack[-1]["instr"] += (it.text or "")
-    for fs in doc_root.iter(qn("w:fldSimple")):
-        if "TOC" in (fs.get(qn("w:instr")) or "").upper():
-            fs.set(qn("w:dirty"), "true")
+    dirty_attr = qn("w:dirty")
+    for el in doc_root.iter(qn("w:fldChar"), qn("w:fldSimple")):
+        if el.get(dirty_attr) is not None:
+            del el.attrib[dirty_attr]
             n += 1
     return n
 
@@ -717,9 +701,11 @@ def main():
     # shading / zero size in the caption numbering definition.
     applied["caption_num_unhidden"] = _clean_caption_numbering(out_pkg)
 
-    # Refresh the TOC on open WITHOUT the "update fields?" dialog: mark the TOC
-    # field(s) dirty (per-field) and make sure no global updateFields flag is set.
-    applied["toc_fields_dirty"] = _mark_toc_fields_dirty(root)
+    # Guarantee NO "update fields?" prompt on open: neither the global
+    # updateFields flag nor any per-field dirty mark is left set (both trigger
+    # the "该文档包含的域可能引用了其他文件…" dialog). The TOC keeps its cached
+    # result; the user refreshes it manually (Ctrl+A → F9) when needed.
+    applied["field_dirty_cleared"] = _clear_field_dirty(root)
     _disable_update_fields(out_pkg)
 
     tree.write(doc_path, xml_declaration=True, encoding="UTF-8", standalone=True)

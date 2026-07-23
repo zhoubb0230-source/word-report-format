@@ -208,6 +208,40 @@ def _set_jc(pPr, val):
     jc.set(qn("w:val"), val)
 
 
+# whitespace stripped from a paragraph's ends (space / tab / full-width /
+# no-break space). Internal runs of these are left alone -- only the leading
+# and/or trailing padding is removed.
+_STRIP_WS = " \t　   "
+
+
+def _strip_para_ws(p, mode):
+    """Strip leading and/or trailing whitespace from a paragraph's visible text.
+
+    mode: 'leading' | 'trailing' | 'both'. Operates on the w:t elements of the
+    paragraph's content runs in document order, so multi-run text is handled
+    correctly. Internal whitespace (e.g. the fill-in blanks in
+    "20   年   月至20   年   月") is preserved -- only the padding at the very
+    start and/or very end of the paragraph is removed. Leaves each surviving
+    w:t's xml:space attribute untouched."""
+    ts = [t for r in _iter_runs(p) for t in r.findall(qn("w:t"))]
+    if not ts:
+        return
+    if mode in ("leading", "both"):
+        for t in ts:
+            s = t.text or ""
+            stripped = s.lstrip(_STRIP_WS)
+            t.text = stripped
+            if stripped:
+                break  # first run with real content reached; stop
+    if mode in ("trailing", "both"):
+        for t in reversed(ts):
+            s = t.text or ""
+            stripped = s.rstrip(_STRIP_WS)
+            t.text = stripped
+            if stripped:
+                break
+
+
 # ---------------------------------------------------------------------------
 # text renumbering (collapse to first w:t; labels are single-style lines)
 # ---------------------------------------------------------------------------
@@ -564,6 +598,17 @@ def _clean_caption_numbering(pkg_dir):
 
 
 def _set_update_fields(pkg_dir):
+    """Set settings.xml <w:updateFields w:val="true"/> so Word refreshes the TOC
+    (renumbered headings + new page numbers) when the document is opened.
+
+    Trade-off (chosen deliberately): Word shows the "该文档包含的域可能引用了其他
+    文件。是否更新…" prompt once per open, and clicking 是 rebuilds the TOC to match
+    the corrected body. In Word there is no document setting that auto-refreshes
+    the TOC WITHOUT this prompt — a per-field w:dirty mark triggers the very same
+    dialog — so the only prompt-free alternative is to leave the TOC stale until
+    the user presses Ctrl+A then F9. We take the native, exact refresh here.
+    If the prompt appears for OTHER reasons (external INCLUDE/LINK/DDE fields,
+    external relationships, OLE), run scripts/diagnose_fields.py on the output."""
     path = os.path.join(pkg_dir, "word", "settings.xml")
     if not os.path.exists(path):
         return
@@ -636,6 +681,8 @@ def main():
                     fix.get("set_left_chars"))
             if fix.get("set_jc") is not None:
                 _set_jc(pPr, fix["set_jc"])
+            if fix.get("strip_text"):
+                _strip_para_ws(p, fix["strip_text"])
             applied["format"] += 1
         elif op == "renumber_caption":
             ok = _apply_renumber_caption(p, fix)
@@ -674,6 +721,9 @@ def main():
     # shading / zero size in the caption numbering definition.
     applied["caption_num_unhidden"] = _clean_caption_numbering(out_pkg)
 
+    # Refresh the TOC on open (renumbered headings + page numbers) via the global
+    # updateFields flag. Word prompts once on open; clicking 是 rebuilds the TOC
+    # to match the corrected body (see _set_update_fields for the trade-off).
     _set_update_fields(out_pkg)
 
     tree.write(doc_path, xml_declaration=True, encoding="UTF-8", standalone=True)

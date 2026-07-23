@@ -1,2 +1,4 @@
 __pycache__/
 *.pyc
+# 流水线过程件的固定临时基目录（05_new_workdir.py 创建，59_cleanup.py 清理）
+.word_report_work/

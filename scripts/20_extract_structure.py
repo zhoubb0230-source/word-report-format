@@ -41,6 +41,7 @@ from docxcommon import (
 from headings import (
     RE_CAPTION, RE_TOCTITLE, infer_heading_level, parse_leading_label,
     looks_like_caption_style, caption_kind_from_style, toc_level_from_style,
+    style_is_toc,
 )
 
 
@@ -231,7 +232,7 @@ def main():
                     ppr[k] = lvl_ppr[k]
 
         is_blank = not text.strip()
-        is_toc = bool(sid and sid.lower().startswith("toc")) or has_toc_field(p) or in_toc_sdt(p)
+        is_toc = style_is_toc(sid, resolver) or has_toc_field(p) or in_toc_sdt(p)
         is_toctitle = bool(RE_TOCTITLE.match(text))
         toc_level = toc_level_from_style(sid, resolver) if (is_toc and not is_toctitle) else None
 

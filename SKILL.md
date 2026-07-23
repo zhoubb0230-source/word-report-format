@@ -49,6 +49,7 @@ word-report-format/
   spec/format_spec.json     ← 固定规范（唯一判定依据）
   scripts/
     00_check_env.py         ← 探测 python/lxml/soffice，判断能否转换 .doc
+    05_new_workdir.py       ← 创建本次运行专属的唯一工作目录（固定临时基目录下），所有过程件都落在这里
     10_prepare_input.py     ← 生成 working.docx（.doc 需转换）+ meta.json
     20_extract_structure.py ← 解析生效格式 → structure.json + shards/（标题层级为默认猜测，见第 2.5 步）
     26_export_review.py     ← 导出全文标题/图表候选清单，供模型判断层级 → review_candidates.json
@@ -57,7 +58,11 @@ word-report-format/
     31_check_global.py      ← 全局项：页边距 + 序号连续性 + 内容提示
     35_merge_fixes.py       ← 合并各分片结果为 fixes.json
     40_apply_fixes.py       ← 在新文档上应用 + 加 XAgent 批注 → formatted.docx
-    50_finalize.py          ← 按命名规范输出（.doc 输入则转回 .doc）
+    45_validate_output.py   ← 输出自检：zip完整/XML良构/必备part/段落数前后一致（坏了退2）
+    50_finalize.py          ← 按命名规范输出（.doc 输入则转回 .doc）到 workdir 之外的输出目录
+    55_summary.py           ← 从 fixes.json + apply_report.json 生成人类可读修改汇总表 summary.md
+    59_cleanup.py           ← 交付完成后删除本次运行的工作目录（过程件全部清掉）
+    diagnose_fields.py      ← 只读排查"是否更新域"弹窗来源（updateFields/dirty/外部引用域/外部关系/OLE）
     lib/                    ← 自包含依赖（lxml，无需 python-docx / defusedxml）
 ```
 
@@ -72,6 +77,20 @@ python scripts/00_check_env.py
 - `ok=false` → 缺关键依赖（python 或 lxml），停止并告知用户环境不满足。
 - 用户给的是 **.doc** 且 `can_convert_doc=false` → **停止**，通知用户：当前环境无法转换 .doc，
   无法保证输出类型一致，请改传 .docx 或在支持 LibreOffice 的环境运行。**不要**擅自改用别的格式硬跑。
+
+## 第 0.5 步：创建本次运行的工作目录（每次必做）
+
+```bash
+python scripts/05_new_workdir.py
+```
+
+- 输出单行 JSON：`{status, workdir, base}`。**把 `workdir` 记下来，后续每一步的 `<workdir>` 参数都用它**，
+  **不要自己另编一个路径**——所有过程件（`working.docx`/`structure.json`/`shards/`/`fixes.json`/
+  `out_pkg/`/`formatted.docx`/`summary.md` 等）都统一落在这个目录里，不再散落各处。
+- 该目录建在**固定临时基目录** `<当前工作目录>/.word_report_work/` 下、名字**每次运行都唯一**
+  （`run_<时间戳>_<随机>`，由 `tempfile.mkdtemp` 原子创建）。因此**多个 session 并发也互不干扰**，
+  各自有独立工作目录，不会串内容。（基目录可用环境变量 `WORD_REPORT_WORK_BASE` 改到别处。）
+- `.word_report_work/` 已在 `.gitignore` 里，不会被提交。
 
 ## 第 1 步：准备输入
 
@@ -97,13 +116,15 @@ python scripts/20_extract_structure.py <workdir> [--shard-size 400]
   过长行），只要其中有一行是可信锚点（最大字号或居中），整块都打 `is_title`，从而每一行都会被居中并
   规范字体字号。
 - **封面各要素按"角色"套格式**（封面无固定版式，可由第 2.5 步 AI 复核精确判定，见下）：
-  - `title` 报告标题 → 方正小标宋 / 20磅 / 居中 / 清缩进；
+  - `title` 报告标题 → 方正小标宋 / 20磅 / 居中 / 清缩进 / **删除首尾多余空格**（首尾空格会参与居中导致
+    视觉偏移，删后再居中；标题内部空格保留）；
   - `classification` 密级·文本编号行（同一行，**可能没有 key**，如「机密  202501323023」）→ 仿宋 / 16磅；
-  - `field` 其余要素（项目名称/承担单位/项目负责人/起止时间/编制时间等）→ 方正黑体 / 15磅；
+  - `field` 其余要素（项目名称/承担单位/项目负责人/起止时间/编制时间等）→ 方正黑体 / 15磅 / **左对齐**
+    （删除行首空格、清除左/首行缩进、非左对齐时改为左对齐；行内填空空格如「20   年   月」保留）；
   - `other` → 不动。
   角色先由启发式默认（标题块 → title；**位于标题上方的行或含 `spec.cover.classification_keywords` 关键词**
   → classification；其余 → field），AI 复核可覆盖。字体字号值全部在 `spec`（`title`/`cover_classification`/
-  `cover_field`），可调；密级/字段只校验字体字号，不动对齐与缩进。
+  `cover_field`），可调；密级行只校验字体字号、不动对齐缩进；字段行额外做左对齐修复（见上）。
 - **封面必备信息**（缺项提示、非自动改）：`项目名称`/`考核年份` 来自标题（常两行＝项目名称＋考核年份），
   密级可写成值（机密/秘密…）；确定性基线尽量不误报，AI 复核可用 `cover_present` 给出语义裁决权威覆盖；
   标题若仍是 `XXXX/模板` 占位符会单独提示未替换。
@@ -192,7 +213,15 @@ python scripts/26_export_review.py <workdir>
 ```bash
 python scripts/30_check_format.py <workdir>      # 全量：逐段格式 + 页边距 + 连续性 + 内容提示 → fixes.json
 python scripts/40_apply_fixes.py <workdir>       # 应用到新文档 + XAgent 批注 → formatted.docx
-python scripts/50_finalize.py  <workdir> <输出目录>
+python scripts/45_validate_output.py <workdir>   # 输出自检；退出码非0（2）说明文档被改坏，勿交付、须排查
+python scripts/50_finalize.py  <workdir> <输出目录>   # <输出目录> 必须在 workdir 之外（成品要留下来）
+python scripts/55_summary.py   <workdir>         # 生成 summary.md 修改汇总表（连同 formatted 一起交付）
+```
+
+**交付完成后清理**（成品与 `summary.md` 已在 workdir 之外，过程件可以删了）：
+
+```bash
+python scripts/59_cleanup.py <workdir>           # 删除本次运行的工作目录，回收全部过程件
 ```
 
 ### Path B —— 支持子 agent（**优先/硬性要求**，适用于 3000 页大文档）
@@ -214,7 +243,10 @@ python scripts/50_finalize.py  <workdir> <输出目录>
    ```bash
    python scripts/35_merge_fixes.py <workdir>    # 各片 + _global 合并去重 → fixes.json
    python scripts/40_apply_fixes.py <workdir>    # → formatted.docx（含 XAgent 批注）
-   python scripts/50_finalize.py  <workdir> <输出目录>
+   python scripts/45_validate_output.py <workdir># 输出自检；退出码非0（2）勿交付、须排查
+   python scripts/50_finalize.py  <workdir> <输出目录>   # <输出目录> 必须在 workdir 之外
+   python scripts/55_summary.py   <workdir>      # → summary.md 修改汇总表
+   python scripts/59_cleanup.py   <workdir>      # 交付完成后删除工作目录，回收全部过程件
    ```
 
 > 分片检查只做「逐段格式」；页边距与序号连续性是全局的，统一由 `31_check_global.py` 负责，
@@ -222,9 +254,23 @@ python scripts/50_finalize.py  <workdir> <输出目录>
 
 ## 产物说明
 
-- `formatted.docx`：已修正 + 每处改动/提示带 `XAgent` 批注；已设 `updateFields`，用户打开时目录会自动刷新。
-  因目录刷新会按 TOC 样式重建条目并丢弃直接格式，`40_apply_fixes.py` 会同时把 `TOC1/TOC2/TOC3` 目录条目
-  **样式本身**改成仿宋/14 磅/按级缩进（一级 0、二级 2 字符、三级 4 字符），保证刷新后目录仍符合规范。
+- `summary.md`（`55_summary.py`）：人类可读的**修改汇总表**，与 `formatted.docx` 一并交付。它直接读
+  `fixes.json` + `apply_report.json` 这两个**结构化**产物（不是反过来解析批注文字，所以批注措辞变了汇总也
+  不会变空），按「位置 / 类别 / 内容摘要 / 规范依据 / 状态」列出每一处，并给出「已修正 / 提示待人工 /
+  应用失败」计数。用户不必逐条翻文档批注就能一眼看全改了什么、哪些还需人工。
+- `validate_report.json`（`45_validate_output.py`）：输出文档的结构自检结果。在 `40` 之后、`50` 之前跑，
+  做 zip 完整性 + 必备 part 存在 + 每个 xml/rels 良构 + **段落数与改前 working.docx 一致** 四项检查
+  （格式/编号/批注操作都不应增删段落，段落数变了即结构被改坏）。**退出码非 0（2）时不要交付**，先查
+  `validate_report.json` 里的 `errors` 定位问题。这是防「真实 Word 打开提示需修复」的最后一道兜底。
+- `formatted.docx`：已修正 + 每处改动/提示带 `XAgent` 批注。`40_apply_fixes.py` 设 `updateFields=true`，
+  用户打开时 Word 会提示"该文档包含的域可能引用了其他文件。是否更新…"，**点"是"即自动刷新目录**（反映
+  改后的标题序号与页码）。这个提示是 Word 处理带目录文档的**正常行为、非损坏**；`summary.md` 顶部已写明
+  请点"是"。⚠️ Word 里"目录打开时自动刷新"与"零弹窗"**无法只靠文档设置两全**——全局 `updateFields` 和
+  域级 `w:dirty` 都会触发同一个弹窗；唯一零弹窗的替代是不刷新、由用户 Ctrl+A→F9 手动刷。这是经确认的取舍，
+  当前默认取"自动刷新（一次弹窗）"，**不要**擅自改回零弹窗方案。因目录刷新会按 TOC 样式重建条目并丢弃
+  直接格式，`40_apply_fixes.py` 会同时把 `TOC1/TOC2/TOC3` 目录条目**样式本身**改成仿宋/14 磅/按级缩进
+  （一级 0、二级 2 字符、三级 4 字符），保证刷新后目录仍符合规范。**若弹窗疑似另有来源**（原文档自带的
+  INCLUDE·LINK·DDE 等外部引用域 / 外部关系 / OLE），用 `scripts/diagnose_fields.py <docx>` 排查定位。
 - 图表标题排版为**居中、无任何缩进**；正文/标题修首行缩进时会把左、右缩进一并清零（避免与首行缩进叠加
   导致实际缩进超过 2 字符）；序号与标题正文之间用空格/制表符分隔（如「5 项目…」）也能识别并改正序号。
 - **自动编号（Word 多级列表 `w:numPr`）**：

@@ -178,7 +178,8 @@ def check_paragraph(rec, spec):
     eff = rec["eff"]
     sets = {"set_east_asia": None, "set_ascii": None, "set_size_hp": None,
             "set_line_exact": None, "set_first_line_chars": None,
-            "clear_left_indent": False, "clear_right_indent": False, "set_jc": None}
+            "clear_left_indent": False, "clear_right_indent": False,
+            "set_jc": None, "strip_text": None}
     violations = []
 
     # -- Cover region: title / classification (\u5bc6\u7ea7\u00b7\u6587\u672c\u7f16\u53f7) / other fields --
@@ -202,19 +203,35 @@ def check_paragraph(rec, spec):
             # \uff08center \u662f\u76f8\u5bf9\u5de6\u53f3\u7f29\u8fdb\u4e4b\u540e\u7684\u53ef\u7528\u5bbd\u5ea6\u5c45\u4e2d\uff0c\u4e0d\u662f\u76f8\u5bf9\u6574\u4e2a\u9875\u9762\u5bbd\u5ea6\uff09\uff0c
             # \u53ea\u6e05\u5de6\u7f29\u8fdb\u3001\u7559\u7740\u53f3\u7f29\u8fdb\u4e00\u6837\u4f1a\u5bfc\u81f4\u89c6\u89c9\u4e0a\u4e0d\u662f\u771f\u6b63\u5c45\u4e2d\u3002
             _check_no_indent(eff, sets, violations, "\u9898\u76ee")
+            # \u9898\u76ee\u9996\u5c3e\u7684\u591a\u4f59\u7a7a\u683c\u4f1a\u53c2\u4e0e\u5c45\u4e2d\u8ba1\u7b97\uff0c\u5bfc\u81f4\u89c6\u89c9\u4e0a\u504f\u79fb\uff08\u4e0d\u662f\u771f\u6b63\u5c45\u4e2d\uff09\u3002
+            # \u5220\u9664\u9996\u5c3e\u7a7a\u767d\uff08\u4fdd\u7559\u6807\u9898\u5185\u90e8\u7a7a\u683c\uff09\uff0c\u624d\u80fd\u771f\u6b63\u6309\u6b63\u6587\u5185\u5bb9\u5c45\u4e2d\u3002
+            text = rec.get("text") or ""
+            if text != text.strip():
+                sets["strip_text"] = "both"
+                violations.append("\u9898\u76ee\u9996\u5c3e\u591a\u4f59\u7a7a\u683c\u5e94\u5220\u9664\uff08\u5426\u5219\u5c45\u4e2d\u4f1a\u504f\u79fb\uff09")
             return _mk_format(rec["i"], sets, violations)
-        # classification (\u5bc6\u7ea7/\u6587\u672c\u7f16\u53f7) and field roles: font/size only, per spec.
+        # classification (\u5bc6\u7ea7/\u6587\u672c\u7f16\u53f7): font/size only, per spec.
         # Alignment/indent are NOT enforced -- the spec states nothing about them
-        # for these cover lines, and their leading spaces are template layout.
+        # and the \u5bc6\u7ea7/\u7f16\u53f7 line's position is template layout.
         if role == "classification":
             entry = spec.get("cover_classification")
             label = "\u5c01\u9762\u5bc6\u7ea7/\u6587\u672c\u7f16\u53f7"
-        else:  # "field"
-            entry = spec.get("cover_field")
-            label = "\u5c01\u9762\u8981\u7d20"
-        if not entry or not entry.get("east_asia") or not entry.get("size_hp"):
-            return None  # spec not configured for this cover role; nothing to check
-        _check_font_size(eff, entry, sets, violations, label=label)
+            if not entry or not entry.get("east_asia") or not entry.get("size_hp"):
+                return None  # spec not configured; nothing to check
+            _check_font_size(eff, entry, sets, violations, label=label)
+            return _mk_format(rec["i"], sets, violations)
+        # field role (\u9879\u76ee\u540d\u79f0/\u627f\u62c5\u5355\u4f4d/\u9879\u76ee\u8d1f\u8d23\u4eba/\u8d77\u6b62\u65f6\u95f4/\u7f16\u5236\u65f6\u95f4 \u7b49):
+        # font/size per spec, PLUS these lines must be left-aligned. When they
+        # carry leading spaces or a left/first-line indent (template layout),
+        # that pushes the text right so it no longer sits flush at the margin --
+        # strip the leading whitespace, clear the indent, and force left
+        # alignment. Internal spaces (fill-in blanks like "20   \u5e74   \u6708") are
+        # preserved -- only the leading padding is removed.
+        entry = spec.get("cover_field")
+        label = "\u5c01\u9762\u8981\u7d20"
+        if entry and entry.get("east_asia") and entry.get("size_hp"):
+            _check_font_size(eff, entry, sets, violations, label=label)
+        _check_cover_field_left(rec, eff, sets, violations)
         return _mk_format(rec["i"], sets, violations)
 
     # -- Body region: headings / captions / normal body --
@@ -317,6 +334,30 @@ def _check_toc(rec, spec):
         sets["clear_right_indent"] = True
         violations.append("目录不应有右缩进")
     return _mk_format(rec["i"], sets, violations)
+
+
+def _check_cover_field_left(rec, eff, sets, violations):
+    """封面要素行（项目名称/承担单位/项目负责人/起止时间/编制时间 等）左对齐修复。
+
+    这些行应贴着左边距对齐。若行首带有空格，或存在左/首行缩进、或被设成了
+    居中/右对齐，视觉上就不是左对齐。这里：删除行首空白、清除左/首行缩进、
+    并在必要时把对齐方式改为左对齐。行内空格（如"20   年   月"的填空）保留。"""
+    text = rec.get("text") or ""
+    # 1) 对齐方式：非左对齐（居中/右对齐/两端对齐）时改为左对齐
+    if eff.get("jc") not in (None, "left", "start"):
+        sets["set_jc"] = "left"
+        violations.append("封面要素应左对齐")
+    # 2) 左/首行缩进：任何把文本推离左边距的缩进都清零
+    if any(eff.get(k) for k in ("first_line_chars", "first_line",
+                                "left_chars", "left", "start_chars", "start")):
+        sets["set_first_line_chars"] = 0
+        sets["clear_left_indent"] = True
+        violations.append("封面要素应清除左侧/首行缩进")
+    # 3) 行首空格：删除（否则即使左对齐，文本仍被空格顶开）
+    if text != text.lstrip():
+        # 既有清首尾需求时用 both，否则仅清行首
+        sets["strip_text"] = "both" if sets.get("strip_text") == "both" else "leading"
+        violations.append("封面要素行首空格应删除（左对齐）")
 
 
 def _check_no_indent(eff, sets, violations, label):

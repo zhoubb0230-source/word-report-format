@@ -152,6 +152,23 @@ def toc_level_from_style(style_id, resolver):
     return int(m.group(1)) if m else None
 
 
+def style_is_toc(style_id, resolver):
+    """True if a paragraph's style is a TOC ENTRY style — detected by id OR by
+    the (possibly localized) style NAME ('TOC1'/'toc 2'/'目录 3').
+
+    Checking the NAME, not just the id, is essential: many 中文/WPS documents
+    give their TOC entry styles a non-'TOC…' styleId (numeric or otherwise)
+    while the NAME is '目录 N'. Only the FIRST TOC paragraph carries the TOC
+    field instruction; the remaining entries are recognized solely by their
+    style, so a style test that misses the localized name silently drops every
+    entry after the first into the heading branch (wrong font/indent, and a
+    renumber may even rewrite the entry text)."""
+    sid, name = _style_name(style_id, resolver)
+    if sid.lower().startswith("toc"):
+        return True
+    return bool(_TOC_LVL_RE.search(sid + " " + name))
+
+
 def caption_kind_from_style(style_id, resolver):
     """Infer 'figure'/'table' from a caption style's NAME when the paragraph
     text itself carries no 图/表 prefix (e.g. a "表标题"-styled line that just

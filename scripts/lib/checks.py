@@ -54,6 +54,45 @@ def int2cn(n):
     return s
 
 
+# Section titles that are conventionally UNNUMBERED even when they carry a real
+# heading/outline style (摘要/前言/结论/目录/参考文献/…). A confirmed heading
+# whose title is one of these is neither auto-numbered nor counted, so it does
+# NOT shift the ordinals of the numbered headings around it. Matched against the
+# heading text with any leading label and trailing colon/space stripped.
+UNNUMBERED_HEADING_EXACT = {
+    "摘要", "中文摘要", "英文摘要", "内容摘要",
+    "前言", "引言", "序言", "绪论", "绪言",
+    "结论", "结语", "结束语",
+    "目录", "索引",
+    "致谢", "鸣谢", "后记",
+    "声明", "独创性声明", "原创性声明", "版权声明",
+    "abstract",
+}
+# Prefixes that start an unnumbered section even with a trailing token
+# ("附录A"/"附录一"/"参考文献 [续]").
+UNNUMBERED_HEADING_PREFIX = ("附录", "附件", "参考文献", "参考资料")
+
+
+def _norm_title(text, num_raw):
+    """Heading text minus any leading numbering label and trailing colon/space,
+    lower-cased, for denylist comparison."""
+    t = text or ""
+    if num_raw and t.startswith(num_raw):
+        t = t[len(num_raw):]
+    return t.strip().strip("：: 　").lower()
+
+
+def is_unnumbered_section(text, num_raw):
+    """True if this heading is a conventionally-unnumbered section
+    (摘要/前言/结论/目录/参考文献/附录/致谢/...)."""
+    t = _norm_title(text, num_raw)
+    if not t:
+        return False
+    if t in UNNUMBERED_HEADING_EXACT:
+        return True
+    return t.startswith(UNNUMBERED_HEADING_PREFIX)
+
+
 def _size_name(hp):
     """Half-point value -> a human-readable Chinese size label for comments."""
     names = {40: "20磅", 36: "小一", 32: "三号",
@@ -365,6 +404,11 @@ def continuity(records, spec):
                 "comment": True,
             })
             continue
+        if is_unnumbered_section(r.get("text"), r.get("num_raw")):
+            # 惯例不编号的章节（摘要/前言/结论/目录/参考文献/附录/致谢…）：即便挂了
+            # 标题/大纲样式也不自动补号，且不占用同级序号计数——否则它后面真正要
+            # 编号的同级标题会被多算一位。
+            continue
         counters[lvl] += 1
         for d in range(lvl + 1, 5):
             counters[d] = 0
@@ -379,13 +423,14 @@ def continuity(records, spec):
                 # its own -- leave it to Word (方案1). The counter was already
                 # advanced above so any manually-numbered siblings still line up.
                 continue
-            # Genuinely un-numbered heading -- nothing safe to insert
-            # automatically (some headings are intentionally unnumbered, e.g.
-            # "摘要"/"结论"), so hint rather than silently skip.
+            # 已确认样式/大纲级别、且不在"惯例不编号"名单里的标题——漏了序号就按
+            # 位置自动补（与图表标题补号一致），不再只提示让用户确认。惯例不编号的
+            # 章节已在上面提前跳过，不会走到这里。
             fixes.append({
-                "para_index": r["i"], "op": "hint",
+                "para_index": r["i"], "op": "renumber_heading", "level": lvl,
+                "new_token": expected_token, "insert": True,
                 "rule_id": "heading.missing_number",
-                "rule_text": "%d级标题未识别到序号（按位置应为“%s”），请确认是否漏编号" % (lvl, expected_token),
+                "rule_text": "%d级标题缺少序号，已按位置自动补为“%s”" % (lvl, expected_token),
                 "comment": True,
             })
             continue
@@ -428,15 +473,16 @@ def continuity(records, spec):
                     "comment": True,
                 })
                 continue
-            if r.get("auto_num"):
-                # 自动编号的图表标题（少见，但存在）：编号由 Word 生成并保持
-                # 连续，跳过——不插入也不重排（方案1）。
-                continue
             # Confirmed caption (题注/图标题/表标题/... style, or model-confirmed).
-            # BOTH numbered and un-numbered (num_raw is None) confirmed captions
-            # join the numbering sequence: an un-numbered one occupies a slot and
-            # gets its 图N/表N number AUTO-INSERTED below -- a caption style is a
-            # reliable enough signal to add the missing number, not merely hint.
+            # ALL confirmed captions join the numbering sequence and get a
+            # deterministic static 图N/表N -- whether the original number was
+            # typed, missing (num_raw is None -> AUTO-INSERTED below), or produced
+            # by Word automatic numbering (auto_num). For auto_num captions the
+            # apply stage additionally cancels the paragraph's w:numPr (numId=0)
+            # so Word's own number does not double up on top of the static one;
+            # this is what lets an ABNORMAL/broken auto-number be corrected to a
+            # proper 图N/表N instead of merely un-hidden. A caption style is a
+            # reliable enough signal to do all this without further confirmation.
             confirmed.append(r)
         if not confirmed:
             continue
@@ -484,13 +530,18 @@ def continuity(records, spec):
 
 def _caption_fix(r, kind, new_num, old_num, insert=False):
     kname = "图" if kind == "figure" else "表"
-    if insert:
+    # auto_num captions carry Word automatic numbering (w:numPr) that the apply
+    # stage must cancel before writing the static number, or the two would stack.
+    strip_auto = bool(r.get("auto_num"))
+    if strip_auto:
+        rule_text = "%s标题原为自动编号（可能异常），已改为按顺序静态编号“%s%s”" % (kname, kname, new_num)
+    elif insert:
         rule_text = "%s标题缺少编号，已按顺序自动添加为“%s%s”" % (kname, kname, new_num)
     else:
         rule_text = "%s编号不连续，应为“%s%s”（原为“%s%s”）" % (kname, kname, new_num, kname, old_num)
     return {
         "para_index": r["i"], "op": "renumber_caption", "kind": kind,
-        "new_num": new_num, "insert": insert,
+        "new_num": new_num, "insert": insert, "strip_auto": strip_auto,
         "rule_id": "caption.%s.continuity" % kind,
         "rule_text": rule_text,
         "comment": True,

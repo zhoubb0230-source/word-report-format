@@ -30,7 +30,7 @@ from lxml import etree
 from docxcommon import (qn, parse_xml, unzip_docx, rezip_docx,
                         iter_body_paragraphs)
 from commentwriter import CommentWriter
-from headings import ANY_LABEL_RE
+from headings import ANY_LABEL_RE, CAPTION_STYLE_HINTS
 
 SPEC_PATH = os.path.join(os.path.dirname(__file__), "..", "spec", "format_spec.json")
 
@@ -51,6 +51,12 @@ RE_TOC_STYLE_NAME = re.compile(r"^(?:toc|目录)\s*\d+$", re.IGNORECASE)
 # three never drift out of sync.
 STRIP_HEADING = ANY_LABEL_RE
 STRIP_CAPTION = re.compile(r"^\s*(?:\u56fe|\u8868)\s*[0-9]+(?:[-\.\u2013][0-9]+)?")
+# A bare \u56fe/\u8868 prefix with NO number. Used to strip the residual prefix left
+# behind when a caption's number lived in a Word field that gets deleted (the
+# static "\u56fe/\u8868" survives the field removal), or a \u8868\u6807\u9898-styled line that
+# carries the \u56fe/\u8868 word but no digit -- so writing the new \u56feN/\u8868N never
+# doubles the prefix ("\u56fe1\u56fe \u8bf4\u660e").
+STRIP_CAPTION_RESIDUE = re.compile(r"^\s*(?:\u56fe|\u8868)")
 
 
 # ---------------------------------------------------------------------------
@@ -205,18 +211,101 @@ def _set_jc(pPr, val):
 # ---------------------------------------------------------------------------
 # text renumbering (collapse to first w:t; labels are single-style lines)
 # ---------------------------------------------------------------------------
-def _replace_leading(p, strip_re, new_prefix):
-    ts = [t for t in p.iter(qn("w:t"))]
-    if not ts:
+XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
+
+
+def _field_run_spans(p):
+    """[(begin_idx, end_idx)] into list(p) for each top-level field
+    (w:fldChar begin..matching end). Handles nesting via a depth counter."""
+    kids = list(p)
+    spans, depth, start = [], 0, None
+    for idx, ch in enumerate(kids):
+        if ch.tag != qn("w:r"):
+            continue
+        fc = ch.find(qn("w:fldChar"))
+        if fc is None:
+            continue
+        typ = fc.get(qn("w:fldCharType"))
+        if typ == "begin":
+            if depth == 0:
+                start = idx
+            depth += 1
+        elif typ == "end" and depth > 0:
+            depth -= 1
+            if depth == 0 and start is not None:
+                spans.append((start, idx))
+                start = None
+    return spans, kids
+
+
+def _replace_leading(p, strip_re, new_prefix, residue_re=None):
+    """Replace a paragraph's leading numbering label with new_prefix.
+
+    Field-aware: when the leading number is produced by a Word FIELD (e.g.
+    a heading numbered by "{ = 1 \\* Arabic }" — the digit lives in the field
+    RESULT, not as typed text), the whole field is deleted. Otherwise Word
+    would regenerate the number from the field code on the next field refresh
+    (we set updateFields=true), wiping our replacement AND, because the old
+    code collapsed all text into that field-result run, the real title text
+    with it — leaving only the recomputed "1". After removing any label field,
+    the remaining leading separator whitespace is trimmed and the new token is
+    prepended to the actual content run."""
+    all_t = [t for t in p.iter(qn("w:t"))]
+    if not all_t:
         return False
-    full = "".join(t.text or "" for t in ts)
+    full = "".join(t.text or "" for t in all_t)
     m = strip_re.match(full)
     if not m:
         return False
-    newfull = new_prefix + full[m.end():]
-    ts[0].text = newfull
-    ts[0].set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-    for t in ts[1:]:
+    end = m.end()
+
+    # char range of each w:t within the concatenated text
+    off, pos = {}, 0
+    for t in all_t:
+        L = len(t.text or "")
+        off[id(t)] = pos
+        pos += L
+
+    # delete every field whose visible result falls inside the leading label
+    spans, kids = _field_run_spans(p)
+    for s, e in spans:
+        field_runs = kids[s:e + 1]
+        field_ts = [t for r in field_runs for t in r.iter(qn("w:t"))]
+        starts = [off[id(t)] for t in field_ts if id(t) in off]
+        if starts and min(starts) < end:
+            # Remove only the field's RUNS (begin/instrText/separate/result/end);
+            # keep any bookmarkStart/End that sit inside the field span — those
+            # are the heading's TOC anchor and must survive, or the TOC entry
+            # breaks.
+            for r in field_runs:
+                if r.tag != qn("w:r"):
+                    continue
+                parent = r.getparent()
+                if parent is not None:
+                    parent.remove(r)
+
+    rem_t = [t for t in p.iter(qn("w:t"))]
+    if not rem_t:
+        r = etree.SubElement(p, qn("w:r"))
+        t = etree.SubElement(r, qn("w:t"))
+        t.text = new_prefix
+        t.set(XML_SPACE, "preserve")
+        return True
+    full2 = "".join(t.text or "" for t in rem_t)
+    m2 = strip_re.match(full2)
+    # if the label survived as text, strip it; if only a bare prefix survived
+    # (the number was inside a now-deleted field), strip that residual prefix;
+    # if it was entirely inside the deleted field, only its trailing separator
+    # whitespace remains -> trim it
+    if m2:
+        rest = full2[m2.end():]
+    elif residue_re is not None and residue_re.match(full2):
+        rest = full2[residue_re.match(full2).end():]
+    else:
+        rest = full2.lstrip(" \t　")
+    rem_t[0].text = new_prefix + rest
+    rem_t[0].set(XML_SPACE, "preserve")
+    for t in rem_t[1:]:
         t.text = ""
     return True
 
@@ -238,17 +327,53 @@ def _prepend_text(p, prefix):
     return True
 
 
+def _suppress_auto_numbering(p):
+    """Cancel any inherited (style-level) or direct Word automatic list
+    numbering on this paragraph by writing a direct numId=0 override (the OOXML
+    "no numbering" value), so a caption we renumber to static \u56feN/\u8868N text is not
+    ALSO auto-numbered by Word (which would stack two numbers)."""
+    pPr = get_pPr(p)
+    for npr in pPr.findall(qn("w:numPr")):
+        pPr.remove(npr)
+    numPr = _get_or_make(pPr, "w:numPr",
+                         before_tags=("w:spacing", "w:ind", "w:jc", "w:rPr", "w:sectPr"))
+    numId = _get_or_make(numPr, "w:numId")
+    numId.set(qn("w:val"), "0")
+
+
 def _apply_renumber_caption(p, fix):
+    if fix.get("strip_auto"):
+        # Original number came from Word automatic numbering (w:numPr); cancel it
+        # so the static \u56feN/\u8868N we write below is the only number that renders.
+        _suppress_auto_numbering(p)
     kname = "\u56fe" if fix.get("kind") == "figure" else "\u8868"
-    if fix.get("insert"):
-        # The caption had no \u56fe/\u8868+\u6570\u5b57 label to replace -- add one (with a
-        # trailing space before the existing content).
-        return _prepend_text(p, kname + str(fix["new_num"]) + " ")
     new_prefix = kname + str(fix["new_num"])
-    return _replace_leading(p, STRIP_CAPTION, new_prefix)
+    # 1) a proper \u56fe/\u8868 + number label (typed, or a field whose result is in
+    #    the text) -- replace it; residue_re cleans a bare \u56fe/\u8868 left if the
+    #    number was a field that got deleted, so we never double the prefix.
+    if _replace_leading(p, STRIP_CAPTION, new_prefix, residue_re=STRIP_CAPTION_RESIDUE):
+        return True
+    # 2) a bare \u56fe/\u8868 prefix with no number (style-detected caption whose number
+    #    was missing) -- replace just that prefix.
+    if _replace_leading(p, STRIP_CAPTION_RESIDUE, new_prefix):
+        return True
+    # 3) no \u56fe/\u8868 label in the text at all (auto-numbered caption whose number
+    #    lived only in numPr, or a \u8868\u6807\u9898 line reading just "\u8bbe\u5907\u6e05\u5355") -- add one.
+    return _prepend_text(p, new_prefix + " ")
+
+
+def _heading_insert_prefix(token):
+    """Prefix used when INSERTING a missing heading number. Arabic dotted tokens
+    ("1.") read better with a trailing space before the title; full-width
+    punctuation tokens ("\u4e00\u3001"/"\uff08\u4e00\uff09"/"\uff081\uff09") need none."""
+    return token + " " if token.endswith(".") else token
 
 
 def _apply_renumber_heading(p, fix):
+    if fix.get("insert"):
+        # Confirmed heading that lost its number entirely -- prepend the
+        # position token (there is no existing label to replace).
+        return _prepend_text(p, _heading_insert_prefix(fix["new_token"]))
     return _replace_leading(p, STRIP_HEADING, fix["new_token"])
 
 
@@ -318,6 +443,124 @@ def _patch_toc_styles(pkg_dir, toc_spec):
     if patched:
         tree.write(path, xml_declaration=True, encoding="UTF-8", standalone=True)
     return patched
+
+
+def _style_name_is_caption(name_or_id):
+    s = (name_or_id or "").lower()
+    return any(h.lower() in s for h in CAPTION_STYLE_HINTS)
+
+
+def _unhide_number_rpr(rpr):
+    """Strip run properties that make an auto-generated number invisible:
+    a solid non-white shading (a coloured block over it), a zero font size,
+    hidden-text flags, and a white/auto text colour. Returns True if changed.
+    Only ever REMOVES hiding — the number then inherits normal formatting."""
+    if rpr is None:
+        return False
+    changed = False
+    shd = rpr.find(qn("w:shd"))
+    if shd is not None:
+        fill = (shd.get(qn("w:fill")) or "auto").lower()
+        if fill not in ("auto", "ffffff"):
+            rpr.remove(shd)
+            changed = True
+    for tag in ("w:sz", "w:szCs"):
+        el = rpr.find(qn(tag))
+        if el is not None and (el.get(qn("w:val")) or "0") == "0":
+            rpr.remove(el)
+            changed = True
+    for tag in ("w:vanish", "w:specVanish", "w:webHidden"):
+        el = rpr.find(qn(tag))
+        if el is not None and (el.get(qn("w:val")) or "true").lower() not in ("0", "false"):
+            rpr.remove(el)
+            changed = True
+    clr = rpr.find(qn("w:color"))
+    if clr is not None and (clr.get(qn("w:val")) or "").lower() in ("ffffff", "auto"):
+        rpr.remove(clr)
+        changed = True
+    return changed
+
+
+def _caption_abstract_num_ids(num_root, styles_root):
+    """abstractNumIds that drive figure/table CAPTION numbering, found three
+    ways so template variants are all covered:
+      1. a caption paragraph style (name/id like 题注/图表标题/表标题/…) whose
+         numPr → numId → abstractNum;
+      2. a numbering level whose w:pStyle points at a caption style;
+      3. a numbering level whose lvlText literally contains 图/表.
+    """
+    # styleId -> (name, numId used by that style)
+    style_name, style_numid = {}, {}
+    if styles_root is not None:
+        for st in styles_root.findall(qn("w:style")):
+            if st.get(qn("w:type")) != "paragraph":
+                continue
+            sid = st.get(qn("w:styleId"))
+            nm = st.find(qn("w:name"))
+            style_name[sid] = (nm.get(qn("w:val")) if nm is not None else "") or ""
+            npr = st.find(qn("w:pPr") + "/" + qn("w:numPr") + "/" + qn("w:numId"))
+            if npr is not None:
+                style_numid[sid] = npr.get(qn("w:val"))
+    caption_style_ids = {sid for sid, nm in style_name.items()
+                         if _style_name_is_caption((sid or "") + " " + nm)}
+
+    num2abs = {}
+    for num in num_root.findall(qn("w:num")):
+        a = num.find(qn("w:abstractNumId"))
+        if a is not None:
+            num2abs[num.get(qn("w:numId"))] = a.get(qn("w:val"))
+
+    abstracts = set()
+    for sid in caption_style_ids:                     # way 1
+        nid = style_numid.get(sid)
+        if nid and nid in num2abs:
+            abstracts.add(num2abs[nid])
+    for anum in num_root.findall(qn("w:abstractNum")):
+        aid = anum.get(qn("w:abstractNumId"))
+        for lvl in anum.findall(qn("w:lvl")):
+            ps = lvl.find(qn("w:pStyle"))
+            psid = ps.get(qn("w:val")) if ps is not None else None
+            lt = lvl.find(qn("w:lvlText"))
+            txt = (lt.get(qn("w:val")) if lt is not None else "") or ""
+            if (psid in caption_style_ids                       # way 2
+                    or _style_name_is_caption((psid or "") + " " + style_name.get(psid, ""))
+                    or "图" in txt or "表" in txt):               # way 3
+                abstracts.add(aid)
+                break
+    return abstracts
+
+
+def _clean_caption_numbering(pkg_dir):
+    """Un-hide auto-generated caption numbers (图N/表N).
+
+    Some templates give the caption-numbering LEVEL run properties that hide
+    the number — a solid dark shading (w:shd fill=000000, a black block over
+    it), a zero font size, hidden-text flags, or a white colour. The number is
+    really there and stays continuous (auto-numbered, 方案一); it is merely
+    invisible. Every numbering level belonging to a caption abstractNum (found
+    via caption styles / level pStyle / lvlText — see _caption_abstract_num_ids)
+    has its hiding run properties stripped so 表1/图1 renders normally. The
+    numId, num→abstractNum mapping and the styles' numPr are left untouched, so
+    Word keeps auto-numbering. Returns the number of levels cleaned."""
+    path = os.path.join(pkg_dir, "word", "numbering.xml")
+    if not os.path.exists(path):
+        return 0
+    tree = parse_xml(path)
+    root = tree.getroot()
+    styles_path = os.path.join(pkg_dir, "word", "styles.xml")
+    styles_root = parse_xml(styles_path).getroot() if os.path.exists(styles_path) else None
+
+    caption_abstracts = _caption_abstract_num_ids(root, styles_root)
+    cleaned = 0
+    for anum in root.findall(qn("w:abstractNum")):
+        if anum.get(qn("w:abstractNumId")) not in caption_abstracts:
+            continue
+        for lvl in anum.findall(qn("w:lvl")):
+            if _unhide_number_rpr(lvl.find(qn("w:rPr"))):
+                cleaned += 1
+    if cleaned:
+        tree.write(path, xml_declaration=True, encoding="UTF-8", standalone=True)
+    return cleaned
 
 
 def _set_update_fields(pkg_dir):
@@ -426,6 +669,10 @@ def main():
         applied["toc_styles"] = _patch_toc_styles(out_pkg, _spec.get("toc"))
     except (OSError, ValueError):
         applied["toc_styles"] = 0
+
+    # Un-hide auto-generated caption numbers (图N/表N) obscured by a black
+    # shading / zero size in the caption numbering definition.
+    applied["caption_num_unhidden"] = _clean_caption_numbering(out_pkg)
 
     _set_update_fields(out_pkg)
 

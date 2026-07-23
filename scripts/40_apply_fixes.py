@@ -564,6 +564,17 @@ def _clean_caption_numbering(pkg_dir):
 
 
 def _set_update_fields(pkg_dir):
+    """Set settings.xml <w:updateFields w:val="true"/> so Word refreshes the TOC
+    (renumbered headings + new page numbers) when the document is opened.
+
+    Trade-off (chosen deliberately): Word shows the "该文档包含的域可能引用了其他
+    文件。是否更新…" prompt once per open, and clicking 是 rebuilds the TOC to match
+    the corrected body. In Word there is no document setting that auto-refreshes
+    the TOC WITHOUT this prompt — a per-field w:dirty mark triggers the very same
+    dialog — so the only prompt-free alternative is to leave the TOC stale until
+    the user presses Ctrl+A then F9. We take the native, exact refresh here.
+    If the prompt appears for OTHER reasons (external INCLUDE/LINK/DDE fields,
+    external relationships, OLE), run scripts/diagnose_fields.py on the output."""
     path = os.path.join(pkg_dir, "word", "settings.xml")
     if not os.path.exists(path):
         return
@@ -674,6 +685,9 @@ def main():
     # shading / zero size in the caption numbering definition.
     applied["caption_num_unhidden"] = _clean_caption_numbering(out_pkg)
 
+    # Refresh the TOC on open (renumbered headings + page numbers) via the global
+    # updateFields flag. Word prompts once on open; clicking 是 rebuilds the TOC
+    # to match the corrected body (see _set_update_fields for the trade-off).
     _set_update_fields(out_pkg)
 
     tree.write(doc_path, xml_declaration=True, encoding="UTF-8", standalone=True)

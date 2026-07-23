@@ -57,7 +57,10 @@ word-report-format/
     31_check_global.py      ← 全局项：页边距 + 序号连续性 + 内容提示
     35_merge_fixes.py       ← 合并各分片结果为 fixes.json
     40_apply_fixes.py       ← 在新文档上应用 + 加 XAgent 批注 → formatted.docx
+    45_validate_output.py   ← 输出自检：zip完整/XML良构/必备part/段落数前后一致（坏了退2）
     50_finalize.py          ← 按命名规范输出（.doc 输入则转回 .doc）
+    55_summary.py           ← 从 fixes.json + apply_report.json 生成人类可读修改汇总表 summary.md
+    diagnose_fields.py      ← 只读排查"是否更新域"弹窗来源（updateFields/dirty/外部引用域/外部关系/OLE）
     lib/                    ← 自包含依赖（lxml，无需 python-docx / defusedxml）
 ```
 
@@ -192,7 +195,9 @@ python scripts/26_export_review.py <workdir>
 ```bash
 python scripts/30_check_format.py <workdir>      # 全量：逐段格式 + 页边距 + 连续性 + 内容提示 → fixes.json
 python scripts/40_apply_fixes.py <workdir>       # 应用到新文档 + XAgent 批注 → formatted.docx
+python scripts/45_validate_output.py <workdir>   # 输出自检；退出码非0（2）说明文档被改坏，勿交付、须排查
 python scripts/50_finalize.py  <workdir> <输出目录>
+python scripts/55_summary.py   <workdir>         # 生成 summary.md 修改汇总表（连同 formatted 一起交付）
 ```
 
 ### Path B —— 支持子 agent（**优先/硬性要求**，适用于 3000 页大文档）
@@ -214,7 +219,9 @@ python scripts/50_finalize.py  <workdir> <输出目录>
    ```bash
    python scripts/35_merge_fixes.py <workdir>    # 各片 + _global 合并去重 → fixes.json
    python scripts/40_apply_fixes.py <workdir>    # → formatted.docx（含 XAgent 批注）
+   python scripts/45_validate_output.py <workdir># 输出自检；退出码非0（2）勿交付、须排查
    python scripts/50_finalize.py  <workdir> <输出目录>
+   python scripts/55_summary.py   <workdir>      # → summary.md 修改汇总表
    ```
 
 > 分片检查只做「逐段格式」；页边距与序号连续性是全局的，统一由 `31_check_global.py` 负责，
@@ -222,9 +229,23 @@ python scripts/50_finalize.py  <workdir> <输出目录>
 
 ## 产物说明
 
-- `formatted.docx`：已修正 + 每处改动/提示带 `XAgent` 批注；已设 `updateFields`，用户打开时目录会自动刷新。
-  因目录刷新会按 TOC 样式重建条目并丢弃直接格式，`40_apply_fixes.py` 会同时把 `TOC1/TOC2/TOC3` 目录条目
-  **样式本身**改成仿宋/14 磅/按级缩进（一级 0、二级 2 字符、三级 4 字符），保证刷新后目录仍符合规范。
+- `summary.md`（`55_summary.py`）：人类可读的**修改汇总表**，与 `formatted.docx` 一并交付。它直接读
+  `fixes.json` + `apply_report.json` 这两个**结构化**产物（不是反过来解析批注文字，所以批注措辞变了汇总也
+  不会变空），按「位置 / 类别 / 内容摘要 / 规范依据 / 状态」列出每一处，并给出「已修正 / 提示待人工 /
+  应用失败」计数。用户不必逐条翻文档批注就能一眼看全改了什么、哪些还需人工。
+- `validate_report.json`（`45_validate_output.py`）：输出文档的结构自检结果。在 `40` 之后、`50` 之前跑，
+  做 zip 完整性 + 必备 part 存在 + 每个 xml/rels 良构 + **段落数与改前 working.docx 一致** 四项检查
+  （格式/编号/批注操作都不应增删段落，段落数变了即结构被改坏）。**退出码非 0（2）时不要交付**，先查
+  `validate_report.json` 里的 `errors` 定位问题。这是防「真实 Word 打开提示需修复」的最后一道兜底。
+- `formatted.docx`：已修正 + 每处改动/提示带 `XAgent` 批注。`40_apply_fixes.py` 设 `updateFields=true`，
+  用户打开时 Word 会提示"该文档包含的域可能引用了其他文件。是否更新…"，**点"是"即自动刷新目录**（反映
+  改后的标题序号与页码）。这个提示是 Word 处理带目录文档的**正常行为、非损坏**；`summary.md` 顶部已写明
+  请点"是"。⚠️ Word 里"目录打开时自动刷新"与"零弹窗"**无法只靠文档设置两全**——全局 `updateFields` 和
+  域级 `w:dirty` 都会触发同一个弹窗；唯一零弹窗的替代是不刷新、由用户 Ctrl+A→F9 手动刷。这是经确认的取舍，
+  当前默认取"自动刷新（一次弹窗）"，**不要**擅自改回零弹窗方案。因目录刷新会按 TOC 样式重建条目并丢弃
+  直接格式，`40_apply_fixes.py` 会同时把 `TOC1/TOC2/TOC3` 目录条目**样式本身**改成仿宋/14 磅/按级缩进
+  （一级 0、二级 2 字符、三级 4 字符），保证刷新后目录仍符合规范。**若弹窗疑似另有来源**（原文档自带的
+  INCLUDE·LINK·DDE 等外部引用域 / 外部关系 / OLE），用 `scripts/diagnose_fields.py <docx>` 排查定位。
 - 图表标题排版为**居中、无任何缩进**；正文/标题修首行缩进时会把左、右缩进一并清零（避免与首行缩进叠加
   导致实际缩进超过 2 字符）；序号与标题正文之间用空格/制表符分隔（如「5 项目…」）也能识别并改正序号。
 - **自动编号（Word 多级列表 `w:numPr`）**：

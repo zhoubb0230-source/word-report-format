@@ -164,6 +164,18 @@ class TestHeadingInference(unittest.TestCase):
         self.assertEqual(source, "pattern")
 
 
+class TestInt2Cn(unittest.TestCase):
+    def test_basic_range(self):
+        self.assertEqual(checks.int2cn(1), "一")
+        self.assertEqual(checks.int2cn(10), "十")
+        self.assertEqual(checks.int2cn(23), "二十三")
+        self.assertEqual(checks.int2cn(99), "九十九")
+
+    def test_out_of_range_falls_back_no_crash(self):
+        self.assertEqual(checks.int2cn(100), "100")  # was IndexError before guard
+        self.assertEqual(checks.int2cn(0), "0")
+
+
 class TestPageSetup(unittest.TestCase):
     def test_wrong_margins_flagged(self):
         fix = checks.check_page_setup(

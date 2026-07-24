@@ -118,6 +118,10 @@ def _full_text(r):
 
 
 def main():
+    if len(sys.argv) < 3:
+        print(json.dumps({"status": "error",
+                          "error": "usage: 27_apply_review.py <workdir> <overrides.json>"}))
+        sys.exit(1)
     workdir = sys.argv[1]
     overrides_path = sys.argv[2]
 

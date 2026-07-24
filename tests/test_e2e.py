@@ -77,6 +77,36 @@ class TestPipelineEndToEnd(unittest.TestCase):
         self.assertEqual(validated["paragraphs_out"],
                          validated["paragraphs_reference"])
 
+    def test_comments_merged_per_paragraph(self):
+        # A heading with BOTH a wrong font (format fix) and a wrong ordinal
+        # (renumber fix) must end up with ONE merged comment, not two.
+        body = (helpers.para("三、项目概况", east_asia="宋体", size_hp=32, outline=0)
+                + helpers.para("正文内容。", east_asia="宋体", size_hp=32))
+        src = os.path.join(self.tmp, "in3.docx")
+        helpers.build_docx(src, body)
+        base = os.path.join(self.tmp, "wb3")
+        wd = run(self._script("05_new_workdir.py"), base)["workdir"]
+        run(self._script("10_prepare_input.py"), src, wd)
+        run(self._script("20_extract_structure.py"), wd)
+        run(self._script("30_check_format.py"), wd)
+        run(self._script("40_apply_fixes.py"), wd)
+
+        import collections
+        from lxml import etree
+        with open(os.path.join(wd, "fixes.json"), encoding="utf-8") as f:
+            fixes = json.load(f)
+        counts = collections.Counter(
+            fx["para_index"] for fx in fixes
+            if fx.get("comment") and fx.get("rule_text") and fx.get("para_index") is not None)
+        # the heading paragraph really does carry >=2 commentable fixes
+        self.assertGreaterEqual(counts[0], 2)
+
+        w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        root = etree.parse(os.path.join(wd, "out_pkg", "word", "comments.xml")).getroot()
+        n_comments = len(root.findall("{%s}comment" % w))
+        # one comment per distinct commented paragraph (merge worked)
+        self.assertEqual(n_comments, len(counts))
+
     def test_apply_review_reshards_with_persisted_size(self):
         # A tiny doc still round-trips through 27 with an empty overrides file,
         # confirming the shared write_shards + persisted shard_size work.

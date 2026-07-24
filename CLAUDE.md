@@ -102,6 +102,9 @@ python3 -m unittest discover -s tests -p "test_*.py"
 - `format` op 的每个 `set_*` / `clear_*` / `strip_text` 键，在 `main()` 的 `op == "format"` 分支里
   各有一段应用逻辑；改 `w:t` 文本时只动内容 run（`_iter_runs` 已跳过文本框 `w:txbxContent`），
   保留行内空格与 `xml:space`。
+- **每段只挂一条批注**：同一段落的多条 fix（如字体 fix + 序号 fix）在 `main()` 末尾用 `pending_comments`
+  合并成**一条** XAgent 批注，避免同一行叠多个批注区间。所以「文档里的批注数」按段落计、可能少于
+  `fixes.json` 的条目数——`summary.md` 仍逐条列，两者口径不同是正常的，别当成漏批注。
 
 ## 提交
 

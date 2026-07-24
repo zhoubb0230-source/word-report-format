@@ -210,6 +210,10 @@ def _mark_title_block(records):
 
 
 def main():
+    if len(sys.argv) < 2:
+        print(json.dumps({"status": "error",
+                          "error": "usage: 20_extract_structure.py <workdir> [--shard-size N]"}))
+        sys.exit(1)
     workdir = sys.argv[1]
     shard_size = 400
     if "--shard-size" in sys.argv:

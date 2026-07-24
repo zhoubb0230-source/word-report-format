@@ -17,12 +17,14 @@ HERE = os.path.dirname(__file__)
 sys.path.insert(0, os.path.join(HERE, "lib"))
 import checks
 
-SPEC_PATH = os.path.join(HERE, "..", "spec", "format_spec.json")
-
 
 def main():
+    if len(sys.argv) < 2:
+        print(json.dumps({"status": "error",
+                          "error": "usage: 31_check_global.py <workdir>"}))
+        sys.exit(1)
     workdir = sys.argv[1]
-    spec = checks.load_spec(SPEC_PATH)
+    spec = checks.load_default_spec()
     with open(os.path.join(workdir, "structure.json"), encoding="utf-8") as f:
         structure = json.load(f)
     records = structure["records"]

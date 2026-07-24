@@ -39,7 +39,7 @@ def main():
     stem = meta.get("original_stem", "document")
     ext = meta.get("original_ext", "docx")
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_name = "%s_\u683c\u5f0f\u5316\u7248\u672c_%s.%s" % (stem, ts, ext)
+    out_name = "%s_格式化版本_%s.%s" % (stem, ts, ext)
     out_path = os.path.join(output_dir, out_name)
 
     if ext == "doc":
@@ -47,7 +47,7 @@ def main():
             print(json.dumps({
                 "status": "error",
                 "reason": "doc_conversion_unavailable",
-                "message": "\u539f\u6587\u4ef6\u4e3a .doc \u683c\u5f0f\uff0c\u4f46\u5f53\u524d\u73af\u5883\u65e0\u6cd5\u8fdb\u884c doc \u8f6c\u6362\uff0c\u65e0\u6cd5\u8f93\u51fa\u4e0e\u539f\u6587\u4ef6\u4e00\u81f4\u7684 .doc \u7c7b\u578b\uff0c\u8bf7\u77e5\u6089\u3002"
+                "message": "原文件为 .doc 格式，但当前环境无法进行 doc 转换，无法输出与原文件一致的 .doc 类型，请知悉。"
             }, ensure_ascii=False))
             sys.exit(2)
         produced = convert(formatted, "doc", output_dir)

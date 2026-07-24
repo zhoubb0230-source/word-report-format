@@ -31,8 +31,7 @@ from docxcommon import (qn, parse_xml, unzip_docx, rezip_docx,
                         iter_body_paragraphs, in_textbox)
 from commentwriter import CommentWriter
 from headings import ANY_LABEL_RE, CAPTION_STYLE_HINTS
-
-SPEC_PATH = os.path.join(os.path.dirname(__file__), "..", "spec", "format_spec.json")
+from checks import load_default_spec
 
 # Paragraph styles that format the AUTO-GENERATED table-of-contents entries.
 # Word regenerates these paragraphs from their style (not from direct
@@ -50,13 +49,13 @@ RE_TOC_STYLE_NAME = re.compile(r"^(?:toc|目录)\s*\d+$", re.IGNORECASE)
 # 20_extract_structure.py / 27_apply_review.py via lib/headings.py so all
 # three never drift out of sync.
 STRIP_HEADING = ANY_LABEL_RE
-STRIP_CAPTION = re.compile(r"^\s*(?:\u56fe|\u8868)\s*[0-9]+(?:[-\.\u2013][0-9]+)?")
-# A bare \u56fe/\u8868 prefix with NO number. Used to strip the residual prefix left
+STRIP_CAPTION = re.compile(r"^\s*(?:图|表)\s*[0-9]+(?:[-\.–][0-9]+)?")
+# A bare 图/表 prefix with NO number. Used to strip the residual prefix left
 # behind when a caption's number lived in a Word field that gets deleted (the
-# static "\u56fe/\u8868" survives the field removal), or a \u8868\u6807\u9898-styled line that
-# carries the \u56fe/\u8868 word but no digit -- so writing the new \u56feN/\u8868N never
-# doubles the prefix ("\u56fe1\u56fe \u8bf4\u660e").
-STRIP_CAPTION_RESIDUE = re.compile(r"^\s*(?:\u56fe|\u8868)")
+# static "图/表" survives the field removal), or a 表标题-styled line that
+# carries the 图/表 word but no digit -- so writing the new 图N/表N never
+# doubles the prefix ("图1图 说明").
+STRIP_CAPTION_RESIDUE = re.compile(r"^\s*(?:图|表)")
 
 
 # ---------------------------------------------------------------------------
@@ -339,8 +338,8 @@ def _replace_leading(p, strip_re, new_prefix, residue_re=None):
 
 def _prepend_text(p, prefix):
     """Insert `prefix` at the very start of a paragraph's text without
-    disturbing existing runs. Used to ADD a caption number (\u56feN/\u8868N) to a
-    caption-styled paragraph that has no leading \u56fe/\u8868 label to replace."""
+    disturbing existing runs. Used to ADD a caption number (图N/表N) to a
+    caption-styled paragraph that has no leading 图/表 label to replace."""
     ts = [t for t in p.iter(qn("w:t"))]
     if ts:
         ts[0].text = prefix + (ts[0].text or "")
@@ -357,7 +356,7 @@ def _prepend_text(p, prefix):
 def _suppress_auto_numbering(p):
     """Cancel any inherited (style-level) or direct Word automatic list
     numbering on this paragraph by writing a direct numId=0 override (the OOXML
-    "no numbering" value), so a caption we renumber to static \u56feN/\u8868N text is not
+    "no numbering" value), so a caption we renumber to static 图N/表N text is not
     ALSO auto-numbered by Word (which would stack two numbers)."""
     pPr = get_pPr(p)
     for npr in pPr.findall(qn("w:numPr")):
@@ -371,28 +370,28 @@ def _suppress_auto_numbering(p):
 def _apply_renumber_caption(p, fix):
     if fix.get("strip_auto"):
         # Original number came from Word automatic numbering (w:numPr); cancel it
-        # so the static \u56feN/\u8868N we write below is the only number that renders.
+        # so the static 图N/表N we write below is the only number that renders.
         _suppress_auto_numbering(p)
-    kname = "\u56fe" if fix.get("kind") == "figure" else "\u8868"
+    kname = "图" if fix.get("kind") == "figure" else "表"
     new_prefix = kname + str(fix["new_num"])
-    # 1) a proper \u56fe/\u8868 + number label (typed, or a field whose result is in
-    #    the text) -- replace it; residue_re cleans a bare \u56fe/\u8868 left if the
+    # 1) a proper 图/表 + number label (typed, or a field whose result is in
+    #    the text) -- replace it; residue_re cleans a bare 图/表 left if the
     #    number was a field that got deleted, so we never double the prefix.
     if _replace_leading(p, STRIP_CAPTION, new_prefix, residue_re=STRIP_CAPTION_RESIDUE):
         return True
-    # 2) a bare \u56fe/\u8868 prefix with no number (style-detected caption whose number
+    # 2) a bare 图/表 prefix with no number (style-detected caption whose number
     #    was missing) -- replace just that prefix.
     if _replace_leading(p, STRIP_CAPTION_RESIDUE, new_prefix):
         return True
-    # 3) no \u56fe/\u8868 label in the text at all (auto-numbered caption whose number
-    #    lived only in numPr, or a \u8868\u6807\u9898 line reading just "\u8bbe\u5907\u6e05\u5355") -- add one.
+    # 3) no 图/表 label in the text at all (auto-numbered caption whose number
+    #    lived only in numPr, or a 表标题 line reading just "设备清单") -- add one.
     return _prepend_text(p, new_prefix + " ")
 
 
 def _heading_insert_prefix(token):
     """Prefix used when INSERTING a missing heading number. Arabic dotted tokens
     ("1.") read better with a trailing space before the title; full-width
-    punctuation tokens ("\u4e00\u3001"/"\uff08\u4e00\uff09"/"\uff081\uff09") need none."""
+    punctuation tokens ("一、"/"（一）"/"（1）") need none."""
     return token + " " if token.endswith(".") else token
 
 
@@ -642,6 +641,11 @@ def main():
     applied = {"format": 0, "renumber_caption": 0, "renumber_heading": 0,
                "section": 0, "hint": 0, "comments": 0, "skipped": 0}
     problems = []
+    # idx -> [paragraph_el, [rule_texts]] in first-seen order. Multiple fixes on
+    # ONE paragraph (e.g. a font fix + a renumber) are merged into a single
+    # XAgent comment at the end, so the document isn't littered with several
+    # overlapping comment ranges on the same line.
+    pending_comments = {}
 
     for fix in fixes:
         op = fix.get("op")
@@ -693,10 +697,17 @@ def main():
         if not ok:
             problems.append({"para_index": idx, "op": op, "reason": "text_edit_failed"})
 
-        # attach XAgent comment (rule text) when requested
+        # queue this fix's rule text for the paragraph's single merged comment
         if fix.get("comment") and fix.get("rule_text"):
-            cw.add(p, fix["rule_text"])
-            applied["comments"] += 1
+            slot = pending_comments.get(idx)
+            if slot is None:
+                slot = pending_comments[idx] = [p, []]
+            slot[1].append(fix["rule_text"])
+
+    # one XAgent comment per paragraph, joining all its rule texts
+    for _idx, (p_el, texts) in pending_comments.items():
+        cw.add(p_el, "；".join(texts))
+        applied["comments"] += 1
 
     cw.flush()
 
@@ -704,8 +715,7 @@ def main():
     # and no indent (the direct formatting applied above is otherwise wiped
     # when Word rebuilds the field on open).
     try:
-        with open(SPEC_PATH, encoding="utf-8") as f:
-            _spec = json.load(f)
+        _spec = load_default_spec()
         applied["toc_styles"] = _patch_toc_styles(out_pkg, _spec.get("toc"))
     except (OSError, ValueError):
         applied["toc_styles"] = 0

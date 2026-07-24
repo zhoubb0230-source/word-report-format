@@ -27,12 +27,14 @@ HERE = os.path.dirname(__file__)
 sys.path.insert(0, os.path.join(HERE, "lib"))
 import checks
 
-SPEC_PATH = os.path.join(HERE, "..", "spec", "format_spec.json")
-
 
 def main():
+    if len(sys.argv) < 2:
+        print(json.dumps({"status": "error",
+                          "error": "usage: 30_check_format.py <workdir> [--shard <file>]"}))
+        sys.exit(1)
     workdir = sys.argv[1]
-    spec = checks.load_spec(SPEC_PATH)
+    spec = checks.load_default_spec()
 
     if "--shard" in sys.argv:
         shard_file = sys.argv[sys.argv.index("--shard") + 1]

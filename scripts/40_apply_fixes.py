@@ -168,20 +168,23 @@ def _char_twips(chars, size_hp):
 
 
 def _set_first_line_and_clear_left(pPr, first_line_chars, clear_left, clear_right=False,
-                                   set_left_chars=None, size_hp=32):
+                                   set_left_chars=None, size_hp=21):
     """Write the paragraph's indent as a DIRECT override.
 
     Every char-based value (w:firstLineChars / w:leftChars) is paired with its
-    ABSOLUTE equivalent (w:firstLine / w:left) computed from ``size_hp``. This
-    is what makes the override actually win when the value it must beat is an
-    absolute indent INHERITED from a paragraph style or numbering level — the
-    common shape a LibreOffice .doc→.docx conversion produces (LibreOffice does
-    not emit the *Chars variants at all). A char-only first-line indent does NOT
-    neutralize an inherited absolute w:hanging in Word, so the hanging survives
-    and renders as a hanging indent (the "首行缩进变悬挂缩进 / 左缩进 -0.74cm"
-    symptom); pairing it with an absolute w:firstLine fixes that. When Word sees
-    both the char and absolute forms it uses the char form, so this never
-    changes the Word-converted (already-correct) case."""
+    ABSOLUTE equivalent (w:firstLine / w:left) computed from ``size_hp`` — which
+    MUST be the document's CHARACTER-UNIT size (the default font size, ~五号
+    10.5pt=21 半点), NOT the paragraph's own font. Word measures "N 字符" against
+    that default size, so computing the companion at, say, a heading's 三号(32)
+    makes it ~1.52× too wide (2 字符 → 1.13cm instead of 0.74cm; the 目录 三级
+    even wraps its page number). Pairing the char value with a MATCHING absolute
+    value is what makes the override win over an absolute indent INHERITED from a
+    style / numbering level — the shape a LibreOffice .doc→.docx conversion
+    produces (LibreOffice emits no *Chars variants). A char-only first-line
+    indent does NOT neutralize an inherited absolute w:hanging in Word, so the
+    hanging survives and renders as a hanging indent (the "首行缩进变悬挂缩进 /
+    左缩进 -0.74cm" symptom). Because the two forms agree, this never changes the
+    Word-converted (already-correct) case."""
     ind = _get_or_make(pPr, "w:ind")
     if first_line_chars is not None:
         ind.set(qn("w:firstLineChars"), str(first_line_chars))
@@ -234,30 +237,34 @@ def _set_jc(pPr, val):
     jc.set(qn("w:val"), val)
 
 
-def _para_eff_size_hp(p, fix, default=32):
-    """Font size (half-points) to convert this paragraph's char-based indent to
-    absolute twips. The size we WRITE wins if the fix changes it; otherwise use
-    the paragraph's own run/paragraph-mark size; else the spec's ubiquitous 三号
-    (32). The absolute value only has to override an inherited absolute indent —
-    Word renders from the char value when both are present — so an approximate
-    size is harmless, but matching keeps the two forms consistent."""
-    if fix.get("set_size_hp"):
-        return fix["set_size_hp"]
-    for r in _iter_runs(p):
-        sz = r.find(qn("w:rPr") + "/" + qn("w:sz"))
-        if sz is not None and sz.get(qn("w:val")):
-            try:
-                return int(sz.get(qn("w:val")))
-            except ValueError:
-                pass
-    pPr = p.find(qn("w:pPr"))
-    if pPr is not None:
-        sz = pPr.find(qn("w:rPr") + "/" + qn("w:sz"))
-        if sz is not None and sz.get(qn("w:val")):
-            try:
-                return int(sz.get(qn("w:val")))
-            except ValueError:
-                pass
+def _default_char_unit_hp(pkg_dir, default=21):
+    """The font size (half-points) Word uses for the CHARACTER UNIT of the
+    *Chars indents (firstLineChars / leftChars) — i.e. how wide "1 字符" is.
+
+    This is the DOCUMENT DEFAULT font size (styles.xml docDefaults → rPrDefault
+    → rPr → sz), NOT the paragraph's own font. That distinction is the whole bug
+    behind "标题首行缩进 1.13cm / 目录二级 1.13cm、三级 2.26cm": Word measures a
+    2-char indent against the default 五号(10.5pt=21 半点) → 0.74cm, but computing
+    it against a heading/目录's 三号(16pt=32) gives 1.13cm — ~1.52× too wide, and
+    for the 三号 目录 wide enough to wrap the page number. Emitting the absolute
+    companion at THIS size makes it match Word's native *Chars rendering (so the
+    two forms never disagree) while still overriding an inherited absolute
+    hanging. Falls back to 21 (五号) — Word's usual default — when docDefaults
+    carries no explicit size."""
+    path = os.path.join(pkg_dir, "word", "styles.xml")
+    if not os.path.exists(path):
+        return default
+    try:
+        root = parse_xml(path).getroot()
+    except (OSError, ValueError):
+        return default
+    sz = root.find(qn("w:docDefaults") + "/" + qn("w:rPrDefault") + "/"
+                   + qn("w:rPr") + "/" + qn("w:sz"))
+    if sz is not None and sz.get(qn("w:val")):
+        try:
+            return int(sz.get(qn("w:val")))
+        except ValueError:
+            pass
     return default
 
 
@@ -487,11 +494,15 @@ def _toc_style_level(sid, name):
     return int(m.group(1)) if m else None
 
 
-def _patch_toc_styles(pkg_dir, toc_spec):
+def _patch_toc_styles(pkg_dir, toc_spec, char_unit_hp=21):
     """Force the TOC entry styles (toc 1..N) to the spec's font/size and the
     per-level indent (一级0/二级2字符/三级4字符), so a REFRESHED TOC renders
     per spec. Returns the number of styles patched. No-op when styles.xml or
-    the toc spec is missing."""
+    the toc spec is missing. ``char_unit_hp`` is the document character-unit
+    size used to compute the absolute left companion — the default font size,
+    NOT the TOC's own 三号 (see _default_char_unit_hp), so 二级/三级 come out at
+    0.74cm/1.49cm rather than the too-wide 1.13cm/2.26cm that wraps page
+    numbers."""
     if not toc_spec or not toc_spec.get("east_asia") or not toc_spec.get("size_hp"):
         return 0
     path = os.path.join(pkg_dir, "word", "styles.xml")
@@ -522,8 +533,10 @@ def _patch_toc_styles(pkg_dir, toc_spec):
         ind = _get_or_make(ppr, "w:ind")
         ind.set(qn("w:leftChars"), str(want_left))
         # absolute companion (0 for 一级) so the per-level indent overrides any
-        # absolute left/hanging inherited from a basedOn parent style.
-        ind.set(qn("w:left"), str(_char_twips(want_left, int(sz))))
+        # absolute left/hanging inherited from a basedOn parent style. Computed
+        # at the document char-unit size (NOT the TOC's own 三号) so it matches
+        # Word's native leftChars width and doesn't over-indent / wrap.
+        ind.set(qn("w:left"), str(_char_twips(want_left, char_unit_hp)))
         for a in ("w:firstLineChars", "w:firstLine"):
             ind.set(qn(a), "0")
         for a in ("w:startChars", "w:start", "w:hanging", "w:hangingChars"):
@@ -701,6 +714,10 @@ def main():
     # index -> paragraph element (same iterator as extraction)
     para_by_idx = {i: p for i, p in iter_body_paragraphs(root)}
 
+    # Character-unit size for converting *Chars indents to absolute twips —
+    # the DOCUMENT default font size, matching how Word measures "N 字符".
+    char_unit_hp = _default_char_unit_hp(out_pkg)
+
     cw = CommentWriter(out_pkg, author="XAgent")
     applied = {"format": 0, "renumber_caption": 0, "renumber_heading": 0,
                "section": 0, "hint": 0, "comments": 0, "skipped": 0}
@@ -740,7 +757,7 @@ def main():
                     bool(fix.get("clear_left_indent")),
                     bool(fix.get("clear_right_indent")),
                     fix.get("set_left_chars"),
-                    size_hp=_para_eff_size_hp(p, fix))
+                    size_hp=char_unit_hp)
             if fix.get("set_jc") is not None:
                 _set_jc(pPr, fix["set_jc"])
             if fix.get("strip_text"):
@@ -781,7 +798,7 @@ def main():
     # when Word rebuilds the field on open).
     try:
         _spec = load_default_spec()
-        applied["toc_styles"] = _patch_toc_styles(out_pkg, _spec.get("toc"))
+        applied["toc_styles"] = _patch_toc_styles(out_pkg, _spec.get("toc"), char_unit_hp)
     except (OSError, ValueError):
         applied["toc_styles"] = 0
 

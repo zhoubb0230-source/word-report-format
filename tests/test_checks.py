@@ -151,6 +151,15 @@ class TestTocExcluded(unittest.TestCase):
                     text="一、绪论")]
         self.assertEqual(checks.continuity(recs, SPEC), [])
 
+    def test_toc_fix_carries_no_comment(self):
+        # 目录条目的格式 fix 不挂批注：updateFields 刷新目录会孤儿化批注区间，
+        # 显示成空白批注；目录格式靠样式回写保证。
+        r = rec(region="toc", is_toc=True, toc_level=2, text="研究方法\t3",
+                eff_=eff(east_asia="黑体", size_hp=28, left_chars=0))
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertIsNotNone(fix)               # 仍产出直接格式修正
+        self.assertFalse(fix["comment"])        # 但不挂批注
+
 
 class TestPatternHeadingNeverAutoEdited(unittest.TestCase):
     """陷阱 #5: 仅形状(pattern)标题只批注，绝不自动改文字。"""

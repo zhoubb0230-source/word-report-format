@@ -366,7 +366,14 @@ def _check_toc(rec, spec):
     if any(eff.get(k) for k in ("right_chars", "right", "end_chars", "end")):
         sets["clear_right_indent"] = True
         violations.append("目录不应有右缩进")
-    return _mk_format(rec["i"], sets, violations)
+    fix = _mk_format(rec["i"], sets, violations)
+    # 目录条目【不挂批注】：目录格式靠样式回写（_patch_toc_styles）保证，而且
+    # updateFields=true 会让 Word 打开时刷新目录域、重排条目——挂在旧条目上的批注
+    # 区间会被"孤儿化"，显示成一个个空白批注（用户实测每行目录一个空批注）。直接
+    # 改动仍写（用户若拒绝刷新时也能生效），但 comment 置 False。
+    if fix is not None:
+        fix["comment"] = False
+    return fix
 
 
 def _check_cover_field_left(rec, eff, sets, violations):

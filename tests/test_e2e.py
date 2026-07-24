@@ -188,45 +188,70 @@ class TestApplyAbsoluteIndentCompanion(unittest.TestCase):
     def _ind(self, pPr):
         return pPr.find(self.mod.qn("w:ind"))
 
-    def test_char_twips_two_chars_sanhao(self):
-        # 2 chars (firstLineChars=200) at 三号(32 半点=16pt) = 640 twips.
-        self.assertEqual(self.mod._char_twips(200, 32), 640)
-        self.assertEqual(self.mod._char_twips(0, 32), 0)
+    def test_char_twips_uses_char_unit_size(self):
+        # 2 chars at the DEFAULT char-unit 五号(21 半点=10.5pt) = 420 twips
+        # (=0.74cm) — the value Word actually renders. At 三号(32) it would be
+        # 640 (=1.13cm), which is the over-indent bug we must NOT produce.
+        self.assertEqual(self.mod._char_twips(200, 21), 420)
+        self.assertEqual(self.mod._char_twips(400, 21), 840)  # 4 chars = 1.49cm
+        self.assertEqual(self.mod._char_twips(200, 32), 640)  # 16pt over-indents
+        self.assertEqual(self.mod._char_twips(0, 21), 0)
+
+    def test_default_char_unit_hp_reads_docdefaults_else_21(self):
+        import tempfile as _tf
+        import os as _os
+        w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        d = _tf.mkdtemp()
+        _os.makedirs(_os.path.join(d, "word"))
+        # no docDefaults size -> fall back to 21 (五号)
+        with open(_os.path.join(d, "word", "styles.xml"), "w", encoding="utf-8") as f:
+            f.write('<w:styles xmlns:w="%s"></w:styles>' % w)
+        self.assertEqual(self.mod._default_char_unit_hp(d), 21)
+        # explicit docDefaults size wins
+        with open(_os.path.join(d, "word", "styles.xml"), "w", encoding="utf-8") as f:
+            f.write('<w:styles xmlns:w="%s"><w:docDefaults><w:rPrDefault>'
+                    '<w:rPr><w:sz w:val="24"/></w:rPr></w:rPrDefault>'
+                    '</w:docDefaults></w:styles>' % w)
+        self.assertEqual(self.mod._default_char_unit_hp(d), 24)
+        shutil.rmtree(d, ignore_errors=True)
 
     def test_first_line_gets_absolute_companion(self):
         pPr = self._ppr()
-        self.mod._set_first_line_and_clear_left(pPr, 200, False, False, None, size_hp=32)
+        self.mod._set_first_line_and_clear_left(pPr, 200, False, False, None, size_hp=21)
         ind = self._ind(pPr)
         self.assertEqual(ind.get(self.mod.qn("w:firstLineChars")), "200")
-        # absolute companion present and positive -> beats an inherited hanging
-        self.assertEqual(ind.get(self.mod.qn("w:firstLine")), "640")
+        # absolute companion present and positive -> beats an inherited hanging;
+        # at the char-unit size (21) it is 420 (0.74cm), matching Word's native
+        # firstLineChars width rather than over-indenting.
+        self.assertEqual(ind.get(self.mod.qn("w:firstLine")), "420")
 
     def test_direct_hanging_removed_when_setting_first_line(self):
         # a paragraph carrying an ABSOLUTE hanging (the LibreOffice shape) must
         # come out with a positive first-line indent and NO hanging.
         pPr = self._ppr('<w:ind w:hanging="420" w:left="420"/>')
-        self.mod._set_first_line_and_clear_left(pPr, 200, True, False, None, size_hp=32)
+        self.mod._set_first_line_and_clear_left(pPr, 200, True, False, None, size_hp=21)
         ind = self._ind(pPr)
         self.assertIsNone(ind.get(self.mod.qn("w:hanging")))
-        self.assertEqual(ind.get(self.mod.qn("w:firstLine")), "640")
+        self.assertEqual(ind.get(self.mod.qn("w:firstLine")), "420")
         self.assertEqual(ind.get(self.mod.qn("w:leftChars")), "0")
 
     def test_clear_no_indent_writes_absolute_zero(self):
         # title/caption "no indent": firstLineChars=0 must be paired with an
         # absolute firstLine=0 so an inherited absolute hanging is overridden.
         pPr = self._ppr('<w:ind w:hanging="420"/>')
-        self.mod._set_first_line_and_clear_left(pPr, 0, True, True, None, size_hp=32)
+        self.mod._set_first_line_and_clear_left(pPr, 0, True, True, None, size_hp=21)
         ind = self._ind(pPr)
         self.assertEqual(ind.get(self.mod.qn("w:firstLine")), "0")
         self.assertIsNone(ind.get(self.mod.qn("w:hanging")))
 
     def test_left_chars_gets_absolute_companion(self):
-        # TOC per-level left indent (leftChars=200) also gets an absolute left.
+        # TOC per-level left indent (leftChars=200) also gets an absolute left,
+        # at the char-unit size (21) -> 420 (0.74cm), not the wrapping 640.
         pPr = self._ppr()
-        self.mod._set_first_line_and_clear_left(pPr, None, False, False, 200, size_hp=32)
+        self.mod._set_first_line_and_clear_left(pPr, None, False, False, 200, size_hp=21)
         ind = self._ind(pPr)
         self.assertEqual(ind.get(self.mod.qn("w:leftChars")), "200")
-        self.assertEqual(ind.get(self.mod.qn("w:left")), "640")
+        self.assertEqual(ind.get(self.mod.qn("w:left")), "420")
 
 
 # Docx parts for the LibreOffice-shaped heading test (numbering-level hanging).
@@ -327,8 +352,10 @@ class TestLibreOfficeHeadingIndentPipeline(unittest.TestCase):
         self.assertIsNotNone(ind, "标题段落缺少 w:ind")
         # 首行缩进2字符仍写字符单位
         self.assertEqual(ind.get(qn("w:firstLineChars")), "200")
-        # 关键：补了正值绝对 firstLine，压过编号层继承的绝对 hanging
-        self.assertGreater(int(ind.get(qn("w:firstLine")) or "0"), 0)
+        # 关键：补了正值绝对 firstLine，压过编号层继承的绝对 hanging；且按【文档默认
+        # 字号】(此 docx 无 docDefaults → 21/五号) 换算 = 420 twips (0.74cm)，而不是
+        # 按标题自身三号(32)算出的 640 (1.13cm) —— 后者正是要避免的过度缩进。
+        self.assertEqual(ind.get(qn("w:firstLine")), "420")
         # 段落直接属性上不残留 hanging（否则 Word 里悬挂缩进会赢）
         self.assertIsNone(ind.get(qn("w:hanging")))
 

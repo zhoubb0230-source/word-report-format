@@ -54,14 +54,13 @@ never flagged at all (e.g. a heading with no number and no heading-ish
 style) into a heading, or demotes a false positive to null.
 
 Effect: rewrites <workdir>/structure.json in place (a pre-review copy is
-kept as structure.pre_review.json), recomputes the cover/toc/body region
+kept as structure.pre_review.json) and recomputes the cover/toc/body region
 boundary (promoting/demoting the document's first heading can move where
 that boundary falls — everything before it is otherwise silently excluded
-from all body-region checks), AND regenerates <workdir>/shards/*, so that
-whichever check path runs next (full or sharded) sees the corrected level —
-which also determines which font spec applies (黑体 for level 1, 楷体 for
-level 2, 仿宋 for level 3/4), so correcting a level must refresh formatting,
-not just renumbering.
+from all body-region checks), so that the format check (30_check_format.py)
+sees the corrected level — which also determines which font spec applies
+(黑体 for level 1, 楷体 for level 2, 仿宋 for level 3/4), so correcting a
+level must refresh formatting, not just renumbering.
 
 Safe to run with an empty overrides.json ({} or {"headings":{},"captions":{}})
 if review found nothing to correct — it's a no-op in that case.
@@ -73,7 +72,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
 from headings import RE_CAPTION, parse_leading_label
-from structure import tag_regions, write_shards
+from structure import tag_regions
 
 
 _COVER_ROLES = ("title", "classification", "field", "other")
@@ -201,12 +200,6 @@ def main():
         shutil.copyfile(structure_path, bak)
     with open(structure_path, "w", encoding="utf-8") as f:
         json.dump(structure, f, ensure_ascii=False)
-
-    # Regenerate shards so the next check path (full or sharded) sees the
-    # corrected levels. shard_size was persisted by 20_extract_structure.py.
-    shard_dir = os.path.join(workdir, "shards")
-    if os.path.isdir(shard_dir):
-        write_shards(shard_dir, records, structure.get("shard_size", 400))
 
     print(json.dumps({
         "status": "ok",

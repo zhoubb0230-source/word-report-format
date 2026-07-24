@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """End-to-end smoke test: run the real pipeline scripts (05→10→20→30→40→45) on a
 minimal generated .docx and assert the output validates and preserves paragraph
-count. Exercises the refactored shared helpers (tag_regions / write_shards /
-in_textbox) through their actual entry points.
+count. Exercises the shared helpers (tag_regions / in_textbox) through their
+actual entry points.
 
 Skipped automatically if lxml is not importable (the pipeline's one dependency).
 """
@@ -43,7 +43,7 @@ class TestPipelineEndToEnd(unittest.TestCase):
     def _script(self, name):
         return os.path.join(helpers.SCRIPTS, name)
 
-    def test_full_path_a(self):
+    def test_full_pipeline(self):
         # cover title (large, centered), then an outline heading ends the cover,
         # then a non-compliant body paragraph. Wrong margins trigger a section fix.
         body = (
@@ -60,11 +60,9 @@ class TestPipelineEndToEnd(unittest.TestCase):
         run(self._script("10_prepare_input.py"), src, wd)
         extracted = run(self._script("20_extract_structure.py"), wd)
         self.assertEqual(extracted["n_paragraphs"], 3)
-
-        # shard_size must be persisted for 27 to reuse (P0-2 change)
-        with open(os.path.join(wd, "structure.json"), encoding="utf-8") as f:
-            structure = json.load(f)
-        self.assertIn("shard_size", structure)
+        # sharding is retired: extraction must not emit shard artifacts/fields
+        self.assertNotIn("n_shards", extracted)
+        self.assertFalse(os.path.isdir(os.path.join(wd, "shards")))
 
         checked = run(self._script("30_check_format.py"), wd)
         self.assertGreater(checked["n_fixes"], 0)
@@ -146,9 +144,10 @@ class TestPipelineEndToEnd(unittest.TestCase):
         self.assertFalse(any("章" in h for h in heads),
                          "目录条目被误判为标题：%s" % heads)
 
-    def test_apply_review_reshards_with_persisted_size(self):
-        # A tiny doc still round-trips through 27 with an empty overrides file,
-        # confirming the shared write_shards + persisted shard_size work.
+    def test_apply_review_recomputes_regions(self):
+        # A tiny doc still round-trips through 27 with an empty overrides file
+        # (a no-op review): it must rewrite structure.json with region tags on
+        # every record and NOT create any shard artifacts.
         body = (helpers.para("一、绪论", east_asia="宋体", outline=0)
                 + helpers.para("正文。", east_asia="宋体"))
         src = os.path.join(self.tmp, "in2.docx")
@@ -162,7 +161,10 @@ class TestPipelineEndToEnd(unittest.TestCase):
             f.write("{}")
         res = run(self._script("27_apply_review.py"), wd, ov)
         self.assertEqual(res["status"], "ok")
-        self.assertTrue(os.path.isdir(os.path.join(wd, "shards")))
+        self.assertFalse(os.path.isdir(os.path.join(wd, "shards")))
+        with open(os.path.join(wd, "structure.json"), encoding="utf-8") as f:
+            recs = json.load(f)["records"]
+        self.assertTrue(all(r.get("region") in ("cover", "toc", "body") for r in recs))
 
 
 if __name__ == "__main__":

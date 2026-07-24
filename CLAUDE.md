@@ -58,7 +58,7 @@ python3 -m unittest discover -s tests -p "test_*.py"
    python3 scripts/05_new_workdir.py                 # 打印 {workdir}；下面的 <workdir> 全用它
    python3 scripts/10_prepare_input.py <src.docx> <workdir>
    python3 scripts/20_extract_structure.py <workdir>
-   python3 scripts/30_check_format.py <workdir>     # 全量模式，直接写 workdir/fixes.json
+   python3 scripts/30_check_format.py <workdir>     # 一次性全文检查，直接写 workdir/fixes.json
    python3 scripts/40_apply_fixes.py <workdir>       # 产出 workdir/formatted.docx + out_pkg/
    python3 scripts/45_validate_output.py <workdir>   # 自检：ok=true 才算过（坏了退 2）
    python3 scripts/50_finalize.py <workdir> <out_dir> # <out_dir> 须在 workdir 之外
@@ -75,14 +75,15 @@ python3 -m unittest discover -s tests -p "test_*.py"
   逻辑在 `scripts/lib/workdir.py`（`base_dir()` / `is_inside_base()`），改路径约定要同步改这里。
 - **区域划分**：`cover` = 第一个 TOC / 第一个标题**之前**的所有段落。测试 docx 若既无目录又无标题，
   封面段落会全部落到 `body`——要放一个带 `outlineLvl` 的标题段来界定封面结束。
-- **区域划分 / 分片写盘是共享逻辑**：`tag_regions()` 与 `write_shards()` 都在 `scripts/lib/structure.py`，
-  由 `20_extract_structure.py`（抽取时）和 `27_apply_review.py`（复核改层级后重算边界）**共用同一份**。
-  27 复核可能提升/取消最早一条标题、从而移动封面/正文边界，必须重跑 `tag_regions`。**别把这两段再各自
-  内联回两个脚本**（历史上就是各写一遍、易漂移）。`shard_size` 已持久化进 `structure.json`，27 直接读、
-  不再靠"读第一个分片记录数"反推。
-- **`30` 有两套模式**：全量模式**直接写 `fixes.json`**；`--shard` 模式写 `fixes_parts/`，之后才用
-  `35_merge_fixes.py` 合并。**全量模式下不要跑 `35`**——它从 `fixes_parts/` 读，会把 `fixes.json`
-  覆盖掉。分片路径见 SKILL.md 的 Path B。
+- **区域划分是共享逻辑**：`tag_regions()` 在 `scripts/lib/structure.py`，由 `20_extract_structure.py`
+  （抽取时）和 `27_apply_review.py`（复核改层级后重算边界）**共用同一份**。27 复核可能提升/取消最早一条
+  标题、从而移动封面/正文边界，必须重跑 `tag_regions`。**别把这段再各自内联回两个脚本**（历史上就是各写
+  一遍、易漂移）。
+- **单一线性流程，不分片**：`30_check_format.py` 一次性全文扫描直接写 `fixes.json`（逐段格式 + 页边距 +
+  序号连续性 + 内容提示都在这一步）。检查是纯 Python、全程不把正文读进模型上下文，文档再大也这么跑。
+  历史上的「分片 + 子 agent」Path B（`31_check_global.py`/`30 --shard`/`35_merge_fixes.py`/`shards/`）
+  **已整体移除**——它对确定性 Python 检查没有任何收益，别再加回来；退役缘由见
+  `references/已知陷阱与设计决策.md`。
 - `cover_role` 的标题启发式阈值是**字号 ≥ 36 半点（小一）且居中**，或等于 title 的 `size_hp`。
   正常 15 磅（=30 半点）字段行低于此值，不会被误判成标题。
 - 输出命名由 `50_finalize.py` 负责（`原名_格式化版本_时间戳.原扩展名`），别在别处改名。

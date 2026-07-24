@@ -3,11 +3,10 @@
 Stage 2 — extract a structured IR from the working .docx.
 
 Usage:
-    python 20_extract_structure.py <workdir> [--shard-size N]
+    python 20_extract_structure.py <workdir>
 
 Reads   <workdir>/working.docx
 Writes  <workdir>/structure.json          (full IR; stays on disk, NOT for model)
-        <workdir>/shards/shard_000.json ... (paragraph slices for sub-agents)
 Prints  a COMPACT summary JSON to stdout (counts only), so the orchestrating
         model's context stays small even for 3000-page documents.
 
@@ -44,7 +43,7 @@ from headings import (
     looks_like_caption_style, caption_kind_from_style, toc_level_from_style,
     style_is_toc,
 )
-from structure import tag_regions, write_shards
+from structure import tag_regions
 
 
 def dominant_run_props(p, baseline):
@@ -251,12 +250,9 @@ def _mark_title_block(records):
 def main():
     if len(sys.argv) < 2:
         print(json.dumps({"status": "error",
-                          "error": "usage: 20_extract_structure.py <workdir> [--shard-size N]"}))
+                          "error": "usage: 20_extract_structure.py <workdir>"}))
         sys.exit(1)
     workdir = sys.argv[1]
-    shard_size = 400
-    if "--shard-size" in sys.argv:
-        shard_size = int(sys.argv[sys.argv.index("--shard-size") + 1])
 
     unpack = os.path.join(workdir, "unpacked_read")
     if os.path.isdir(unpack):
@@ -431,8 +427,6 @@ def main():
 
     structure = {
         "n_paragraphs": len(records),
-        "shard_size": shard_size,   # persisted so 27_apply_review.py re-shards
-                                    # with the same size instead of guessing it
         "page_setup": page_setup,
         "has_background": bool(has_background),
         "page_number": scan_page_number(unpack),
@@ -440,10 +434,6 @@ def main():
     }
     with open(os.path.join(workdir, "structure.json"), "w", encoding="utf-8") as f:
         json.dump(structure, f, ensure_ascii=False)
-
-    # ---- shards (paragraph records only) ----
-    shard_dir = os.path.join(workdir, "shards")
-    shard_files = write_shards(shard_dir, records, shard_size)
 
     summary = {
         "status": "ok",
@@ -458,9 +448,6 @@ def main():
         "headings_unconfirmed": sum(1 for r in records if r["is_heading"] and r["level_source"] == "pattern"),
         "captions": sum(1 for r in records if r["caption"]),
         "captions_unconfirmed": sum(1 for r in records if r["caption"] and r["caption"].get("source") == "pattern"),
-        "n_shards": len(shard_files),
-        "shard_dir": os.path.abspath(shard_dir),
-        "shard_files": shard_files,
         "page_setup_found": page_setup is not None,
         "next_step": "python 26_export_review.py <workdir>  # full-document heading/caption review before checking format",
     }

@@ -48,7 +48,7 @@ word-report-format/
   SKILL.md                  ← 本文件
   spec/format_spec.json     ← 固定规范（唯一判定依据）
   scripts/
-    00_check_env.py         ← 探测 python/lxml/soffice，判断能否转换 .doc
+    00_check_env.py         ← 探测 python/lxml/soffice/msword，判断能否转换 .doc
     05_new_workdir.py       ← 创建本次运行专属的唯一工作目录（固定临时基目录下），所有过程件都落在这里
     10_prepare_input.py     ← 生成 working.docx（.doc 需转换）+ meta.json
     20_extract_structure.py ← 解析生效格式 → structure.json + shards/（标题层级为默认猜测，见第 2.5 步）
@@ -72,11 +72,14 @@ word-report-format/
 python scripts/00_check_env.py
 ```
 
-输出单行 JSON：`{python, lxml, soffice, can_convert_doc, ok}`。
+输出单行 JSON：`{python, lxml, soffice, msword, can_convert_doc, ok}`。
 
 - `ok=false` → 缺关键依赖（python 或 lxml），停止并告知用户环境不满足。
+- `.doc` 转换支持两种后端，任一可用即 `can_convert_doc=true`：`soffice`（LibreOffice，跨平台）
+  或 `msword`（Windows 上安装了 Microsoft Word/Office，经 COM 自动化调用）。
 - 用户给的是 **.doc** 且 `can_convert_doc=false` → **停止**，通知用户：当前环境无法转换 .doc，
-  无法保证输出类型一致，请改传 .docx 或在支持 LibreOffice 的环境运行。**不要**擅自改用别的格式硬跑。
+  无法保证输出类型一致，请改传 .docx，或在装有 LibreOffice（Linux/Mac）或 Microsoft Office
+  （Windows）的环境运行。**不要**擅自改用别的格式硬跑。
 
 ## 第 0.5 步：创建本次运行的工作目录（每次必做）
 
@@ -99,7 +102,7 @@ python scripts/10_prepare_input.py <输入文件> <workdir>
 ```
 
 - .docx → 复制为 `<workdir>/working.docx`
-- .doc → 用 LibreOffice 转成 `working.docx`；若不可转，退出码 2 并给出中文提示（见上）。
+- .doc → 用 LibreOffice 或（Windows 上）Microsoft Word 转成 `working.docx`；若不可转，退出码 2 并给出中文提示（见上）。
 - 生成 `<workdir>/meta.json`（记录原名、原扩展名、working.docx 路径）。原文件始终只读。
 
 ## 第 2 步：抽取结构（解析「生效格式」）

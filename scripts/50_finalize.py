@@ -7,9 +7,9 @@ Usage:
 Output name:  {original_stem}_格式化版本_{YYYYMMDD_HHMMSS}.{original_ext}
 
 If the original was a .doc, the formatted .docx is converted back to .doc via
-LibreOffice so the output type matches the input. If conversion is required but
-unavailable, exits non-zero with a JSON message so the caller can notify the
-user (never silently emits the wrong type).
+LibreOffice (or Microsoft Word on Windows) so the output type matches the input.
+If conversion is required but unavailable, exits non-zero with a JSON message so
+the caller can notify the user (never silently emits the wrong type).
 """
 import json
 import os
@@ -18,7 +18,7 @@ import sys
 from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
-from soffice import convert, soffice_available
+from docconv import convert, can_convert_doc
 
 
 def main():
@@ -43,7 +43,7 @@ def main():
     out_path = os.path.join(output_dir, out_name)
 
     if ext == "doc":
-        if not soffice_available():
+        if not can_convert_doc():
             print(json.dumps({
                 "status": "error",
                 "reason": "doc_conversion_unavailable",

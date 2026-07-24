@@ -7,8 +7,9 @@ Usage:
 
 Behaviour (deterministic; never modifies the original):
   * .docx input  -> copied to <workdir>/working.docx
-  * .doc  input  -> if soffice available, converted to <workdir>/working.docx;
-                    if NOT available, prints an error JSON with
+  * .doc  input  -> if a converter is available (LibreOffice, or Microsoft
+                    Word on Windows), converted to <workdir>/working.docx;
+                    if NONE available, prints an error JSON with
                     status="error", reason="doc_conversion_unavailable" and
                     exits 2 so the agent can NOTIFY THE USER rather than guess.
   * writes <workdir>/meta.json recording original name, original extension
@@ -22,7 +23,7 @@ import shutil
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
-import soffice as sof
+import docconv
 
 
 def fail(reason, message, code=2):
@@ -49,13 +50,15 @@ def main():
         shutil.copy(src, working)
         original_ext = "docx"
     elif ext == "doc":
-        if not sof.soffice_available():
+        if not docconv.can_convert_doc():
             fail("doc_conversion_unavailable",
-                 "输入为 .doc 格式，但当前环境未安装 LibreOffice(soffice)，"
+                 "输入为 .doc 格式，但当前环境既未安装 LibreOffice(soffice)、"
+                 "也未检测到可用的 Microsoft Word（Windows），"
                  "无法将 .doc 转换为可处理的 .docx。请告知用户："
-                 "在具备 doc 转换能力的环境中重试，或由用户先将文档另存为 .docx 后提供。")
+                 "在具备 doc 转换能力的环境中重试（Linux/Mac 装 LibreOffice，"
+                 "或在装有 Office 的 Windows 上运行），或由用户先将文档另存为 .docx 后提供。")
         try:
-            converted = sof.convert(src, "docx", os.path.join(workdir, "_conv"))
+            converted = docconv.convert(src, "docx", os.path.join(workdir, "_conv"))
         except Exception as e:
             fail("doc_conversion_failed",
                  "LibreOffice 转换 .doc 失败：%s" % e, 3)

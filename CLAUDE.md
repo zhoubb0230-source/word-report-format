@@ -22,8 +22,10 @@
 
 - 唯一依赖是 **`lxml`**，且**默认没装**——先 `pip install lxml`（`scripts/lib/` 是自包含的，
   不用 python-docx / defusedxml）。
-- `python3 scripts/00_check_env.py` 探测 `python/lxml/soffice`；`soffice` 只在 `.doc`↔`.docx`
-  转换时需要（`.docx` 全程用不到）。
+- `python3 scripts/00_check_env.py` 探测 `python/lxml/soffice/msword`；`.doc`↔`.docx` 转换需要
+  **两种后端之一**：`soffice`（LibreOffice，跨平台）或 `msword`（Windows 上装了 Microsoft Word，经
+  PowerShell + COM 调用）。转换后端由 `scripts/lib/docconv.py` 统一封装（优先 soffice、回退 msword），
+  `.docx` 全程用不到任何后端。
 - 无第三方测试框架，无 `requirements.txt`。测试用 stdlib `unittest`（只依赖 lxml）。
 
 ## 回归测试（先跑这个，再手动冒烟）

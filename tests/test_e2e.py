@@ -107,6 +107,45 @@ class TestPipelineEndToEnd(unittest.TestCase):
         # one comment per distinct commented paragraph (merge worked)
         self.assertEqual(n_comments, len(counts))
 
+    def test_toc_field_span_tags_continuation_entries(self):
+        # Bug1: a TOC field spans many paragraphs but only the first carries the
+        # TOC instruction; continuation entries with an inherited outlineLvl were
+        # mis-detected as 黑体 headings. The field-span tagging must catch them.
+        def entry(text, first=False, last=False):
+            ppr = '<w:pPr><w:outlineLvl w:val="0"/></w:pPr>'
+            r = ""
+            if first:
+                r += ('<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+                      '<w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" \\h </w:instrText></w:r>'
+                      '<w:r><w:fldChar w:fldCharType="separate"/></w:r>')
+            r += ('<w:r><w:rPr><w:rFonts w:eastAsia="黑体"/></w:rPr>'
+                  '<w:t xml:space="preserve">%s</w:t></w:r>' % text)
+            if last:
+                r += '<w:r><w:fldChar w:fldCharType="end"/></w:r>'
+            return "<w:p>%s%s</w:p>" % (ppr, r)
+
+        body = (helpers.para("封面标题", east_asia="宋体", size_hp=44)
+                + helpers.para("目录", east_asia="黑体")
+                + entry("第一章 概述\t1", first=True)
+                + entry("第二章 方法\t2")
+                + entry("第三章 结果\t3", last=True)
+                + helpers.para("一、概述", east_asia="宋体", outline=0)
+                + helpers.para("正文。", east_asia="宋体"))
+        src = os.path.join(self.tmp, "toc.docx")
+        helpers.build_docx(src, body)
+        base = os.path.join(self.tmp, "wbtoc")
+        wd = run(self._script("05_new_workdir.py"), base)["workdir"]
+        run(self._script("10_prepare_input.py"), src, wd)
+        run(self._script("20_extract_structure.py"), wd)
+        with open(os.path.join(wd, "structure.json"), encoding="utf-8") as f:
+            recs = json.load(f)["records"]
+        toc_texts = [r["text"] for r in recs if r["region"] == "toc"]
+        for t in ("第一章", "第二章", "第三章"):
+            self.assertTrue(any(t in x for x in toc_texts), "%s 未标记为目录" % t)
+        heads = [r["text"] for r in recs if r["is_heading"]]
+        self.assertFalse(any("章" in h for h in heads),
+                         "目录条目被误判为标题：%s" % heads)
+
     def test_apply_review_reshards_with_persisted_size(self):
         # A tiny doc still round-trips through 27 with an empty overrides file,
         # confirming the shared write_shards + persisted shard_size work.

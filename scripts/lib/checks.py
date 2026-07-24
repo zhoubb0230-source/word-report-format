@@ -271,17 +271,19 @@ def check_paragraph(rec, spec):
     # Once the model confirms it (level_source becomes "model_confirmed"),
     # it gets real heading-font treatment on the next run.
     western = spec.get("western_font")
+    has_western = rec.get("has_western", False)
     if rec.get("is_heading") and rec.get("level_source") != "pattern":
         lvl = rec.get("level") or 1
         lvl = min(max(lvl, 1), 4)
         h = spec["headings"][str(lvl)]
         _check_font_size(eff, h, sets, violations,
-                         label="%d级标题" % lvl, western=western)
+                         label="%d级标题" % lvl, western=western, has_western=has_western)
         _check_first_line(eff, h, sets, violations, auto_num=rec.get("auto_num"))
         # headings are not forced to a specific line rule by the spec table
     else:
         b = spec["body"]
-        _check_font_size(eff, b, sets, violations, label="正文", western=western)
+        _check_font_size(eff, b, sets, violations, label="正文",
+                         western=western, has_western=has_western)
         # line spacing: fixed value 28pt (exact 560)
         ls = spec["line_spacing"]
         if not (eff.get("line") == ls["line_twips"] and eff.get("line_rule") == ls["line_rule"]):
@@ -302,7 +304,8 @@ def _check_table_body(rec, spec):
     sets = _new_sets()
     violations = []
     _check_font_size(eff, tb, sets, violations, label="表格内容",
-                     western=spec.get("western_font"))
+                     western=spec.get("western_font"),
+                     has_western=rec.get("has_western", False))
     return _mk_format(rec["i"], sets, violations)
 
 
@@ -360,27 +363,29 @@ def _check_toc(rec, spec):
 
 
 def _check_cover_field_left(rec, eff, sets, violations):
-    """封面要素行（项目名称/承担单位/项目负责人/起止时间/编制时间 等）左对齐修复。
+    """封面要素行（项目名称/承担单位/项目负责人/起止时间/编制时间 等）版式修复。
 
-    这些行应贴着左边距对齐。若行首带有空格，或存在左/首行缩进、或被设成了
-    居中/右对齐，视觉上就不是左对齐。这里：删除行首空白、清除左/首行缩进、
-    并在必要时把对齐方式改为左对齐。行内空格（如"20   年   月"的填空）保留。"""
+    规范：两端对齐、首行缩进2字符；并保留原有的"清除左侧空格 + 清除左侧字符
+    缩进"逻辑——行首空白与左缩进会把文本顶离左边距，需清掉。行内填空空格
+    （如"20   年   月"）保留，只清行首。"""
     text = rec.get("text") or ""
-    # 1) 对齐方式：非左对齐（居中/右对齐/两端对齐）时改为左对齐
-    if eff.get("jc") not in (None, "left", "start"):
-        sets["set_jc"] = "left"
-        violations.append("封面要素应左对齐")
-    # 2) 左/首行缩进：任何把文本推离左边距的缩进都清零
-    if any(eff.get(k) for k in ("first_line_chars", "first_line",
-                                "left_chars", "left", "start_chars", "start")):
-        sets["set_first_line_chars"] = 0
+    # 1) 对齐方式：改为两端对齐
+    if eff.get("jc") != "both":
+        sets["set_jc"] = "both"
+        violations.append("封面要素应两端对齐")
+    # 2) 首行缩进2字符
+    if eff.get("first_line_chars") != 200:
+        sets["set_first_line_chars"] = 200
+        violations.append("封面要素首行缩进应为2字符")
+    # 3) 左侧字符缩进：清零（保留首行缩进，不与其叠加）
+    if any(eff.get(k) for k in ("left_chars", "left", "start_chars", "start")):
         sets["clear_left_indent"] = True
-        violations.append("封面要素应清除左侧/首行缩进")
-    # 3) 行首空格：删除（否则即使左对齐，文本仍被空格顶开）
+        violations.append("封面要素应清除左侧缩进")
+    # 4) 行首空格：删除（否则文本仍被空格顶开）
     if text != text.lstrip():
         # 既有清首尾需求时用 both，否则仅清行首
         sets["strip_text"] = "both" if sets.get("strip_text") == "both" else "leading"
-        violations.append("封面要素行首空格应删除（左对齐）")
+        violations.append("封面要素行首空格应删除")
 
 
 def _check_no_indent(eff, sets, violations, label):
@@ -397,17 +402,22 @@ def _check_no_indent(eff, sets, violations, label):
         violations.append("%s不应有缩进" % label)
 
 
-def _check_font_size(eff, spec_entry, sets, violations, label, western=None):
+def _check_font_size(eff, spec_entry, sets, violations, label,
+                     western=None, has_western=False):
     """Check east-asian font + size against spec_entry. When `western` is given
     (the spec's western_font, for running text — 正文/标题/表格), the paragraph's
     EFFECTIVE Latin/digit font must equal it too, so 西文 renders as the required
-    Times New Roman. Only enforced where a western font was passed — cover/目录
-    layout lines deliberately opt out."""
+    Times New Roman — but ONLY when the paragraph actually CONTAINS Western text
+    (has_western). A pure-Chinese line has no Western characters to normalize, so
+    it is never flagged for its Latin font (which is often set to the same 仿宋 as
+    the Chinese font and would otherwise raise a confusing '西文应为 TNR' note on
+    every Chinese paragraph). Only enforced where a western font was passed —
+    cover/目录 layout lines deliberately opt out."""
     if not _font_ok(eff.get("east_asia"), spec_entry):
         sets["set_east_asia"] = spec_entry["east_asia"]
         violations.append("%s中文字体应为%s（实际：%s）"
                           % (label, spec_entry["east_asia"], eff.get("east_asia")))
-    if western and eff.get("ascii") != western:
+    if western and has_western and eff.get("ascii") != western:
         sets["set_ascii"] = western
         violations.append("%s西文字体应为%s（实际：%s）"
                           % (label, western, eff.get("ascii")))

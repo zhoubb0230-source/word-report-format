@@ -56,15 +56,19 @@ class TestCoverTitle(unittest.TestCase):
 
 
 class TestCoverField(unittest.TestCase):
-    """陷阱 #1: 封面字段行首空格删除并左对齐（行内填空空格保留）。"""
+    """陷阱 #1: 封面字段——两端对齐、首行缩进2字符、删行首空格、清左侧缩进
+    （行内填空空格保留）。"""
 
-    def test_leading_strip_and_left_align(self):
+    def test_justify_first_line_indent_and_leading_strip(self):
         r = rec(region="cover", text="  项目名称：先进项目",
-                eff_=eff(east_asia="宋体", size_hp=32, jc="center"))
+                eff_=eff(east_asia="宋体", size_hp=32, jc="center",
+                         first_line_chars=None, left_chars=200))
         fix = checks.check_paragraph(r, SPEC)
         # leading-only strip protects internal fill-in spaces
         self.assertEqual(fix["strip_text"], "leading")
-        self.assertEqual(fix["set_jc"], "left")
+        self.assertEqual(fix["set_jc"], "both")            # 两端对齐
+        self.assertEqual(fix["set_first_line_chars"], 200)  # 首行缩进2字符
+        self.assertTrue(fix["clear_left_indent"])           # 清左侧缩进
         self.assertEqual(fix["set_east_asia"], "方正黑体")
 
 
@@ -73,10 +77,10 @@ class TestTocExcluded(unittest.TestCase):
 
     def test_toc_uses_toc_font_not_heading(self):
         r = rec(region="toc", is_toc=True, toc_level=1, text="绪论\t1",
-                eff_=eff(east_asia="黑体", size_hp=32))
+                eff_=eff(east_asia="黑体", size_hp=28))
         fix = checks.check_paragraph(r, SPEC)
         self.assertEqual(fix["set_east_asia"], "仿宋")  # toc font, not 黑体
-        self.assertEqual(fix["set_size_hp"], 28)         # 14磅
+        self.assertEqual(fix["set_size_hp"], 32)         # 三号
 
     def test_toc_not_counted_in_continuity(self):
         recs = [rec(i=0, region="toc", is_toc=True, is_heading=False,
@@ -192,35 +196,42 @@ class TestPageSetup(unittest.TestCase):
 
 
 class TestWesternFont(unittest.TestCase):
-    """P0-1: 西文字体 Times New Roman 在正文/标题/表格上被规范化。"""
+    """P0-1 + Bug2: 西文字体只在【含西文】的正文/标题/表格上规范化为 TNR；
+    纯中文段落绝不因西文字体被批注。"""
 
-    def test_body_wrong_western_flagged(self):
-        fix = checks.check_paragraph(rec(eff_=eff(ascii="Calibri")), SPEC)
-        self.assertEqual(fix["set_ascii"], "Times New Roman")
+    def test_body_with_western_wrong_font_flagged(self):
+        r = rec(text="正文ABC", has_western=True, eff_=eff(ascii="Calibri"))
+        self.assertEqual(checks.check_paragraph(r, SPEC)["set_ascii"], "Times New Roman")
 
-    def test_body_missing_western_flagged(self):
-        # default eff has ascii=None (unset western) -> normalized to TNR
-        fix = checks.check_paragraph(rec(), SPEC)
-        self.assertEqual(fix["set_ascii"], "Times New Roman")
+    def test_body_with_western_unset_font_flagged(self):
+        # ascii unset but the line has western chars -> normalized to TNR
+        r = rec(text="正文123", has_western=True)
+        self.assertEqual(checks.check_paragraph(r, SPEC)["set_ascii"], "Times New Roman")
 
-    def test_fully_compliant_body_no_fix(self):
-        fix = checks.check_paragraph(rec(eff_=eff(ascii="Times New Roman")), SPEC)
-        self.assertIsNone(fix)
+    def test_pure_chinese_body_no_western_fix(self):
+        # Bug2: pure-Chinese line whose Latin font is 仿宋 must NOT be flagged.
+        r = rec(text="纯中文正文。", has_western=False, eff_=eff(ascii="仿宋"))
+        self.assertIsNone(checks.check_paragraph(r, SPEC))
 
-    def test_heading_gets_western(self):
+    def test_pure_chinese_table_no_western_fix(self):
+        # Bug2 exact report: 表格内容纯中文 误判 "西文应为 TNR（实际：仿宋）".
+        r = rec(in_table=True, text="设备名称", has_western=False,
+                eff_=eff(east_asia="仿宋", size_hp=32, ascii="仿宋"))
+        self.assertIsNone(checks.check_paragraph(r, SPEC))
+
+    def test_heading_with_western_gets_tnr(self):
         r = rec(is_heading=True, level=1, level_source="outline",
-                num_raw="一、", text="一、绪论", eff_=eff(ascii="Arial"))
-        fix = checks.check_paragraph(r, SPEC)
-        self.assertEqual(fix["set_ascii"], "Times New Roman")
+                num_raw="一、", text="一、Overview A", has_western=True,
+                eff_=eff(ascii="Arial"))
+        self.assertEqual(checks.check_paragraph(r, SPEC)["set_ascii"], "Times New Roman")
 
     def test_cover_field_not_forced_western(self):
         # cover layout lines deliberately opt out of western enforcement:
         # an otherwise-compliant field with a wrong Latin font gets NO fix.
-        r = rec(region="cover", text="项目名称：先进",
+        r = rec(region="cover", text="项目名称ABC", has_western=True,
                 eff_=eff(east_asia="方正黑体", size_hp=30, ascii="Calibri",
-                         first_line_chars=None))
-        fix = checks.check_paragraph(r, SPEC)
-        self.assertIsNone(fix)  # font/size ok, western not enforced here
+                         jc="both", first_line_chars=200))
+        self.assertIsNone(checks.check_paragraph(r, SPEC))  # western not enforced here
 
 
 class TestDocHints(unittest.TestCase):

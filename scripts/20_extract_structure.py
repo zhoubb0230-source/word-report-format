@@ -30,6 +30,7 @@ Deterministic. No model calls.
 """
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
@@ -140,6 +141,44 @@ def in_toc_sdt(p):
                     return True
         anc = anc.getparent()
     return False
+
+
+def toc_field_para_indices(doc_root):
+    """Body-paragraph indices covered by a TOC FIELD span (fldChar begin..end).
+
+    A Word table of contents is ONE field spanning MANY paragraphs, but only the
+    first entry carries the 'TOC' instruction text; the continuation entries hold
+    just the field RESULT. Detecting the TOC only per-paragraph (has_toc_field)
+    therefore tags only the first entry — and any continuation entry that carries
+    an inherited outlineLvl or heading-ish style then gets mis-detected as a
+    HEADING (wrong 黑体 font + indent, and it corrupts the cover boundary and the
+    numbering continuity). Tracking the field span across paragraphs tags every
+    entry as TOC. Nested per-entry fields (HYPERLINK / PAGEREF) are handled by a
+    depth stack so the outer TOC stays open until its own matching end."""
+    inside = set()
+    open_fields = []  # stack of {"is_toc": bool, "instr": str} per open field
+    for idx, p in iter_body_paragraphs(doc_root):
+        touched = any(f["is_toc"] for f in open_fields)
+        for el in p.iter():
+            tag = el.tag
+            if tag == qn("w:fldChar"):
+                typ = el.get(qn("w:fldCharType"))
+                if typ == "begin":
+                    open_fields.append({"is_toc": False, "instr": ""})
+                elif typ == "end" and open_fields:
+                    open_fields.pop()
+            elif tag == qn("w:instrText") and open_fields:
+                open_fields[-1]["instr"] += (el.text or "")
+                if "TOC" in open_fields[-1]["instr"].upper():
+                    open_fields[-1]["is_toc"] = True
+            elif tag == qn("w:fldSimple"):
+                if "TOC" in (el.get(qn("w:instr")) or "").upper():
+                    touched = True
+            if any(f["is_toc"] for f in open_fields):
+                touched = True
+        if touched:
+            inside.add(idx)
+    return inside
 
 
 # Font size (half-points) at/above which a cover line is "large" enough to be
@@ -259,6 +298,10 @@ def main():
             }
 
     # ---- iterate paragraphs ----
+    # Paragraphs inside a TOC field span (many entries, only the first carries
+    # the TOC instruction) — tagged TOC below so continuation entries are never
+    # mistaken for headings.
+    toc_span = toc_field_para_indices(doc_root)
     records = []
     for i, p in iter_body_paragraphs(doc_root):
         sid = get_style_id(p)
@@ -288,7 +331,8 @@ def main():
                     ppr[k] = lvl_ppr[k]
 
         is_blank = not text.strip()
-        is_toc = style_is_toc(sid, resolver) or has_toc_field(p) or in_toc_sdt(p)
+        is_toc = (style_is_toc(sid, resolver) or has_toc_field(p)
+                  or in_toc_sdt(p) or (i in toc_span))
         is_toctitle = bool(RE_TOCTITLE.match(text))
         toc_level = toc_level_from_style(sid, resolver) if (is_toc and not is_toctitle) else None
 
@@ -355,6 +399,11 @@ def main():
             "num_raw": num_raw,
             "caption": caption,
             "in_table": in_table(p),
+            # Whether the paragraph actually contains Western text (Latin letters
+            # or digits). The western-font rule only applies where such text
+            # exists, so a pure-Chinese paragraph is never flagged for its Latin
+            # font (computed from the FULL text, before the 60-char truncation).
+            "has_western": bool(re.search(r"[A-Za-z0-9]", text)),
             "eff": {
                 "east_asia": ea, "ascii": asc, "size_hp": sz,
                 "line": ppr.get("line"), "line_rule": ppr.get("line_rule"),

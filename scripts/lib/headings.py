@@ -54,9 +54,14 @@ RE_L4 = re.compile(r"^[（(]\s*(\d{1,2})\s*[）)]")        # （4）
 RE_CAPTION = re.compile(r"^\s*(图|表)\s*([0-9]+(?:[-\.–][0-9]+)?)(.*)$")
 RE_TOCTITLE = re.compile(r"^\s*目\s*录\s*$")            # 目录 / 目 录
 
-# TOC entry level from its style ("TOC1"/"toc 2"/"目录 3"): the trailing
-# digit is the level, used to pick that level's target indent.
-_TOC_LVL_RE = re.compile(r"(?:toc|目录)\s*([1-9])", re.I)
+# TOC entry level from its style ("TOC1"/"toc 2"/"目录 3"/"Contents 1"): the
+# trailing digit is the level, used to pick that level's target indent.
+# "Contents N" is what LibreOffice names TOC entry styles when it converts a
+# .doc — Word uses "TOC N"/"目录 N", so without the "contents" alternative a
+# LibreOffice-converted document's TOC entries have an UNRESOLVABLE level
+# (toc_level=None -> _check_toc falls back to leftChars=0 -> 目录被压成无缩进),
+# and _patch_toc_styles skips their styles so a refreshed TOC loses its indent.
+_TOC_LVL_RE = re.compile(r"(?:toc|目录|contents?)\s*([1-9])", re.I)
 
 # --- level number carried by a heading STYLE NAME -------------------------
 # "标题 1" / "Heading 1" / "一级标题" / "1级标题" all state the level
@@ -164,7 +169,7 @@ def style_is_toc(style_id, resolver):
     entry after the first into the heading branch (wrong font/indent, and a
     renumber may even rewrite the entry text)."""
     sid, name = _style_name(style_id, resolver)
-    if sid.lower().startswith("toc"):
+    if sid.lower().startswith(("toc", "contents")):
         return True
     return bool(_TOC_LVL_RE.search(sid + " " + name))
 

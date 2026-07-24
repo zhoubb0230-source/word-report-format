@@ -232,6 +232,26 @@ class TestHeadingInference(unittest.TestCase):
         self.assertEqual(source, "pattern")
 
 
+class TestLibreOfficeTocStyle(unittest.TestCase):
+    """LibreOffice .doc→.docx 兼容：目录条目样式被命名为 'Contents N'（Word 用
+    'TOC N'/'目录 N'）。若不识别，toc_level 取不到而退化成不缩进（目录被压平）、
+    且 40 的样式回写会跳过它们，刷新后目录彻底丢缩进。"""
+
+    def _resolver(self):
+        w_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        styles = etree.fromstring(
+            ('<w:styles xmlns:w="%s">'
+             '<w:style w:type="paragraph" w:styleId="Contents2">'
+             '<w:name w:val="Contents 2"/></w:style></w:styles>'
+             % w_ns).encode("utf-8"))
+        return StyleResolver(styles)
+
+    def test_contents_style_recognized_as_toc(self):
+        resolver = self._resolver()
+        self.assertTrue(headings.style_is_toc("Contents2", resolver))
+        self.assertEqual(headings.toc_level_from_style("Contents2", resolver), 2)
+
+
 class TestInt2Cn(unittest.TestCase):
     def test_basic_range(self):
         self.assertEqual(checks.int2cn(1), "一")

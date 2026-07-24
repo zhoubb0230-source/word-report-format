@@ -39,8 +39,12 @@ from checks import load_default_spec
 # so it refreshes on open — so the only way to make the TOC font/size/indent
 # actually stick is to patch the styles themselves, not just the current
 # entry runs.
-RE_TOC_STYLE_ID = re.compile(r"^toc\s*\d+$", re.IGNORECASE)
-RE_TOC_STYLE_NAME = re.compile(r"^(?:toc|目录)\s*\d+$", re.IGNORECASE)
+# "Contents N" is LibreOffice's name for TOC entry styles (Word uses "TOC N" /
+# "目录 N"); match it too so a LibreOffice-converted document's TOC styles are
+# patched — otherwise a refreshed TOC rebuilds from an un-patched style and
+# loses the per-level indent.
+RE_TOC_STYLE_ID = re.compile(r"^(?:toc|contents?)\s*\d+$", re.IGNORECASE)
+RE_TOC_STYLE_NAME = re.compile(r"^(?:toc|目录|contents?)\s*\d+$", re.IGNORECASE)
 
 # Level-independent: whatever leading enumeration label a heading currently
 # has (regardless of numeral system / punctuation, and regardless of whether
@@ -151,22 +155,52 @@ def _set_line_exact(pPr, line_twips):
             del sp.attrib[qn(a)]
 
 
+def _char_twips(chars, size_hp):
+    """Character-unit indent (hundredths of a char, e.g. 200 = 2 chars) -> its
+    absolute width in twips at a given font size (half-points).
+
+    One CJK character is one em wide, so its width in twips is size_hp * 10
+    (size_hp/2 pt * 20 twips/pt). Used to emit an ABSOLUTE w:firstLine/w:left
+    alongside the char-based value so the direct override also wins over an
+    absolute indent inherited from a style / numbering level (see
+    _set_first_line_and_clear_left)."""
+    return int(round(chars / 100.0 * size_hp * 10))
+
+
 def _set_first_line_and_clear_left(pPr, first_line_chars, clear_left, clear_right=False,
-                                   set_left_chars=None):
+                                   set_left_chars=None, size_hp=32):
+    """Write the paragraph's indent as a DIRECT override.
+
+    Every char-based value (w:firstLineChars / w:leftChars) is paired with its
+    ABSOLUTE equivalent (w:firstLine / w:left) computed from ``size_hp``. This
+    is what makes the override actually win when the value it must beat is an
+    absolute indent INHERITED from a paragraph style or numbering level — the
+    common shape a LibreOffice .doc→.docx conversion produces (LibreOffice does
+    not emit the *Chars variants at all). A char-only first-line indent does NOT
+    neutralize an inherited absolute w:hanging in Word, so the hanging survives
+    and renders as a hanging indent (the "首行缩进变悬挂缩进 / 左缩进 -0.74cm"
+    symptom); pairing it with an absolute w:firstLine fixes that. When Word sees
+    both the char and absolute forms it uses the char form, so this never
+    changes the Word-converted (already-correct) case."""
     ind = _get_or_make(pPr, "w:ind")
     if first_line_chars is not None:
         ind.set(qn("w:firstLineChars"), str(first_line_chars))
-        # remove absolute first-line / hanging that would conflict
-        for a in ("w:firstLine", "w:hanging", "w:hangingChars"):
+        # Absolute companion (may be 0 for the "no special indent" cases:
+        # title / caption / TOC) so an inherited absolute first-line/hanging is
+        # overridden rather than left to win.
+        ind.set(qn("w:firstLine"), str(_char_twips(first_line_chars, size_hp)))
+        # remove hanging: firstLine and hanging are mutually exclusive, and any
+        # direct hanging would otherwise take precedence over our first-line.
+        for a in ("w:hanging", "w:hangingChars"):
             if ind.get(qn(a)) is not None:
                 del ind.attrib[qn(a)]
     if set_left_chars is not None:
         # Set the left indent to a SPECIFIC character count (TOC per-level
         # indent: 0/200/400). leftChars governs (char-based, East-Asian aware);
-        # the absolute w:left is zeroed and the w:start synonyms dropped so
-        # nothing overrides it.
+        # its absolute w:left companion is written too (so an inherited absolute
+        # left indent is overridden), and the w:start synonyms dropped.
         ind.set(qn("w:leftChars"), str(set_left_chars))
-        ind.set(qn("w:left"), "0")
+        ind.set(qn("w:left"), str(_char_twips(set_left_chars, size_hp)))
         for a in ("w:startChars", "w:start"):
             if ind.get(qn(a)) is not None:
                 del ind.attrib[qn(a)]
@@ -198,6 +232,33 @@ def _set_first_line_and_clear_left(pPr, first_line_chars, clear_left, clear_righ
 def _set_jc(pPr, val):
     jc = _get_or_make(pPr, "w:jc")
     jc.set(qn("w:val"), val)
+
+
+def _para_eff_size_hp(p, fix, default=32):
+    """Font size (half-points) to convert this paragraph's char-based indent to
+    absolute twips. The size we WRITE wins if the fix changes it; otherwise use
+    the paragraph's own run/paragraph-mark size; else the spec's ubiquitous 三号
+    (32). The absolute value only has to override an inherited absolute indent —
+    Word renders from the char value when both are present — so an approximate
+    size is harmless, but matching keeps the two forms consistent."""
+    if fix.get("set_size_hp"):
+        return fix["set_size_hp"]
+    for r in _iter_runs(p):
+        sz = r.find(qn("w:rPr") + "/" + qn("w:sz"))
+        if sz is not None and sz.get(qn("w:val")):
+            try:
+                return int(sz.get(qn("w:val")))
+            except ValueError:
+                pass
+    pPr = p.find(qn("w:pPr"))
+    if pPr is not None:
+        sz = pPr.find(qn("w:rPr") + "/" + qn("w:sz"))
+        if sz is not None and sz.get(qn("w:val")):
+            try:
+                return int(sz.get(qn("w:val")))
+            except ValueError:
+                pass
+    return default
 
 
 # whitespace stripped from a paragraph's ends (space / tab / full-width /
@@ -420,8 +481,9 @@ def _apply_section(doc_root, setmar):
 # settings.xml : force TOC field refresh on open
 # ---------------------------------------------------------------------------
 def _toc_style_level(sid, name):
-    """Trailing digit of a TOC style id/name ('TOC1'/'toc 2') -> its level."""
-    m = re.search(r"(?:toc|目录)\s*([1-9])", sid + " " + name, re.IGNORECASE)
+    """Trailing digit of a TOC style id/name ('TOC1'/'toc 2'/'Contents 3')
+    -> its level."""
+    m = re.search(r"(?:toc|目录|contents?)\s*([1-9])", sid + " " + name, re.IGNORECASE)
     return int(m.group(1)) if m else None
 
 
@@ -459,7 +521,9 @@ def _patch_toc_styles(pkg_dir, toc_spec):
         ppr = _get_or_make(st, "w:pPr", before_tags=("w:rPr",))
         ind = _get_or_make(ppr, "w:ind")
         ind.set(qn("w:leftChars"), str(want_left))
-        ind.set(qn("w:left"), "0")
+        # absolute companion (0 for 一级) so the per-level indent overrides any
+        # absolute left/hanging inherited from a basedOn parent style.
+        ind.set(qn("w:left"), str(_char_twips(want_left, int(sz))))
         for a in ("w:firstLineChars", "w:firstLine"):
             ind.set(qn(a), "0")
         for a in ("w:startChars", "w:start", "w:hanging", "w:hangingChars"):
@@ -675,7 +739,8 @@ def main():
                     pPr, fix.get("set_first_line_chars"),
                     bool(fix.get("clear_left_indent")),
                     bool(fix.get("clear_right_indent")),
-                    fix.get("set_left_chars"))
+                    fix.get("set_left_chars"),
+                    size_hp=_para_eff_size_hp(p, fix))
             if fix.get("set_jc") is not None:
                 _set_jc(pPr, fix["set_jc"])
             if fix.get("strip_text"):

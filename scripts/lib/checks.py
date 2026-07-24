@@ -147,8 +147,8 @@ def cover_role(rec, spec):
 
 def _size_name(hp):
     """Half-point value -> a human-readable Chinese size label for comments."""
-    names = {40: "20磅", 36: "小一", 32: "三号",
-             28: "14磅", 24: "小四", 21: "五号"}
+    names = {40: "20磅", 36: "小一", 32: "三号", 30: "小三",
+             28: "四号", 24: "小四", 21: "五号"}
     if hp in names:
         return names[hp]
     return "%g磅" % (hp / 2.0)
@@ -258,6 +258,13 @@ def check_paragraph(rec, spec):
         label = "封面要素"
         if entry and entry.get("east_asia") and entry.get("size_hp"):
             _check_font_size(eff, entry, sets, violations, label=label)
+        # 行距：报告题目下的各要素为固定值（spec.cover_field.line_twips，29.4磅），
+        # 与正文的 28 磅不同——单独按 cover_field 的行距规则校验。
+        if entry and entry.get("line_twips") and entry.get("line_rule"):
+            if not (eff.get("line") == entry["line_twips"]
+                    and eff.get("line_rule") == entry["line_rule"]):
+                sets["set_line_exact"] = entry["line_twips"]
+                violations.append("封面要素行距应为固定值%g磅" % (entry["line_twips"] / 20.0))
         _check_cover_field_left(rec, eff, sets, violations)
         return _mk_format(rec["i"], sets, violations)
 
@@ -706,10 +713,17 @@ def _cover_missing_fields(structure, spec):
     records = structure["records"]
     cov = spec.get("cover", {})
     required = cov.get("required_fields", [])
+    # 字段别名：模板里同一必备项可能用不同标签（如「项目编号」＝「文本编号」）。
+    # 只要出现其中任一别名，就算该必备项已填。
+    aliases = cov.get("field_aliases", {})
+
+    def _alts(f):
+        return [f] + list(aliases.get(f, []))
+
     ai_present = structure.get("cover_present")
     if isinstance(ai_present, list):
         present = set(ai_present)
-        return [f for f in required if f not in present]
+        return [f for f in required if not any(a in present for a in _alts(f))]
     cover_recs = [r for r in records if r.get("region") == "cover" and not r.get("is_blank")]
     cover_text = "".join(r.get("text") or "" for r in cover_recs)
     title_text = "".join(r.get("text") or "" for r in cover_recs if r.get("is_title"))
@@ -730,7 +744,7 @@ def _cover_missing_fields(structure, spec):
             # label, so accept either.
             if "密级" in cover_text or any(v in cover_text for v in secrecy_values):
                 present.add(f)
-        elif f in cover_text:
+        elif any(a in cover_text for a in _alts(f)):
             present.add(f)
     return [f for f in required if f not in present]
 

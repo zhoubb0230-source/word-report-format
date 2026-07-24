@@ -51,19 +51,19 @@ def main():
     elif ext == "doc":
         if not sof.soffice_available():
             fail("doc_conversion_unavailable",
-                 "\u8f93\u5165\u4e3a .doc \u683c\u5f0f\uff0c\u4f46\u5f53\u524d\u73af\u5883\u672a\u5b89\u88c5 LibreOffice(soffice)\uff0c"
-                 "\u65e0\u6cd5\u5c06 .doc \u8f6c\u6362\u4e3a\u53ef\u5904\u7406\u7684 .docx\u3002\u8bf7\u544a\u77e5\u7528\u6237\uff1a"
-                 "\u5728\u5177\u5907 doc \u8f6c\u6362\u80fd\u529b\u7684\u73af\u5883\u4e2d\u91cd\u8bd5\uff0c\u6216\u7531\u7528\u6237\u5148\u5c06\u6587\u6863\u53e6\u5b58\u4e3a .docx \u540e\u63d0\u4f9b\u3002")
+                 "输入为 .doc 格式，但当前环境未安装 LibreOffice(soffice)，"
+                 "无法将 .doc 转换为可处理的 .docx。请告知用户："
+                 "在具备 doc 转换能力的环境中重试，或由用户先将文档另存为 .docx 后提供。")
         try:
             converted = sof.convert(src, "docx", os.path.join(workdir, "_conv"))
         except Exception as e:
             fail("doc_conversion_failed",
-                 "LibreOffice \u8f6c\u6362 .doc \u5931\u8d25\uff1a%s" % e, 3)
+                 "LibreOffice 转换 .doc 失败：%s" % e, 3)
         shutil.copy(converted, working)
         original_ext = "doc"
     else:
         fail("unsupported_type",
-             "\u4ec5\u652f\u6301 .doc / .docx\uff0c\u5f53\u524d\u4e3a: .%s" % ext, 1)
+             "仅支持 .doc / .docx，当前为: .%s" % ext, 1)
 
     meta = {
         "status": "ok",

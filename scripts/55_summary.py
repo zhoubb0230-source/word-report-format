@@ -38,6 +38,8 @@ HINT_CATEGORY = {
     "cover.green": "封面背景颜色",
     "caption.content": "图表缺少内容说明",
     "heading.unconfirmed": "疑似标题（未确认）",
+    "toc.depth": "目录层级超三级",
+    "page_number.font": "页码字体",
 }
 
 

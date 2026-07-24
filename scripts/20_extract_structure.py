@@ -30,6 +30,7 @@ Deterministic. No model calls.
 """
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
@@ -43,6 +44,7 @@ from headings import (
     looks_like_caption_style, caption_kind_from_style, toc_level_from_style,
     style_is_toc,
 )
+from structure import tag_regions, write_shards
 
 
 def dominant_run_props(p, baseline):
@@ -79,6 +81,57 @@ def has_toc_field(p):
     return False
 
 
+def _has_page_field(p):
+    """True if paragraph p contains a PAGE (or NUMPAGES) field — the page number."""
+    for it in p.iter(qn("w:instrText")):
+        if it.text and "PAGE" in it.text.upper():
+            return True
+    for fs in p.iter(qn("w:fldSimple")):
+        if "PAGE" in (fs.get(qn("w:instr")) or "").upper():
+            return True
+    return False
+
+
+def scan_page_number(unpack):
+    """Best-effort: find the page-number run in headers/footers and return its
+    western font + size {ascii, size_hp}, or None if no PAGE field is present.
+
+    The page number lives in a header/footer PAGE field, not the body, so it is
+    read here and recorded into structure for a HINT-ONLY check downstream
+    (doc_hints). A rough read of the direct rPr on the field's paragraph runs is
+    enough for a hint; nothing is auto-changed from it."""
+    import glob
+    word = os.path.join(unpack, "word")
+    if not os.path.isdir(word):
+        return None
+    parts = sorted(glob.glob(os.path.join(word, "header*.xml"))
+                   + glob.glob(os.path.join(word, "footer*.xml")))
+    for part in parts:
+        try:
+            root = parse_xml(part).getroot()
+        except Exception:
+            continue
+        for p in root.iter(qn("w:p")):
+            if not _has_page_field(p):
+                continue
+            asc, sz = None, None
+            for run in p.iter(qn("w:r")):
+                rpr = run.find(qn("w:rPr"))
+                if rpr is None:
+                    continue
+                rf = rpr.find(qn("w:rFonts"))
+                if rf is not None and rf.get(qn("w:ascii")):
+                    asc = rf.get(qn("w:ascii"))
+                s = rpr.find(qn("w:sz"))
+                if s is not None and s.get(qn("w:val")):
+                    try:
+                        sz = int(s.get(qn("w:val")))
+                    except ValueError:
+                        pass
+            return {"ascii": asc, "size_hp": sz}
+    return None
+
+
 def in_toc_sdt(p):
     anc = p.getparent()
     while anc is not None:
@@ -88,6 +141,44 @@ def in_toc_sdt(p):
                     return True
         anc = anc.getparent()
     return False
+
+
+def toc_field_para_indices(doc_root):
+    """Body-paragraph indices covered by a TOC FIELD span (fldChar begin..end).
+
+    A Word table of contents is ONE field spanning MANY paragraphs, but only the
+    first entry carries the 'TOC' instruction text; the continuation entries hold
+    just the field RESULT. Detecting the TOC only per-paragraph (has_toc_field)
+    therefore tags only the first entry — and any continuation entry that carries
+    an inherited outlineLvl or heading-ish style then gets mis-detected as a
+    HEADING (wrong 黑体 font + indent, and it corrupts the cover boundary and the
+    numbering continuity). Tracking the field span across paragraphs tags every
+    entry as TOC. Nested per-entry fields (HYPERLINK / PAGEREF) are handled by a
+    depth stack so the outer TOC stays open until its own matching end."""
+    inside = set()
+    open_fields = []  # stack of {"is_toc": bool, "instr": str} per open field
+    for idx, p in iter_body_paragraphs(doc_root):
+        touched = any(f["is_toc"] for f in open_fields)
+        for el in p.iter():
+            tag = el.tag
+            if tag == qn("w:fldChar"):
+                typ = el.get(qn("w:fldCharType"))
+                if typ == "begin":
+                    open_fields.append({"is_toc": False, "instr": ""})
+                elif typ == "end" and open_fields:
+                    open_fields.pop()
+            elif tag == qn("w:instrText") and open_fields:
+                open_fields[-1]["instr"] += (el.text or "")
+                if "TOC" in open_fields[-1]["instr"].upper():
+                    open_fields[-1]["is_toc"] = True
+            elif tag == qn("w:fldSimple"):
+                if "TOC" in (el.get(qn("w:instr")) or "").upper():
+                    touched = True
+            if any(f["is_toc"] for f in open_fields):
+                touched = True
+        if touched:
+            inside.add(idx)
+    return inside
 
 
 # Font size (half-points) at/above which a cover line is "large" enough to be
@@ -158,6 +249,10 @@ def _mark_title_block(records):
 
 
 def main():
+    if len(sys.argv) < 2:
+        print(json.dumps({"status": "error",
+                          "error": "usage: 20_extract_structure.py <workdir> [--shard-size N]"}))
+        sys.exit(1)
     workdir = sys.argv[1]
     shard_size = 400
     if "--shard-size" in sys.argv:
@@ -203,6 +298,10 @@ def main():
             }
 
     # ---- iterate paragraphs ----
+    # Paragraphs inside a TOC field span (many entries, only the first carries
+    # the TOC instruction) — tagged TOC below so continuation entries are never
+    # mistaken for headings.
+    toc_span = toc_field_para_indices(doc_root)
     records = []
     for i, p in iter_body_paragraphs(doc_root):
         sid = get_style_id(p)
@@ -232,7 +331,8 @@ def main():
                     ppr[k] = lvl_ppr[k]
 
         is_blank = not text.strip()
-        is_toc = style_is_toc(sid, resolver) or has_toc_field(p) or in_toc_sdt(p)
+        is_toc = (style_is_toc(sid, resolver) or has_toc_field(p)
+                  or in_toc_sdt(p) or (i in toc_span))
         is_toctitle = bool(RE_TOCTITLE.match(text))
         toc_level = toc_level_from_style(sid, resolver) if (is_toc and not is_toctitle) else None
 
@@ -299,6 +399,11 @@ def main():
             "num_raw": num_raw,
             "caption": caption,
             "in_table": in_table(p),
+            # Whether the paragraph actually contains Western text (Latin letters
+            # or digits). The western-font rule only applies where such text
+            # exists, so a pure-Chinese paragraph is never flagged for its Latin
+            # font (computed from the FULL text, before the 60-char truncation).
+            "has_western": bool(re.search(r"[A-Za-z0-9]", text)),
             "eff": {
                 "east_asia": ea, "ascii": asc, "size_hp": sz,
                 "line": ppr.get("line"), "line_rule": ppr.get("line_rule"),
@@ -315,16 +420,7 @@ def main():
         records.append(rec)
 
     # ---- region tagging: cover / toc / body ----
-    first_toc_idx = next((r["i"] for r in records if r["is_toc"]), None)
-    first_heading_idx = next((r["i"] for r in records if r["is_heading"]), None)
-    cover_end = first_toc_idx if first_toc_idx is not None else first_heading_idx
-    for r in records:
-        if r["is_toc"]:
-            r["region"] = "toc"
-        elif cover_end is not None and r["i"] < cover_end:
-            r["region"] = "cover"
-        else:
-            r["region"] = "body"
+    tag_regions(records)
 
     # ---- title block on the cover (may wrap across paragraphs) ----
     _mark_title_block(records)
@@ -335,8 +431,11 @@ def main():
 
     structure = {
         "n_paragraphs": len(records),
+        "shard_size": shard_size,   # persisted so 27_apply_review.py re-shards
+                                    # with the same size instead of guessing it
         "page_setup": page_setup,
         "has_background": bool(has_background),
+        "page_number": scan_page_number(unpack),
         "records": records,
     }
     with open(os.path.join(workdir, "structure.json"), "w", encoding="utf-8") as f:
@@ -344,17 +443,7 @@ def main():
 
     # ---- shards (paragraph records only) ----
     shard_dir = os.path.join(workdir, "shards")
-    os.makedirs(shard_dir, exist_ok=True)
-    for f in os.listdir(shard_dir):
-        os.remove(os.path.join(shard_dir, f))
-    shard_files = []
-    for si, start in enumerate(range(0, len(records), shard_size)):
-        chunk = records[start:start + shard_size]
-        name = "shard_%03d.json" % si
-        with open(os.path.join(shard_dir, name), "w", encoding="utf-8") as f:
-            json.dump({"shard_id": si, "range": [chunk[0]["i"], chunk[-1]["i"]],
-                       "records": chunk}, f, ensure_ascii=False)
-        shard_files.append(name)
+    shard_files = write_shards(shard_dir, records, shard_size)
 
     summary = {
         "status": "ok",

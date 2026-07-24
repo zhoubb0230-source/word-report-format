@@ -73,6 +73,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
 from headings import RE_CAPTION, parse_leading_label
+from structure import tag_regions, write_shards
 
 
 _COVER_ROLES = ("title", "classification", "field", "other")
@@ -116,46 +117,11 @@ def _full_text(r):
     return r.get("text") or ""
 
 
-def _retag_regions(records):
-    # Mirrors 20_extract_structure.py's region-tagging pass exactly. Must be
-    # redone here: promoting a previously-undetected paragraph to a heading
-    # (or demoting the old "first heading") can move where the cover/body
-    # boundary actually falls. Without this, paragraphs between a newly
-    # promoted early heading and the old first-detected one would stay
-    # mis-tagged "cover" — invisible to every body-region check (font,
-    # indent, continuity) even though they are now clearly body content.
-    first_toc_idx = next((r["i"] for r in records if r["is_toc"]), None)
-    first_heading_idx = next((r["i"] for r in records if r["is_heading"]), None)
-    cover_end = first_toc_idx if first_toc_idx is not None else first_heading_idx
-    for r in records:
-        if r["is_toc"]:
-            r["region"] = "toc"
-        elif cover_end is not None and r["i"] < cover_end:
-            r["region"] = "cover"
-        else:
-            r["region"] = "body"
-
-
-def _rewrite_shards(workdir, records):
-    shard_dir = os.path.join(workdir, "shards")
-    if not os.path.isdir(shard_dir):
-        return
-    existing = sorted(f for f in os.listdir(shard_dir) if f.startswith("shard_"))
-    shard_size = 400
-    if existing:
-        with open(os.path.join(shard_dir, existing[0]), encoding="utf-8") as f:
-            shard_size = max(len(json.load(f).get("records", [])), 1)
-    for f in existing:
-        os.remove(os.path.join(shard_dir, f))
-    for si, start in enumerate(range(0, len(records), shard_size)):
-        chunk = records[start:start + shard_size]
-        name = "shard_%03d.json" % si
-        with open(os.path.join(shard_dir, name), "w", encoding="utf-8") as f:
-            json.dump({"shard_id": si, "range": [chunk[0]["i"], chunk[-1]["i"]],
-                       "records": chunk}, f, ensure_ascii=False)
-
-
 def main():
+    if len(sys.argv) < 3:
+        print(json.dumps({"status": "error",
+                          "error": "usage: 27_apply_review.py <workdir> <overrides.json>"}))
+        sys.exit(1)
     workdir = sys.argv[1]
     overrides_path = sys.argv[2]
 
@@ -222,7 +188,13 @@ def main():
             raise ValueError("cover_present must be a list of field-name strings")
         structure["cover_present"] = cover_present
 
-    _retag_regions(records)
+    # Promoting a previously-undetected paragraph to a heading (or demoting the
+    # old "first heading") can move where the cover/body boundary falls, so the
+    # region tags must be recomputed with the same logic 20_extract_structure.py
+    # used — otherwise paragraphs between a newly promoted early heading and the
+    # old first-detected one stay mis-tagged "cover", invisible to every
+    # body-region check (font, indent, continuity).
+    tag_regions(records)
 
     bak = os.path.join(workdir, "structure.pre_review.json")
     if not os.path.exists(bak):
@@ -230,7 +202,11 @@ def main():
     with open(structure_path, "w", encoding="utf-8") as f:
         json.dump(structure, f, ensure_ascii=False)
 
-    _rewrite_shards(workdir, records)
+    # Regenerate shards so the next check path (full or sharded) sees the
+    # corrected levels. shard_size was persisted by 20_extract_structure.py.
+    shard_dir = os.path.join(workdir, "shards")
+    if os.path.isdir(shard_dir):
+        write_shards(shard_dir, records, structure.get("shard_size", 400))
 
     print(json.dumps({
         "status": "ok",

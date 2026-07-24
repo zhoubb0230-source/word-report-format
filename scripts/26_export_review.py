@@ -75,9 +75,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
-from checks import cover_role, _cover_missing_fields
+from checks import cover_role, _cover_missing_fields, SPEC_PATH
 
-SPEC_PATH = os.path.join(os.path.dirname(__file__), "..", "spec", "format_spec.json")
 MAX_CANDIDATE_LEN = 40  # a heading-length line; mirrors the "short" heuristic
                         # infer_heading_level() already uses for pattern-based guesses
 
@@ -123,6 +122,10 @@ def _find_possible_missed_headings(records, spec):
 
 
 def main():
+    if len(sys.argv) < 2:
+        print(json.dumps({"status": "error",
+                          "error": "usage: 26_export_review.py <workdir>"}))
+        sys.exit(1)
     workdir = sys.argv[1]
     with open(os.path.join(workdir, "structure.json"), encoding="utf-8") as f:
         structure = json.load(f)

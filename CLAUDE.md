@@ -24,9 +24,25 @@
   不用 python-docx / defusedxml）。
 - `python3 scripts/00_check_env.py` 探测 `python/lxml/soffice`；`soffice` 只在 `.doc`↔`.docx`
   转换时需要（`.docx` 全程用不到）。
-- 无第三方测试框架，无 `requirements.txt`。
+- 无第三方测试框架，无 `requirements.txt`。测试用 stdlib `unittest`（只依赖 lxml）。
 
-## 冒烟测试（没有测试套件，手动跑一遍最快）
+## 回归测试（先跑这个，再手动冒烟）
+
+`tests/` 有一套零依赖回归测试，**改判定/应用逻辑后必跑**：
+
+```
+python3 -m unittest discover -s tests -p "test_*.py"
+```
+
+- `tests/test_checks.py`：判定层单测，把《已知陷阱与设计决策》里每条"别回退"锁成断言
+  （封面题目/字段、目录排除、pattern 只批注、层级判定、图表分组编号、西文字体、页码/目录深度提示…）。
+  改了 `checks.py`/`headings.py` 的行为却没同步改这里 = 有测试会红，正是防回退的意义。
+- `tests/test_e2e.py`：手搓最小 docx 跑 `05→10→20→30→40→45`，断言输出自检 `ok` 且段落数守恒。
+- `tests/helpers.py`：`build_docx()` 造最小 docx、`load_script()` 以模块方式载入带数字前缀的脚本。
+
+新增一条陷阱级决策时，**同时**在 `tests/` 补一个锁它的用例，别只写进散文记录。
+
+## 冒烟测试（手动跑一遍最直观）
 
 最省事的两种方式：
 
@@ -57,6 +73,11 @@
   逻辑在 `scripts/lib/workdir.py`（`base_dir()` / `is_inside_base()`），改路径约定要同步改这里。
 - **区域划分**：`cover` = 第一个 TOC / 第一个标题**之前**的所有段落。测试 docx 若既无目录又无标题，
   封面段落会全部落到 `body`——要放一个带 `outlineLvl` 的标题段来界定封面结束。
+- **区域划分 / 分片写盘是共享逻辑**：`tag_regions()` 与 `write_shards()` 都在 `scripts/lib/structure.py`，
+  由 `20_extract_structure.py`（抽取时）和 `27_apply_review.py`（复核改层级后重算边界）**共用同一份**。
+  27 复核可能提升/取消最早一条标题、从而移动封面/正文边界，必须重跑 `tag_regions`。**别把这两段再各自
+  内联回两个脚本**（历史上就是各写一遍、易漂移）。`shard_size` 已持久化进 `structure.json`，27 直接读、
+  不再靠"读第一个分片记录数"反推。
 - **`30` 有两套模式**：全量模式**直接写 `fixes.json`**；`--shard` 模式写 `fixes_parts/`，之后才用
   `35_merge_fixes.py` 合并。**全量模式下不要跑 `35`**——它从 `fixes_parts/` 读，会把 `fixes.json`
   覆盖掉。分片路径见 SKILL.md 的 Path B。
@@ -81,6 +102,9 @@
 - `format` op 的每个 `set_*` / `clear_*` / `strip_text` 键，在 `main()` 的 `op == "format"` 分支里
   各有一段应用逻辑；改 `w:t` 文本时只动内容 run（`_iter_runs` 已跳过文本框 `w:txbxContent`），
   保留行内空格与 `xml:space`。
+- **每段只挂一条批注**：同一段落的多条 fix（如字体 fix + 序号 fix）在 `main()` 末尾用 `pending_comments`
+  合并成**一条** XAgent 批注，避免同一行叠多个批注区间。所以「文档里的批注数」按段落计、可能少于
+  `fixes.json` 的条目数——`summary.md` 仍逐条列，两者口径不同是正常的，别当成漏批注。
 
 ## 提交
 

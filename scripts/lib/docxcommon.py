@@ -122,6 +122,22 @@ def name_to_halfpt(name):
 # ---------------------------------------------------------------------------
 # Canonical body-paragraph iterator
 # ---------------------------------------------------------------------------
+def in_textbox(el, stop_at=None):
+    """True if el is nested inside a <w:txbxContent> (a textbox), walking up the
+    ancestor chain until stop_at (exclusive) or the root.
+
+    Textbox content is not part of the linear reading flow and must not be
+    treated as body paragraphs, nor restyled as a side effect of editing the
+    host paragraph. Shared by iter_body_paragraphs (stop_at=None, walk to root)
+    and the run iterators (stop_at=p, only look above the paragraph)."""
+    anc = el.getparent()
+    while anc is not None and anc is not stop_at:
+        if anc.tag == qn("w:txbxContent"):
+            return True
+        anc = anc.getparent()
+    return False
+
+
 # BOTH extraction and apply MUST use this so that "para_index" refers to the
 # same physical <w:p> in both passes. It walks every <w:p> that is a descendant
 # of <w:body> in document order, including paragraphs inside tables, but skips
@@ -133,15 +149,7 @@ def iter_body_paragraphs(doc_root):
         return
     idx = 0
     for p in body.iter(qn("w:p")):
-        # skip textbox paragraphs
-        anc = p.getparent()
-        in_txbx = False
-        while anc is not None:
-            if anc.tag == qn("w:txbxContent"):
-                in_txbx = True
-                break
-            anc = anc.getparent()
-        if in_txbx:
+        if in_textbox(p):  # skip textbox paragraphs
             continue
         yield idx, p
         idx += 1
@@ -410,14 +418,7 @@ def iter_text_runs(p):
     belong to a different logical paragraph.
     """
     for run in p.iter(qn("w:r")):
-        anc = run.getparent()
-        in_txbx = False
-        while anc is not None and anc is not p:
-            if anc.tag == qn("w:txbxContent"):
-                in_txbx = True
-                break
-            anc = anc.getparent()
-        if in_txbx:
+        if in_textbox(run, stop_at=p):
             continue
         txt = "".join((t.text or "") for t in run.findall(qn("w:t")))
         if txt:

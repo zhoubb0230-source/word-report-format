@@ -38,7 +38,7 @@
    ],
    "size_hp": 32,
    "first_line_chars": 200,
-   "source": "一级标题 黑体 三号 首行缩进2字符"
+   "source": "一级标题 黑体 三号 首行缩进2字符；西文 Times New Roman"
   },
   "2": {
    "east_asia": "楷体",
@@ -49,7 +49,7 @@
    ],
    "size_hp": 32,
    "first_line_chars": 200,
-   "source": "二级标题 楷体 三号 首行缩进2字符"
+   "source": "二级标题 楷体 三号 首行缩进2字符；西文 Times New Roman"
   },
   "3": {
    "east_asia": "仿宋",
@@ -60,7 +60,7 @@
    ],
    "size_hp": 32,
    "first_line_chars": 200,
-   "source": "三级标题 仿宋 三号 首行缩进2字符"
+   "source": "三级标题 仿宋 三号 首行缩进2字符；西文 Times New Roman"
   },
   "4": {
    "east_asia": "仿宋",
@@ -71,7 +71,7 @@
    ],
    "size_hp": 32,
    "first_line_chars": 200,
-   "source": "四级标题 仿宋 三号 首行缩进2字符"
+   "source": "四级标题 仿宋 三号 首行缩进2字符；西文 Times New Roman"
   }
  },
  "body": {
@@ -83,7 +83,7 @@
   ],
   "size_hp": 32,
   "first_line_chars": 200,
-  "source": "正文 仿宋 三号 首行缩进2字符"
+  "source": "正文 仿宋 三号 首行缩进2字符；西文 Times New Roman"
  },
  "table_body": {
   "east_asia": "仿宋",
@@ -93,7 +93,7 @@
    "仿宋_GB2312"
   ],
   "size_hp": 28,
-  "source": "表格内容 仿宋 14磅（仅校验字体字号，不动缩进/行距）"
+  "source": "表格内容 仿宋 14磅；西文 Times New Roman（仅校验字体字号，不动缩进/行距）"
  },
  "page_number": {
   "ascii": "Times New Roman",

@@ -27,7 +27,6 @@ section fix (page setup, document level):
   {"op": "section", "set_pgmar": {...}, "rule_id":..., "rule_text":..., "comment": false}
 """
 import json
-import os
 import re
 
 CN_DIGITS = "\u96f6\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d"
@@ -149,6 +148,18 @@ def _font_ok(actual, spec_entry):
 # ---------------------------------------------------------------------------
 # Per-paragraph format check (region-aware)
 # ---------------------------------------------------------------------------
+def _new_sets():
+    """Fresh accumulator of every settable property a format fix may carry, all
+    defaulted to 'no change'. One factory keeps every fix shape uniform, so the
+    apply stage and the summary never trip over a key that only some check
+    branches happened to include."""
+    return {"set_east_asia": None, "set_ascii": None, "set_size_hp": None,
+            "set_line_exact": None, "set_first_line_chars": None,
+            "set_left_chars": None,
+            "clear_left_indent": False, "clear_right_indent": False,
+            "set_jc": None, "strip_text": None}
+
+
 def check_paragraph(rec, spec):
     """Return a combined 'format' fix for this paragraph, or None if compliant/skip."""
     if rec.get("is_blank"):
@@ -176,10 +187,7 @@ def check_paragraph(rec, spec):
         return _check_table_body(rec, spec)
 
     eff = rec["eff"]
-    sets = {"set_east_asia": None, "set_ascii": None, "set_size_hp": None,
-            "set_line_exact": None, "set_first_line_chars": None,
-            "clear_left_indent": False, "clear_right_indent": False,
-            "set_jc": None, "strip_text": None}
+    sets = _new_sets()
     violations = []
 
     # -- Cover region: title / classification (\u5bc6\u7ea7\u00b7\u6587\u672c\u7f16\u53f7) / other fields --
@@ -243,17 +251,18 @@ def check_paragraph(rec, spec):
     # and continuity() separately raises a heading.unconfirmed review hint.
     # Once the model confirms it (level_source becomes "model_confirmed"),
     # it gets real heading-font treatment on the next run.
+    western = spec.get("western_font")
     if rec.get("is_heading") and rec.get("level_source") != "pattern":
         lvl = rec.get("level") or 1
         lvl = min(max(lvl, 1), 4)
         h = spec["headings"][str(lvl)]
         _check_font_size(eff, h, sets, violations,
-                         label="%d\u7ea7\u6807\u9898" % lvl)
+                         label="%d\u7ea7\u6807\u9898" % lvl, western=western)
         _check_first_line(eff, h, sets, violations, auto_num=rec.get("auto_num"))
         # headings are not forced to a specific line rule by the spec table
     else:
         b = spec["body"]
-        _check_font_size(eff, b, sets, violations, label="\u6b63\u6587")
+        _check_font_size(eff, b, sets, violations, label="\u6b63\u6587", western=western)
         # line spacing: fixed value 28pt (exact 560)
         ls = spec["line_spacing"]
         if not (eff.get("line") == ls["line_twips"] and eff.get("line_rule") == ls["line_rule"]):
@@ -271,11 +280,10 @@ def _check_table_body(rec, spec):
     if not tb or not tb.get("east_asia") or not tb.get("size_hp"):
         return None  # spec not configured for table content; nothing to check
     eff = rec["eff"]
-    sets = {"set_east_asia": None, "set_ascii": None, "set_size_hp": None,
-            "set_line_exact": None, "set_first_line_chars": None,
-            "clear_left_indent": False, "clear_right_indent": False, "set_jc": None}
+    sets = _new_sets()
     violations = []
-    _check_font_size(eff, tb, sets, violations, label="表格内容")
+    _check_font_size(eff, tb, sets, violations, label="表格内容",
+                     western=spec.get("western_font"))
     return _mk_format(rec["i"], sets, violations)
 
 
@@ -285,9 +293,7 @@ def _check_caption_format(rec, spec):
     if not cf:
         return None
     eff = rec["eff"]
-    sets = {"set_east_asia": None, "set_ascii": None, "set_size_hp": None,
-            "set_line_exact": None, "set_first_line_chars": None,
-            "clear_left_indent": False, "clear_right_indent": False, "set_jc": None}
+    sets = _new_sets()
     violations = []
     want_jc = cf.get("jc")
     if want_jc and eff.get("jc") != want_jc:
@@ -303,9 +309,7 @@ def _check_toc(rec, spec):
     if not t.get("east_asia") or not t.get("size_hp"):
         return None  # spec not configured for toc fonts; nothing to check
     eff = rec["eff"]
-    sets = {"set_east_asia": None, "set_ascii": None, "set_size_hp": None,
-            "set_line_exact": None, "set_first_line_chars": None, "set_left_chars": None,
-            "clear_left_indent": False, "clear_right_indent": False, "set_jc": None}
+    sets = _new_sets()
     violations = []
     _check_font_size(eff, t, sets, violations, label="目录")
     # 目录按级缩进：一级 0 / 二级 2 字符 / 三级 4 字符（leftChars 0/200/400）。
@@ -374,11 +378,20 @@ def _check_no_indent(eff, sets, violations, label):
         violations.append("%s不应有缩进" % label)
 
 
-def _check_font_size(eff, spec_entry, sets, violations, label):
+def _check_font_size(eff, spec_entry, sets, violations, label, western=None):
+    """Check east-asian font + size against spec_entry. When `western` is given
+    (the spec's western_font, for running text \u2014 \u6b63\u6587/\u6807\u9898/\u8868\u683c), the paragraph's
+    EFFECTIVE Latin/digit font must equal it too, so \u897f\u6587 renders as the required
+    Times New Roman. Only enforced where a western font was passed \u2014 cover/\u76ee\u5f55
+    layout lines deliberately opt out."""
     if not _font_ok(eff.get("east_asia"), spec_entry):
         sets["set_east_asia"] = spec_entry["east_asia"]
         violations.append("%s\u4e2d\u6587\u5b57\u4f53\u5e94\u4e3a%s\uff08\u5b9e\u9645\uff1a%s\uff09"
                           % (label, spec_entry["east_asia"], eff.get("east_asia")))
+    if western and eff.get("ascii") != western:
+        sets["set_ascii"] = western
+        violations.append("%s\u897f\u6587\u5b57\u4f53\u5e94\u4e3a%s\uff08\u5b9e\u9645\uff1a%s\uff09"
+                          % (label, western, eff.get("ascii")))
     if eff.get("size_hp") != spec_entry["size_hp"]:
         sets["set_size_hp"] = spec_entry["size_hp"]
         violations.append("%s\u5b57\u53f7\u5e94\u4e3a%s" % (label, _size_name(spec_entry["size_hp"])))
@@ -733,5 +746,45 @@ def doc_hints(structure, spec):
             hints.append({"para_index": r["i"], "op": "hint",
                           "rule_id": "caption.content",
                           "rule_text": "%s\u7f16\u53f7\u540e\u7f3a\u5c11\u5185\u5bb9\u8bf4\u660e" % kname,
+                          "comment": True})
+
+    # TOC depth: the spec caps the table of contents at max_level (\u4e09\u7ea7). If any
+    # TOC entry style is deeper, hint (removing entries is a content edit, not a
+    # format one \u2014 so hint-only, never auto-changed).
+    toc = spec.get("toc") or {}
+    max_level = toc.get("max_level")
+    if max_level:
+        first_toc = next((r["i"] for r in records if r.get("region") == "toc"), None)
+        deepest = max((r.get("toc_level") or 0)
+                      for r in records if r.get("region") == "toc") if any(
+                          r.get("region") == "toc" for r in records) else 0
+        if first_toc is not None and deepest > max_level:
+            hints.append({"para_index": first_toc, "op": "hint",
+                          "rule_id": "toc.depth",
+                          "rule_text": "\u76ee\u5f55\u5c42\u7ea7\u8d85\u8fc7%d\u7ea7\uff08\u68c0\u6d4b\u5230%d\u7ea7\uff09\uff0c\u89c4\u8303\u8981\u6c42\u76ee\u5f55\u4e0d\u8d85\u8fc7%d\u7ea7\u6807\u9898\uff0c\u8bf7\u4eba\u5de5\u7cbe\u7b80"
+                                       % (max_level, deepest, max_level),
+                          "comment": True})
+
+    # Page-number font (best-effort, hint only): the page number lives in a
+    # header/footer PAGE field, not the body, so 20_extract_structure.py records
+    # its effective western font/size into structure['page_number'] when found.
+    # Compare against spec; only hint on a concrete mismatch (never on an
+    # unread value, to avoid false positives).
+    pn_spec = spec.get("page_number") or {}
+    pn = structure.get("page_number")
+    anchor = first_cover if first_cover is not None else (
+        records[0]["i"] if records else None)
+    if pn_spec and pn and anchor is not None:
+        bad = []
+        want_ascii = pn_spec.get("ascii")
+        want_sz = pn_spec.get("size_hp")
+        if want_ascii and pn.get("ascii") and pn["ascii"] != want_ascii:
+            bad.append("\u5b57\u4f53\u5e94\u4e3a%s\uff08\u5b9e\u9645\uff1a%s\uff09" % (want_ascii, pn["ascii"]))
+        if want_sz and pn.get("size_hp") and pn["size_hp"] != want_sz:
+            bad.append("\u5b57\u53f7\u5e94\u4e3a%s\uff08\u5b9e\u9645\uff1a%g\u78c5\uff09" % (_size_name(want_sz), pn["size_hp"] / 2.0))
+        if bad:
+            hints.append({"para_index": anchor, "op": "hint",
+                          "rule_id": "page_number.font",
+                          "rule_text": "\u9875\u7801" + "\u3001".join(bad) + "\uff0c\u8bf7\u4eba\u5de5\u6838\u5b9e\u9875\u7709/\u9875\u811a\u9875\u7801\u683c\u5f0f",
                           "comment": True})
     return hints

@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
 
 from lxml import etree
 from docxcommon import (qn, parse_xml, unzip_docx, rezip_docx,
-                        iter_body_paragraphs)
+                        iter_body_paragraphs, in_textbox)
 from commentwriter import CommentWriter
 from headings import ANY_LABEL_RE, CAPTION_STYLE_HINTS
 
@@ -95,14 +95,7 @@ def _iter_runs(p):
     # (w:txbxContent): those belong to a different logical paragraph and
     # must not be restyled as a side effect of editing the host paragraph.
     for r in p.iter(qn("w:r")):
-        anc = r.getparent()
-        in_txbx = False
-        while anc is not None and anc is not p:
-            if anc.tag == qn("w:txbxContent"):
-                in_txbx = True
-                break
-            anc = anc.getparent()
-        if in_txbx:
+        if in_textbox(r, stop_at=p):
             continue
         yield r
 

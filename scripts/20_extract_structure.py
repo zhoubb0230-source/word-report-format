@@ -43,6 +43,7 @@ from headings import (
     looks_like_caption_style, caption_kind_from_style, toc_level_from_style,
     style_is_toc,
 )
+from structure import tag_regions, write_shards
 
 
 def dominant_run_props(p, baseline):
@@ -77,6 +78,57 @@ def has_toc_field(p):
         if "TOC" in instr.upper():
             return True
     return False
+
+
+def _has_page_field(p):
+    """True if paragraph p contains a PAGE (or NUMPAGES) field — the page number."""
+    for it in p.iter(qn("w:instrText")):
+        if it.text and "PAGE" in it.text.upper():
+            return True
+    for fs in p.iter(qn("w:fldSimple")):
+        if "PAGE" in (fs.get(qn("w:instr")) or "").upper():
+            return True
+    return False
+
+
+def scan_page_number(unpack):
+    """Best-effort: find the page-number run in headers/footers and return its
+    western font + size {ascii, size_hp}, or None if no PAGE field is present.
+
+    The page number lives in a header/footer PAGE field, not the body, so it is
+    read here and recorded into structure for a HINT-ONLY check downstream
+    (doc_hints). A rough read of the direct rPr on the field's paragraph runs is
+    enough for a hint; nothing is auto-changed from it."""
+    import glob
+    word = os.path.join(unpack, "word")
+    if not os.path.isdir(word):
+        return None
+    parts = sorted(glob.glob(os.path.join(word, "header*.xml"))
+                   + glob.glob(os.path.join(word, "footer*.xml")))
+    for part in parts:
+        try:
+            root = parse_xml(part).getroot()
+        except Exception:
+            continue
+        for p in root.iter(qn("w:p")):
+            if not _has_page_field(p):
+                continue
+            asc, sz = None, None
+            for run in p.iter(qn("w:r")):
+                rpr = run.find(qn("w:rPr"))
+                if rpr is None:
+                    continue
+                rf = rpr.find(qn("w:rFonts"))
+                if rf is not None and rf.get(qn("w:ascii")):
+                    asc = rf.get(qn("w:ascii"))
+                s = rpr.find(qn("w:sz"))
+                if s is not None and s.get(qn("w:val")):
+                    try:
+                        sz = int(s.get(qn("w:val")))
+                    except ValueError:
+                        pass
+            return {"ascii": asc, "size_hp": sz}
+    return None
 
 
 def in_toc_sdt(p):
@@ -315,16 +367,7 @@ def main():
         records.append(rec)
 
     # ---- region tagging: cover / toc / body ----
-    first_toc_idx = next((r["i"] for r in records if r["is_toc"]), None)
-    first_heading_idx = next((r["i"] for r in records if r["is_heading"]), None)
-    cover_end = first_toc_idx if first_toc_idx is not None else first_heading_idx
-    for r in records:
-        if r["is_toc"]:
-            r["region"] = "toc"
-        elif cover_end is not None and r["i"] < cover_end:
-            r["region"] = "cover"
-        else:
-            r["region"] = "body"
+    tag_regions(records)
 
     # ---- title block on the cover (may wrap across paragraphs) ----
     _mark_title_block(records)
@@ -335,8 +378,11 @@ def main():
 
     structure = {
         "n_paragraphs": len(records),
+        "shard_size": shard_size,   # persisted so 27_apply_review.py re-shards
+                                    # with the same size instead of guessing it
         "page_setup": page_setup,
         "has_background": bool(has_background),
+        "page_number": scan_page_number(unpack),
         "records": records,
     }
     with open(os.path.join(workdir, "structure.json"), "w", encoding="utf-8") as f:
@@ -344,17 +390,7 @@ def main():
 
     # ---- shards (paragraph records only) ----
     shard_dir = os.path.join(workdir, "shards")
-    os.makedirs(shard_dir, exist_ok=True)
-    for f in os.listdir(shard_dir):
-        os.remove(os.path.join(shard_dir, f))
-    shard_files = []
-    for si, start in enumerate(range(0, len(records), shard_size)):
-        chunk = records[start:start + shard_size]
-        name = "shard_%03d.json" % si
-        with open(os.path.join(shard_dir, name), "w", encoding="utf-8") as f:
-            json.dump({"shard_id": si, "range": [chunk[0]["i"], chunk[-1]["i"]],
-                       "records": chunk}, f, ensure_ascii=False)
-        shard_files.append(name)
+    shard_files = write_shards(shard_dir, records, shard_size)
 
     summary = {
         "status": "ok",

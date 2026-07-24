@@ -114,21 +114,26 @@ class TestTableBody(unittest.TestCase):
         self.assertIsNone(checks.check_paragraph(r, SPEC))
 
 
-class TestCoverMissingFieldAlias(unittest.TestCase):
-    """问题1：项目编号 视作 文本编号——出现任一别名即算该必备项已填。"""
+class TestCoverTextNumberVsProjectNumber(unittest.TestCase):
+    """文本编号（题目上，仿宋三号）与 项目编号（题目下，field）是两个不同的必备项，
+    不得互相顶替。"""
 
-    def test_project_number_satisfies_text_number(self):
+    def test_project_number_does_not_satisfy_text_number(self):
+        # 只有项目编号、没有文本编号 -> 仍应报缺文本编号（两者不是别名）。
         structure = {"records": [
             rec(i=0, region="cover", text="项目编号：2025010203"),
         ]}
         missing = checks._cover_missing_fields(structure, SPEC)
-        self.assertNotIn("文本编号", missing)
+        self.assertIn("文本编号", missing)
 
-    def test_ai_present_alias(self):
-        structure = {"records": [rec(i=0, region="cover", text="x")],
-                     "cover_present": ["项目编号"]}
-        missing = checks._cover_missing_fields(structure, SPEC)
-        self.assertNotIn("文本编号", missing)
+    def test_both_are_required_fields(self):
+        required = SPEC["cover"]["required_fields"]
+        self.assertIn("文本编号", required)
+        self.assertIn("项目编号", required)
+
+    def test_no_field_aliases_conflation(self):
+        # 明确不再有把项目编号并到文本编号的别名机制。
+        self.assertNotIn("field_aliases", SPEC["cover"])
 
 
 class TestTocExcluded(unittest.TestCase):

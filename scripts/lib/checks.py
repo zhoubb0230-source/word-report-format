@@ -713,17 +713,10 @@ def _cover_missing_fields(structure, spec):
     records = structure["records"]
     cov = spec.get("cover", {})
     required = cov.get("required_fields", [])
-    # 字段别名：模板里同一必备项可能用不同标签（如「项目编号」＝「文本编号」）。
-    # 只要出现其中任一别名，就算该必备项已填。
-    aliases = cov.get("field_aliases", {})
-
-    def _alts(f):
-        return [f] + list(aliases.get(f, []))
-
     ai_present = structure.get("cover_present")
     if isinstance(ai_present, list):
         present = set(ai_present)
-        return [f for f in required if not any(a in present for a in _alts(f))]
+        return [f for f in required if f not in present]
     cover_recs = [r for r in records if r.get("region") == "cover" and not r.get("is_blank")]
     cover_text = "".join(r.get("text") or "" for r in cover_recs)
     title_text = "".join(r.get("text") or "" for r in cover_recs if r.get("is_title"))
@@ -744,7 +737,7 @@ def _cover_missing_fields(structure, spec):
             # label, so accept either.
             if "密级" in cover_text or any(v in cover_text for v in secrecy_values):
                 present.add(f)
-        elif any(a in cover_text for a in _alts(f)):
+        elif f in cover_text:
             present.add(f)
     return [f for f in required if f not in present]
 

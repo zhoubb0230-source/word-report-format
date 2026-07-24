@@ -122,12 +122,12 @@ python scripts/20_extract_structure.py <workdir> [--shard-size 400]
   - `title` 报告标题 → 方正小标宋 / 20磅 / 居中 / 清缩进 / **删除首尾多余空格**（首尾空格会参与居中导致
     视觉偏移，删后再居中；标题内部空格保留）；
   - `classification` 密级·文本编号行（同一行，**可能没有 key**，如「机密  202501323023」，**固定在题目
-    上方**，靠位置 `above_title` 判定）→ 仿宋 / 16磅；
+    上方**，靠位置 `above_title` 判定）→ 仿宋 / **三号（16磅）**；**文本编号与密级同字体字号**；
   - `field` 报告题目下的各要素（项目名称/**项目编号**/承担单位/项目负责人/起止时间/编制时间等）→
     **方正黑体_GBK / 小三（15磅）/ 行距固定值29.4磅** / **两端对齐、首行缩进2字符**（删除行首空格、
-    清除左侧字符缩进；行内填空空格如「20   年   月」保留）。**注意「项目编号」属题目下要素、按 field 排版，
-    不归 classification**——泛化词「编号」已从 `classification_keywords` 移除；presence 校验里「项目编号」
-    经 `cover.field_aliases` 视作「文本编号」；
+    清除左侧字符缩进；行内填空空格如「20   年   月」保留）。**「文本编号」（题目上，仿宋三号）与「项目编号」
+    （题目下，field）是两个不同要素、位置与字体字号都不同，切勿互相顶替**——泛化词「编号」已从
+    `classification_keywords` 移除，避免「项目编号：…」被误判成 classification；两者各自是独立必备项；
   - `other` → 不动。
   角色先由启发式默认（标题块 → title；**位于标题上方的行或含 `spec.cover.classification_keywords` 关键词**
   → classification；其余 → field），AI 复核可覆盖。字体字号值全部在 `spec`（`title`/`cover_classification`/
@@ -193,7 +193,7 @@ python scripts/26_export_review.py <workdir>
     "headings": {"12": 1, "45": 2, "60": 1},
     "captions": {"30": "table"},
     "cover": {"3": "title", "1": "classification", "8": "field", "9": "other"},
-    "cover_present": ["密级", "文本编号", "项目名称", "考核年份", "承担单位", "项目负责人", "起止时间", "编制时间"]
+    "cover_present": ["密级", "文本编号", "项目名称", "项目编号", "考核年份", "承担单位", "项目负责人", "起止时间", "编制时间"]
   }
   ```
   层级取值只能是 `1`/`2`/`3`/`4`/`null`（`null` = 这条其实不是标题）；图表种类只能是

@@ -69,7 +69,71 @@ class TestCoverField(unittest.TestCase):
         self.assertEqual(fix["set_jc"], "both")            # 两端对齐
         self.assertEqual(fix["set_first_line_chars"], 200)  # 首行缩进2字符
         self.assertTrue(fix["clear_left_indent"])           # 清左侧缩进
-        self.assertEqual(fix["set_east_asia"], "方正黑体")
+        self.assertEqual(fix["set_east_asia"], "方正黑体_GBK")
+
+    def test_field_font_size_and_line_spacing(self):
+        # 报告题目下的要素：方正黑体_GBK / 小三（30半点）/ 固定行距29.4磅（588）。
+        r = rec(region="cover", text="项目名称：先进项目",
+                eff_=eff(east_asia="宋体", size_hp=32, jc="both",
+                         first_line_chars=200, line=560, line_rule="exact"))
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertEqual(fix["set_east_asia"], "方正黑体_GBK")
+        self.assertEqual(fix["set_size_hp"], 30)            # 小三
+        self.assertEqual(fix["set_line_exact"], 588)        # 固定值29.4磅
+
+    def test_project_number_is_field_not_classification(self):
+        # 问题1：项目编号是报告题目下的要素（方正黑体_GBK 小三），不是密级/文本
+        # 编号那类 classification（仿宋 16磅）。位于标题下方、无 above_title。
+        r = rec(region="cover", text="项目编号：2025010203",
+                eff_=eff(east_asia="仿宋", size_hp=32, jc="left",
+                         first_line_chars=None))
+        self.assertEqual(checks.cover_role(r, SPEC), "field")
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertEqual(fix["set_east_asia"], "方正黑体_GBK")  # 非仿宋
+        self.assertEqual(fix["set_size_hp"], 30)               # 小三，非三号
+
+    def test_compliant_field_no_fix(self):
+        r = rec(region="cover", text="项目名称：先进项目",
+                eff_=eff(east_asia="方正黑体_GBK", size_hp=30, jc="both",
+                         first_line_chars=200, line=588, line_rule="exact"))
+        self.assertIsNone(checks.check_paragraph(r, SPEC))
+
+
+class TestTableBody(unittest.TestCase):
+    """表格内容：仿宋 四号（28半点）；仅校验字体字号，不动缩进/行距。"""
+
+    def test_table_size_is_sihao(self):
+        r = rec(in_table=True, text="设备名称123", has_western=True,
+                eff_=eff(east_asia="仿宋", size_hp=32, ascii="仿宋"))
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertEqual(fix["set_size_hp"], 28)   # 四号，非三号
+
+    def test_table_sihao_compliant_no_fix(self):
+        r = rec(in_table=True, text="设备名称", has_western=False,
+                eff_=eff(east_asia="仿宋", size_hp=28, ascii="仿宋"))
+        self.assertIsNone(checks.check_paragraph(r, SPEC))
+
+
+class TestCoverTextNumberVsProjectNumber(unittest.TestCase):
+    """文本编号（题目上，仿宋三号）与 项目编号（题目下，field）是两个不同的必备项，
+    不得互相顶替。"""
+
+    def test_project_number_does_not_satisfy_text_number(self):
+        # 只有项目编号、没有文本编号 -> 仍应报缺文本编号（两者不是别名）。
+        structure = {"records": [
+            rec(i=0, region="cover", text="项目编号：2025010203"),
+        ]}
+        missing = checks._cover_missing_fields(structure, SPEC)
+        self.assertIn("文本编号", missing)
+
+    def test_both_are_required_fields(self):
+        required = SPEC["cover"]["required_fields"]
+        self.assertIn("文本编号", required)
+        self.assertIn("项目编号", required)
+
+    def test_no_field_aliases_conflation(self):
+        # 明确不再有把项目编号并到文本编号的别名机制。
+        self.assertNotIn("field_aliases", SPEC["cover"])
 
 
 class TestTocExcluded(unittest.TestCase):
@@ -216,7 +280,7 @@ class TestWesternFont(unittest.TestCase):
     def test_pure_chinese_table_no_western_fix(self):
         # Bug2 exact report: 表格内容纯中文 误判 "西文应为 TNR（实际：仿宋）".
         r = rec(in_table=True, text="设备名称", has_western=False,
-                eff_=eff(east_asia="仿宋", size_hp=32, ascii="仿宋"))
+                eff_=eff(east_asia="仿宋", size_hp=28, ascii="仿宋"))
         self.assertIsNone(checks.check_paragraph(r, SPEC))
 
     def test_heading_with_western_gets_tnr(self):
@@ -229,8 +293,9 @@ class TestWesternFont(unittest.TestCase):
         # cover layout lines deliberately opt out of western enforcement:
         # an otherwise-compliant field with a wrong Latin font gets NO fix.
         r = rec(region="cover", text="项目名称ABC", has_western=True,
-                eff_=eff(east_asia="方正黑体", size_hp=30, ascii="Calibri",
-                         jc="both", first_line_chars=200))
+                eff_=eff(east_asia="方正黑体_GBK", size_hp=30, ascii="Calibri",
+                         jc="both", first_line_chars=200, line=588,
+                         line_rule="exact"))
         self.assertIsNone(checks.check_paragraph(r, SPEC))  # western not enforced here
 
 

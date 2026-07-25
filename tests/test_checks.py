@@ -277,9 +277,11 @@ class TestLibreOfficeTocStyle(unittest.TestCase):
         self.assertEqual(headings.toc_level_from_style("Contents2", resolver), 2)
 
 
-class TestTocTabStops(unittest.TestCase):
-    """#5 目录制表位：标题文字起点左制表位(按级4/5/6字符) + 页码右制表位(点线号)，
-    写进 TOC 条目样式，保证 updateFields 刷新后页码不换行。"""
+class TestTocStyleLeftCharsOnly(unittest.TestCase):
+    """目录合规【只认 leftChars】（用户决策，2026-07）：_patch_toc_styles 钉
+    font/size/leftChars(按级 0/200/400)，且【不再写死制表位】——Word updateFields
+    刷新时会自建页码制表位，写进样式的那对 tab 达不到效果、反而是一处与 Word 打架
+    的多余物，故删。此测试锁住"不写 tab"的反回退。"""
 
     W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
@@ -291,7 +293,6 @@ class TestTocTabStops(unittest.TestCase):
                      '<w:style w:type="paragraph" w:styleId="TOC2">'
                      '<w:name w:val="toc 2"/></w:style></w:styles>' % self.W
                      ).encode("utf-8"))
-        # A4 页宽 11906，左右页边距 1616 -> 正文宽 8674
         with open(os.path.join(word, "document.xml"), "wb") as f:
             f.write(('<w:document xmlns:w="%s"><w:body><w:sectPr>'
                      '<w:pgSz w:w="11906" w:h="16838"/>'
@@ -299,24 +300,19 @@ class TestTocTabStops(unittest.TestCase):
                      '</w:sectPr></w:body></w:document>' % self.W).encode("utf-8"))
         return tmp
 
-    def test_toc_style_gets_left_and_right_dot_tab(self):
+    def test_toc_style_gets_leftchars_no_tabs(self):
         mod = helpers.load_script("40_apply_fixes.py")
         with tempfile.TemporaryDirectory() as tmp:
             self._make_pkg(tmp)
             n = mod._patch_toc_styles(tmp, SPEC["toc"], char_unit_hp=21)
             self.assertEqual(n, 1)
             root = etree.parse(os.path.join(tmp, "word", "styles.xml")).getroot()
-            tabs = root.find(".//{%s}tabs" % self.W)
-            self.assertIsNotNone(tabs)
-            tab_els = tabs.findall("{%s}tab" % self.W)
-            vals = {t.get("{%s}val" % self.W): t for t in tab_els}
-            # 左制表位：二级 = 5字符 @21hp = 1050 twips
-            self.assertIn("left", vals)
-            self.assertEqual(vals["left"].get("{%s}pos" % self.W), "1050")
-            # 右制表位：正文宽度 8674，带点线号
-            self.assertIn("right", vals)
-            self.assertEqual(vals["right"].get("{%s}pos" % self.W), "8674")
-            self.assertEqual(vals["right"].get("{%s}leader" % self.W), "dot")
+            ind = root.find(".//{%s}ind" % self.W)
+            self.assertIsNotNone(ind)
+            # 二级 leftChars = 200（2字符）
+            self.assertEqual(ind.get("{%s}leftChars" % self.W), "200")
+            # 关键反回退：样式里不写死任何制表位
+            self.assertIsNone(root.find(".//{%s}tabs" % self.W))
 
 
 class TestInt2Cn(unittest.TestCase):

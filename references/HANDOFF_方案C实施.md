@@ -26,15 +26,25 @@
     并对照旧 `resolve` 漏看编号层）。
   - **已知取舍**：编号层只折 pPr（缩进），**不折** rPr（与 `load_numbering_levels` 一致）；此为刻意
     限制，别当 bug"补全"——真要折 rPr 需同步扩 `load_numbering_levels` 的返回并验回归。
-- 测试：**74 passing**（65 基线 + 9 新，`pip install lxml` 后
-  `python3 -m unittest discover -s tests -p "test_*.py"`）。
+- **阶段2 首块已落地**（同分支，§6 决策已敲定，见下）：
+  - **编号层甲法克隆钳**：`40_apply_fixes.py::_clamp_numbering_indent`——对"自动编号且拿到缩进修复"的段落
+    **克隆 abstractNum**（新 numId、丢 nsid）、中和克隆级别缩进、把段落 numPr 改指克隆，**不原地改共享**
+    （§2.5，根治 #17 与 #12/#14 的"编号层继承 hanging"这一半）。自动编号段的直接缩进改写为**纯字符单位**
+    （`_set_first_line_and_clear_left(char_only=True)`，**不补**绝对伴随值——§2.2 严格-spec）。非编号的样式继承
+    情形仍补伴随值（`char_only=False`），待全角色样式注入落地后再删（Word-gated）。见陷阱 #10/#11。
+  - **目录只认 leftChars**：删掉 `_patch_toc_styles` 写死的制表位（`_set_toc_tabs`/`_toc_text_width_twips` 及
+    spec 的 `tab_left_chars_by_level`/`tab_leader` 一并移除）；Word `updateFields` 会自建制表位。测试
+    `TestTocTabStops`→`TestTocStyleLeftCharsOnly`。
+- 测试：**75 passing**（`pip install lxml` 后 `python3 -m unittest discover -s tests -p "test_*.py"`）。
 - 流水线：`05→10→20→(27)→30→40→45→50→59`，唯一依赖 lxml，判定阈值全部来自 `spec/format_spec.json`。
 - 17 项实测问题的分诊/进度在 `HANDOFF_格式化架构讨论.md` §12。已落 #1-#4/#6/#8/#9/#10/#15/#5 +
-  #12/#14 的"直接 hanging"部分。**搁置/留给方案C**：#11（内容层插 `\t`）、#7（提取层标 cell 行号）、
-  #13/#16/#17（bug）、#12/#14 的"编号层/样式层继承 hanging"这一半。
-- **下一步（阶段2，需先办 §6 决策 + §5 阶段0 的 Word 人肉验收，沙箱验不了渲染，见 §1）**：把
-  `resolve_cascade` 接进 20 的判定路径、把 `_patch_toc_styles` 推广成全角色 canonical 样式注入 +
-  指派 + 清直接覆盖 + 钳编号层（克隆而非改共享），并删掉绝对伴随值 hack（§2.2）。
+  #12/#14 的"直接 hanging"部分，**+ 甲法落地后 #12/#14 的"编号层继承 hanging"这一半 + #17**（均待 Word 实测）。
+  **搁置/留给方案C**：#11（内容层插 `\t`）、#7（提取层标 cell 行号）、#13/#16、#12/#14 的"**样式层**继承 hanging"
+  这一半（非编号，需全角色样式注入）。
+- **下一步（阶段2 剩余 + 阶段3，需 §5 阶段0 的 Word 人肉验收，沙箱验不了渲染，见 §1）**：把
+  `resolve_cascade` 接进 20 的判定路径；把 `_patch_toc_styles` 推广成**全角色** canonical 样式注入 + 指派 +
+  清直接覆盖，删掉**非编号情形**的绝对伴随值 hack（§2.2）；阶段3 在 `45` 加坍缩不变量断言（用 `cascade.py`
+  的 provenance）。
 
 ---
 
@@ -122,14 +132,14 @@ cover-field / cover-classification / toc1..N）都：① 注入一份完全指�
 
 ---
 
-## 6. 需要新 session 与用户敲定的开放决策
+## 6. 开放决策（2026-07 已由用户敲定）
 
-- **目录合规谓词**：只认 `leftChars`(0/200/400)，还是"`leftChars` + 保住 §5 的制表位"？后者才不页码换行。
-  （现状：#5 已把制表位写进样式；C 要确认目录的"钳"不能把制表位清掉。）
-- **"渲染对但用直接属性表达"算不算合规**：严格-spec 说不算（必须由 canonical 样式承载、直接覆盖清掉）；
-  但这会 churn 一批"其实看着对"的段落。确认严格程度。
-- **编号层钳法**：克隆 abstractNum vs 直接层 `hanging=0` 压制——需要用户 Word 验哪种真能显示"2字符"且
-  压得住继承（沙箱验不了，见 §1）。
+- **目录合规谓词** → **只认 `leftChars`(0/200/400)**。制表位不写进样式（Word `updateFields` 自建、写死会被盖掉）。
+  已删 `_set_toc_tabs`/`_toc_text_width_twips` 及 spec 的 tab 字段。
+- **"渲染对但用直接属性表达"算不算合规** → **不算，严格按样式规范**（canonical 值必须由注入的命名样式承载、
+  直接覆盖清掉）。接受随之而来的 churn。
+- **编号层钳法** → **克隆 abstractNum（甲法）**，不用直接层 `hanging=0` 压制（避免 `firstLine/hanging` 互斥雷、
+  且天然隔离共享 #17）。已实现 `_clamp_numbering_indent`；**仍待用户 Word 验收**能否真显示"2字符"且压住继承。
 
 ---
 

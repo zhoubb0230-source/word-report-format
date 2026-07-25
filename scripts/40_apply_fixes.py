@@ -19,6 +19,7 @@ uses the SAME iter_body_paragraphs() used by extraction, so para_index aligns.
 Every fix with "comment": true gets an XAgent comment whose text is the
 violated rule (rule_text).
 """
+import copy
 import json
 import os
 import re
@@ -28,7 +29,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
 
 from lxml import etree
 from docxcommon import (qn, parse_xml, unzip_docx, rezip_docx,
-                        iter_body_paragraphs, in_textbox)
+                        iter_body_paragraphs, in_textbox,
+                        StyleResolver, load_numbering_levels,
+                        get_style_id, get_pPr, get_mark_rpr)
 from commentwriter import CommentWriter
 from headings import ANY_LABEL_RE, CAPTION_STYLE_HINTS
 from checks import load_default_spec
@@ -185,11 +188,23 @@ def _char_twips(chars, size_hp):
 
 
 def _set_first_line_and_clear_left(pPr, first_line_chars, clear_left, clear_right=False,
-                                   set_left_chars=None, size_hp=21):
+                                   set_left_chars=None, size_hp=21, char_only=False):
     """Write the paragraph's indent as a DIRECT override.
 
-    Every char-based value (w:firstLineChars / w:leftChars) is paired with its
-    ABSOLUTE equivalent (w:firstLine / w:left) computed from ``size_hp`` — which
+    ``char_only=True`` writes ONLY the character-unit values (w:firstLineChars /
+    w:leftChars) and omits every absolute w:firstLine/w:left companion. This is
+    the strict-spec shape (方案C §2.2: the absolute companion is itself a
+    spec violation — Word then shows the indent in cm, not "N 字符") and is used
+    for AUTO-NUMBERED paragraphs, whose inherited hanging is removed at the
+    NUMBERING layer instead (see _clamp_numbering_indent, 甲法) so no absolute
+    override is needed to out-muscle it. Non-numbered paragraphs still get the
+    companion (char_only=False) until full canonical-style injection replaces
+    that path — deleting it there would re-expose the LibreOffice-inherited
+    absolute hanging (see the 已知陷阱 #10 note); that removal is Word-gated.
+
+    When the companion IS written (char_only=False): every char-based value
+    (w:firstLineChars / w:leftChars) is paired with its ABSOLUTE equivalent
+    (w:firstLine / w:left) computed from ``size_hp`` — which
     MUST be the document's CHARACTER-UNIT size (the default font size, ~五号
     10.5pt=21 半点), NOT the paragraph's own font. Word measures "N 字符" against
     that default size, so computing the companion at, say, a heading's 三号(32)
@@ -207,8 +222,11 @@ def _set_first_line_and_clear_left(pPr, first_line_chars, clear_left, clear_righ
         ind.set(qn("w:firstLineChars"), str(first_line_chars))
         # Absolute companion (may be 0 for the "no special indent" cases:
         # title / caption / TOC) so an inherited absolute first-line/hanging is
-        # overridden rather than left to win.
-        ind.set(qn("w:firstLine"), str(_char_twips(first_line_chars, size_hp)))
+        # overridden rather than left to win. Skipped in char_only mode.
+        if not char_only:
+            ind.set(qn("w:firstLine"), str(_char_twips(first_line_chars, size_hp)))
+        elif ind.get(qn("w:firstLine")) is not None:
+            del ind.attrib[qn("w:firstLine")]
         # remove hanging: firstLine and hanging are mutually exclusive, and any
         # direct hanging would otherwise take precedence over our first-line.
         for a in ("w:hanging", "w:hangingChars"):
@@ -220,7 +238,10 @@ def _set_first_line_and_clear_left(pPr, first_line_chars, clear_left, clear_righ
         # its absolute w:left companion is written too (so an inherited absolute
         # left indent is overridden), and the w:start synonyms dropped.
         ind.set(qn("w:leftChars"), str(set_left_chars))
-        ind.set(qn("w:left"), str(_char_twips(set_left_chars, size_hp)))
+        if not char_only:
+            ind.set(qn("w:left"), str(_char_twips(set_left_chars, size_hp)))
+        elif ind.get(qn("w:left")) is not None:
+            del ind.attrib[qn("w:left")]
         for a in ("w:startChars", "w:start"):
             if ind.get(qn(a)) is not None:
                 del ind.attrib[qn(a)]
@@ -231,9 +252,14 @@ def _set_first_line_and_clear_left(pPr, first_line_chars, clear_left, clear_righ
         # and deleting a direct attribute that isn't there leaves the style's
         # indent in effect. An explicit direct 0 wins over the inherited value.
         # The w:start/w:startChars synonyms are removed so they can't re-supply
-        # a non-zero left indent alongside our 0.
+        # a non-zero left indent alongside our 0. In char_only mode the absolute
+        # w:left companion is dropped (the numbering-layer clamp removes the
+        # inherited left instead).
         ind.set(qn("w:leftChars"), "0")
-        ind.set(qn("w:left"), "0")
+        if not char_only:
+            ind.set(qn("w:left"), "0")
+        elif ind.get(qn("w:left")) is not None:
+            del ind.attrib[qn("w:left")]
         for a in ("w:startChars", "w:start"):
             if ind.get(qn(a)) is not None:
                 del ind.attrib[qn(a)]
@@ -243,7 +269,10 @@ def _set_first_line_and_clear_left(pPr, first_line_chars, clear_left, clear_righ
         # of the width left after an un-cleared (often style-inherited) right
         # indent narrows it asymmetrically.
         ind.set(qn("w:rightChars"), "0")
-        ind.set(qn("w:right"), "0")
+        if not char_only:
+            ind.set(qn("w:right"), "0")
+        elif ind.get(qn("w:right")) is not None:
+            del ind.attrib[qn("w:right")]
         for a in ("w:endChars", "w:end"):
             if ind.get(qn(a)) is not None:
                 del ind.attrib[qn(a)]
@@ -511,65 +540,6 @@ def _toc_style_level(sid, name):
     return int(m.group(1)) if m else None
 
 
-def _toc_text_width_twips(pkg_dir, default=8674):
-    """Right-tab (page-number column) position = the正文宽度右边界 = 页宽 − 左右
-    页边距. Read from the OUTPUT document's first sectPr (pgSz.w − pgMar.left −
-    pgMar.right). Falls back to A4 正文宽 8674 (11906 − 1616×2) when absent."""
-    doc = os.path.join(pkg_dir, "word", "document.xml")
-    if not os.path.exists(doc):
-        return default
-    try:
-        root = parse_xml(doc).getroot()
-    except Exception:
-        return default
-    sect = None
-    for s in root.iter(qn("w:sectPr")):
-        sect = s
-        break
-    if sect is None:
-        return default
-    pgsz = sect.find(qn("w:pgSz"))
-    pgmar = sect.find(qn("w:pgMar"))
-    if pgsz is None or pgmar is None:
-        return default
-
-    def gi(el, a):
-        v = el.get(qn("w:" + a))
-        try:
-            return int(v)
-        except (TypeError, ValueError):
-            return None
-    w = gi(pgsz, "w")
-    ml = gi(pgmar, "left")
-    mr = gi(pgmar, "right")
-    if w is None or ml is None or mr is None:
-        return default
-    tw = w - ml - mr
-    return tw if tw > 0 else default
-
-
-def _set_toc_tabs(ppr, left_twips, right_twips, leader="dot"):
-    """Rewrite the TOC entry style's w:tabs to the canonical pair:
-    a LEFT tab at ``left_twips`` (标题文字起点，按级 4/5/6 字符) and a RIGHT tab
-    with a dot leader at ``right_twips`` (页码列). Existing tabs in the style are
-    cleared first so a REFRESHED TOC rebuilds each entry with exactly these two —
-    the missing 页码右制表位 is what makes page numbers wrap (见 handoff 4.2)."""
-    old = ppr.find(qn("w:tabs"))
-    if old is not None:
-        ppr.remove(old)
-    tabs = _get_or_make(ppr, "w:tabs",
-                        before_tags=("w:spacing", "w:ind", "w:jc", "w:rPr"))
-    if left_twips:
-        lt = etree.SubElement(tabs, qn("w:tab"))
-        lt.set(qn("w:val"), "left")
-        lt.set(qn("w:pos"), str(left_twips))
-    rt = etree.SubElement(tabs, qn("w:tab"))
-    rt.set(qn("w:val"), "right")
-    rt.set(qn("w:pos"), str(right_twips))
-    if leader:
-        rt.set(qn("w:leader"), leader)
-
-
 def _patch_toc_styles(pkg_dir, toc_spec, char_unit_hp=21):
     """Force the TOC entry styles (toc 1..N) to the spec's font/size and the
     per-level indent (一级0/二级2字符/三级4字符), so a REFRESHED TOC renders
@@ -578,7 +548,12 @@ def _patch_toc_styles(pkg_dir, toc_spec, char_unit_hp=21):
     size used to compute the absolute left companion — the default font size,
     NOT the TOC's own 三号 (see _default_char_unit_hp), so 二级/三级 come out at
     0.74cm/1.49cm rather than the too-wide 1.13cm/2.26cm that wraps page
-    numbers."""
+    numbers.
+
+    目录合规【只认 leftChars】（用户决策，2026-07）：不再往 TOC 样式写死制表位。
+    Word 的 TOC 是域，updateFields 刷新时按域开关自建每条目的制表位（含页码右
+    制表位），我们写进样式的那对 tab 会被它盖掉、达不到效果——故删掉，少一处与
+    Word 打架。此函数只钉 font/size/leftChars。"""
     if not toc_spec or not toc_spec.get("east_asia") or not toc_spec.get("size_hp"):
         return 0
     path = os.path.join(pkg_dir, "word", "styles.xml")
@@ -589,9 +564,6 @@ def _patch_toc_styles(pkg_dir, toc_spec, char_unit_hp=21):
     ea = toc_spec["east_asia"]
     sz = str(toc_spec["size_hp"])
     by_level = toc_spec.get("indent_chars_by_level") or {}
-    tab_by_level = toc_spec.get("tab_left_chars_by_level") or {}
-    tab_leader = toc_spec.get("tab_leader") or "dot"
-    right_tab = _toc_text_width_twips(pkg_dir) if tab_by_level else None
     patched = 0
     for st in root.findall(qn("w:style")):
         if st.get(qn("w:type")) != "paragraph":
@@ -621,12 +593,6 @@ def _patch_toc_styles(pkg_dir, toc_spec, char_unit_hp=21):
         for a in ("w:startChars", "w:start", "w:hanging", "w:hangingChars"):
             if ind.get(qn(a)) is not None:
                 del ind.attrib[qn(a)]
-        # w:tabs: 标题文字起点左制表位（按级4/5/6字符）+ 页码列右制表位（点线号）。
-        # 位置=正文宽度右边界，保证 updateFields 刷新后页码不换行。
-        if right_tab is not None:
-            tab_chars = tab_by_level.get(str(lvl)) if (lvl is not None) else None
-            left_tab = _char_twips(tab_chars, char_unit_hp) if tab_chars else 0
-            _set_toc_tabs(ppr, left_tab, right_tab, tab_leader)
         patched += 1
     if patched:
         tree.write(path, xml_declaration=True, encoding="UTF-8", standalone=True)
@@ -751,6 +717,169 @@ def _clean_caption_numbering(pkg_dir):
     return cleaned
 
 
+# ---------------------------------------------------------------------------
+# 方案C 甲法：钳住编号层（克隆而非改共享）
+# ---------------------------------------------------------------------------
+def _next_int_id(root, tag, attr, taken=()):
+    """max existing int <tag attr=...> id + 1 (>= 1). ``taken`` excludes ids we
+    already minted this run but haven't written to the tree yet."""
+    ids = set(int(v) for v in taken)
+    for el in root.findall(qn(tag)):
+        v = el.get(qn(attr))
+        try:
+            ids.add(int(v))
+        except (TypeError, ValueError):
+            pass
+    return (max(ids) + 1) if ids else 1
+
+
+def _para_num_ref(p, resolver, numbering_levels):
+    """Effective (numId, ilvl) for a paragraph, or (None, None) when it is not
+    auto-numbered — numId absent, or the explicit '0' no-numbering override.
+    Resolves through the style chain so a numPr inherited from the paragraph's
+    style (not written directly on the paragraph) is still seen."""
+    ppr, _ = resolver.resolve_cascade(get_style_id(p), get_pPr(p),
+                                      get_mark_rpr(p), numbering_levels)
+    nid = ppr.get("num_id")
+    if not nid or nid == "0":
+        return None, None
+    try:
+        il = int(ppr.get("ilvl") or 0)
+    except (ValueError, TypeError):
+        il = 0
+    return nid, il
+
+
+def _neutralize_level_indent(lvl):
+    """In a CLONED numbering level, strip the indent that leaks into the
+    paragraph: drop hanging/hangingChars and every first-line/left form, then
+    pin left to 0. The paragraph carries its own char-unit first-line indent
+    (firstLineChars) directly, so once the level supplies no competing indent
+    that char value wins — no absolute companion needed (§2.2)."""
+    ppr = lvl.find(qn("w:pPr"))
+    if ppr is None:
+        ppr = etree.SubElement(lvl, qn("w:pPr"))
+    ind = ppr.find(qn("w:ind"))
+    if ind is None:
+        ind = etree.SubElement(ppr, qn("w:ind"))
+    for a in ("w:hanging", "w:hangingChars", "w:firstLine", "w:firstLineChars",
+              "w:left", "w:leftChars", "w:start", "w:startChars"):
+        if ind.get(qn(a)) is not None:
+            del ind.attrib[qn(a)]
+    ind.set(qn("w:left"), "0")
+    ind.set(qn("w:leftChars"), "0")
+
+
+def _set_para_numid(p, new_num_id, ilvl):
+    """Point a paragraph's numPr at ``new_num_id`` as a DIRECT override (works
+    whether the original numPr was direct or inherited from the style chain).
+    Preserves the paragraph's ilvl."""
+    pPr = _get_or_make(p, "w:pPr")
+    for npr in pPr.findall(qn("w:numPr")):
+        pPr.remove(npr)
+    numPr = _get_or_make(pPr, "w:numPr",
+                         before_tags=("w:spacing", "w:ind", "w:jc", "w:rPr", "w:sectPr"))
+    il = _get_or_make(numPr, "w:ilvl")
+    il.set(qn("w:val"), str(ilvl))
+    ni = _get_or_make(numPr, "w:numId")
+    ni.set(qn("w:val"), str(new_num_id))
+
+
+def _clamp_numbering_indent(pkg_dir, targets, resolver, numbering_levels):
+    """方案C 甲法：钳住编号层。
+
+    ``targets`` 是"自动编号且缩进违规"的段落元素列表。对每个段落解析其有效
+    numId/ilvl；把共享同一 numId 的目标段落归为一组，**克隆**该组的 abstractNum
+    （生成新 abstractNumId + 新 numId），在克隆里把这些段落用到的级别缩进中和
+    （去 hanging、left 归 0），再把每个目标段落的 numPr 改指克隆的 numId。
+
+    为什么克隆而不原地改：一条 abstractNum 常被同级多段共享，原地改会溢到非目标
+    段（bug #17"改一个标题行距、同级全变"）。只有拿到过缩进修复的段落才被改指
+    克隆；未被修复的同 numId 段落仍指向原 abstractNum，格式不受影响。
+
+    钳住编号层后，段落自身的字符单位首行缩进（firstLineChars，无绝对伴随值）即可
+    生效——这是 #12/#14"继承 hanging"那一半的根治，替代绝对伴随值 hack（§2.2）。
+    返回被改指的段落数。**Word 渲染需实测**（沙箱验不了，见 handoff §1）。"""
+    path = os.path.join(pkg_dir, "word", "numbering.xml")
+    if not os.path.exists(path) or not targets:
+        return 0
+    tree = parse_xml(path)
+    root = tree.getroot()
+
+    num2abs, abs_by_id = {}, {}
+    for num in root.findall(qn("w:num")):
+        a = num.find(qn("w:abstractNumId"))
+        if a is not None:
+            num2abs[num.get(qn("w:numId"))] = a.get(qn("w:val"))
+    for anum in root.findall(qn("w:abstractNum")):
+        abs_by_id[anum.get(qn("w:abstractNumId"))] = anum
+
+    # group targets by source numId; keep each paragraph's ilvl
+    groups = {}   # src_numId -> {"ilvls": set, "paras": [(p, ilvl)]}
+    for p in targets:
+        nid, il = _para_num_ref(p, resolver, numbering_levels)
+        if nid is None or nid not in num2abs:
+            continue
+        g = groups.setdefault(nid, {"ilvls": set(), "paras": []})
+        g["ilvls"].add(il)
+        g["paras"].append((p, il))
+
+    if not groups:
+        return 0
+
+    # where new abstractNum elements must go: after the last existing one
+    # (schema requires all abstractNum before all num)
+    last_abstract = None
+    for anum in root.findall(qn("w:abstractNum")):
+        last_abstract = anum
+
+    new_abs_ids, new_num_ids = [], []
+    changed = 0
+    for src_numId, g in groups.items():
+        src_aid = num2abs[src_numId]
+        src_anum = abs_by_id.get(src_aid)
+        if src_anum is None:
+            continue
+        # clone the abstractNum with a fresh id (drop nsid so Word treats the
+        # cloned list as independent, not a duplicate of the original)
+        new_aid = str(_next_int_id(root, "w:abstractNum", "w:abstractNumId",
+                                   taken=new_abs_ids))
+        new_abs_ids.append(new_aid)
+        clone = copy.deepcopy(src_anum)
+        clone.set(qn("w:abstractNumId"), new_aid)
+        nsid = clone.find(qn("w:nsid"))
+        if nsid is not None:
+            clone.remove(nsid)
+        for lvl in clone.findall(qn("w:lvl")):
+            lv = lvl.get(qn("w:ilvl"))
+            try:
+                if int(lv) in g["ilvls"]:
+                    _neutralize_level_indent(lvl)
+            except (TypeError, ValueError):
+                continue
+        if last_abstract is not None:
+            last_abstract.addnext(clone)
+        else:
+            root.insert(0, clone)
+        last_abstract = clone
+
+        # new <w:num> -> cloned abstractNum
+        new_numId = str(_next_int_id(root, "w:num", "w:numId", taken=new_num_ids))
+        new_num_ids.append(new_numId)
+        num_el = etree.SubElement(root, qn("w:num"))
+        num_el.set(qn("w:numId"), new_numId)
+        a_el = etree.SubElement(num_el, qn("w:abstractNumId"))
+        a_el.set(qn("w:val"), new_aid)
+
+        for p, il in g["paras"]:
+            _set_para_numid(p, new_numId, il)
+            changed += 1
+
+    if changed:
+        tree.write(path, xml_declaration=True, encoding="UTF-8", standalone=True)
+    return changed
+
+
 def _set_update_fields(pkg_dir):
     """Set settings.xml <w:updateFields w:val="true"/> so Word refreshes the TOC
     (renumbered headings + new page numbers) when the document is opened.
@@ -803,6 +932,19 @@ def main():
     # the DOCUMENT default font size, matching how Word measures "N 字符".
     char_unit_hp = _default_char_unit_hp(out_pkg)
 
+    # Resolver + numbering map for the 甲法 numbering-layer clamp: an indent fix
+    # on an AUTO-NUMBERED paragraph is applied char-only, and the inherited
+    # hanging is removed at the numbering layer (a cloned abstractNum) instead of
+    # being out-muscled by an absolute companion.
+    styles_path = os.path.join(out_pkg, "word", "styles.xml")
+    styles_root = parse_xml(styles_path).getroot() if os.path.exists(styles_path) else None
+    resolver = StyleResolver(styles_root)
+    numbering_path = os.path.join(out_pkg, "word", "numbering.xml")
+    numbering_root = (parse_xml(numbering_path).getroot()
+                      if os.path.exists(numbering_path) else None)
+    numbering_levels = load_numbering_levels(numbering_root)
+    clamp_targets = []
+
     cw = CommentWriter(out_pkg, author="XAgent")
     applied = {"format": 0, "renumber_caption": 0, "renumber_heading": 0,
                "section": 0, "hint": 0, "comments": 0, "skipped": 0}
@@ -840,12 +982,16 @@ def main():
             if (fix.get("set_first_line_chars") is not None
                     or fix.get("clear_left_indent") or fix.get("clear_right_indent")
                     or fix.get("set_left_chars") is not None):
+                nid, _ilvl = _para_num_ref(p, resolver, numbering_levels)
+                is_auto = nid is not None
                 _set_first_line_and_clear_left(
                     pPr, fix.get("set_first_line_chars"),
                     bool(fix.get("clear_left_indent")),
                     bool(fix.get("clear_right_indent")),
                     fix.get("set_left_chars"),
-                    size_hp=char_unit_hp)
+                    size_hp=char_unit_hp, char_only=is_auto)
+                if is_auto:
+                    clamp_targets.append(p)
             if fix.get("set_jc") is not None:
                 _set_jc(pPr, fix["set_jc"])
             if fix.get("strip_text"):
@@ -893,6 +1039,15 @@ def main():
     # Un-hide auto-generated caption numbers (图N/表N) obscured by a black
     # shading / zero size in the caption numbering definition.
     applied["caption_num_unhidden"] = _clean_caption_numbering(out_pkg)
+
+    # 方案C 甲法：钳住编号层。For every auto-numbered paragraph that received an
+    # indent fix (applied char-only above), clone its abstractNum and neutralize
+    # the inherited hanging so the char-unit first-line indent renders as "N 字符"
+    # without an absolute companion — clone (not in-place) so same-level siblings
+    # are untouched (§2.5/#17). Mutates paragraph numPr in `root` (written below)
+    # and numbering.xml in place.
+    applied["numbering_clamped"] = _clamp_numbering_indent(
+        out_pkg, clamp_targets, resolver, numbering_levels)
 
     # Refresh the TOC on open (renumbered headings + page numbers) via the global
     # updateFields flag. Word prompts once on open; clicking 是 rebuilds the TOC

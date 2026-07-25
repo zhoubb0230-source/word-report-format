@@ -296,9 +296,11 @@ _NUM_LO = (
 
 @unittest.skipUnless(HAVE_LXML, "lxml not installed")
 class TestLibreOfficeHeadingIndentPipeline(unittest.TestCase):
-    """整链回归：一个从编号层继承【绝对 hanging】的自动编号标题，跑完 20→30→40
-    后，其段落直接 w:ind 必须带上一个【正值绝对 firstLine】（压过继承的悬挂缩进）
-    且不残留直接 hanging——即首行缩进而非 -0.74cm 悬挂缩进。"""
+    """整链回归（方案C 甲法）：一个从编号层继承【绝对 hanging】的自动编号标题，跑完
+    20→30→40 后，编号层的 hanging 被【克隆钳住】——段落 numPr 改指一个新克隆的
+    numId、克隆级别不再有 hanging——于是段落自身写【纯字符单位首行缩进】
+    （firstLineChars，无绝对伴随值，严格-spec §2.2）即可显示"2字符"而非 -0.74cm 悬挂。
+    原共享 abstractNum 不被原地改（§2.5/#17）。"""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="wrf_lo_")
@@ -309,8 +311,16 @@ class TestLibreOfficeHeadingIndentPipeline(unittest.TestCase):
     def _script(self, name):
         return os.path.join(helpers.SCRIPTS, name)
 
-    def _build(self, path):
+    def _build(self, path, second_heading=False):
         import zipfile
+        extra = ""
+        if second_heading:
+            # 第二个自动编号标题，共享同一 numId=1（考验：钳一个别溢到另一个/共享安全）
+            extra = (
+                '<w:p><w:pPr><w:pStyle w:val="Heading1"/>'
+                '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>'
+                '<w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="32"/></w:rPr>'
+                '<w:t xml:space="preserve">背景</w:t></w:r></w:p>')
         doc = (
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
@@ -318,6 +328,7 @@ class TestLibreOfficeHeadingIndentPipeline(unittest.TestCase):
             '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>'
             '<w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="32"/></w:rPr>'
             '<w:t xml:space="preserve">概述</w:t></w:r></w:p>'
+            + extra +
             '<w:p><w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="32"/></w:rPr>'
             '<w:t xml:space="preserve">正文内容。</w:t></w:r></w:p>'
             '</w:body></w:document>'
@@ -331,33 +342,81 @@ class TestLibreOfficeHeadingIndentPipeline(unittest.TestCase):
             z.writestr("word/numbering.xml", _NUM_LO)
         return path
 
-    def test_heading_gets_positive_absolute_first_line(self):
-        from lxml import etree
-        src = self._build(os.path.join(self.tmp, "lo.docx"))
+    def _w(self):
+        w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        return w, (lambda t: "{%s}%s" % (w, t.split(":")[1]))
+
+    def _run_pipeline(self, src):
         base = os.path.join(self.tmp, "wb")
         wd = run(self._script("05_new_workdir.py"), base)["workdir"]
         run(self._script("10_prepare_input.py"), src, wd)
         run(self._script("20_extract_structure.py"), wd)
         run(self._script("30_check_format.py"), wd)
         run(self._script("40_apply_fixes.py"), wd)
+        return wd
 
-        w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-
-        def qn(t):
-            return "{%s}%s" % (w, t.split(":")[1])
+    def test_numbering_hanging_clamped_via_clone(self):
+        from lxml import etree
+        src = self._build(os.path.join(self.tmp, "lo.docx"))
+        wd = self._run_pipeline(src)
+        _w, qn = self._w()
 
         root = etree.parse(os.path.join(wd, "out_pkg", "word", "document.xml")).getroot()
         heading_p = root.iter(qn("w:p")).__next__()  # first body paragraph = 概述 heading
         ind = heading_p.find(qn("w:pPr") + "/" + qn("w:ind"))
         self.assertIsNotNone(ind, "标题段落缺少 w:ind")
-        # 首行缩进2字符仍写字符单位
+        # 首行缩进2字符：纯字符单位
         self.assertEqual(ind.get(qn("w:firstLineChars")), "200")
-        # 关键：补了正值绝对 firstLine，压过编号层继承的绝对 hanging；且按【文档默认
-        # 字号】(此 docx 无 docDefaults → 21/五号) 换算 = 420 twips (0.74cm)，而不是
-        # 按标题自身三号(32)算出的 640 (1.13cm) —— 后者正是要避免的过度缩进。
-        self.assertEqual(ind.get(qn("w:firstLine")), "420")
-        # 段落直接属性上不残留 hanging（否则 Word 里悬挂缩进会赢）
+        # 严格-spec：不再写绝对伴随值 firstLine/left（编号层已钳，无需绝对值压制）
+        self.assertIsNone(ind.get(qn("w:firstLine")))
+        self.assertIsNone(ind.get(qn("w:left")))
+        # 段落直接属性上不残留 hanging
         self.assertIsNone(ind.get(qn("w:hanging")))
+
+        # 段落 numPr 已改指一个【新克隆的 numId】(不再是原 numId=1)
+        numid = heading_p.find(qn("w:pPr") + "/" + qn("w:numPr") + "/" + qn("w:numId"))
+        self.assertIsNotNone(numid)
+        new_numid = numid.get(qn("w:val"))
+        self.assertNotEqual(new_numid, "1")
+
+        # numbering.xml：原 abstractNum 0 未被原地改（hanging 仍在）；克隆级别无 hanging
+        num_root = etree.parse(os.path.join(wd, "out_pkg", "word", "numbering.xml")).getroot()
+        abs0 = [a for a in num_root.findall(qn("w:abstractNum"))
+                if a.get(qn("w:abstractNumId")) == "0"][0]
+        ind0 = abs0.find(qn("w:lvl") + "/" + qn("w:pPr") + "/" + qn("w:ind"))
+        self.assertEqual(ind0.get(qn("w:hanging")), "420", "共享 abstractNum 被原地改了（#17 回退）")
+        # 新 numId → 其 abstractNum，克隆级别 hanging 已去除
+        num2abs = {n.get(qn("w:numId")): n.find(qn("w:abstractNumId")).get(qn("w:val"))
+                   for n in num_root.findall(qn("w:num"))}
+        clone_aid = num2abs[new_numid]
+        clone = [a for a in num_root.findall(qn("w:abstractNum"))
+                 if a.get(qn("w:abstractNumId")) == clone_aid][0]
+        cind = clone.find(qn("w:lvl") + "/" + qn("w:pPr") + "/" + qn("w:ind"))
+        self.assertIsNone(cind.get(qn("w:hanging")))
+
+    def test_shared_abstractnum_not_mutated(self):
+        """两个共享 numId=1 的标题都被钳：都改指同一新 numId，原 abstractNum 0 不变。"""
+        from lxml import etree
+        src = self._build(os.path.join(self.tmp, "lo2.docx"), second_heading=True)
+        wd = self._run_pipeline(src)
+        _w, qn = self._w()
+
+        root = etree.parse(os.path.join(wd, "out_pkg", "word", "document.xml")).getroot()
+        paras = list(root.iter(qn("w:p")))
+        h1, h2 = paras[0], paras[1]  # 概述 / 背景
+        n1 = h1.find(qn("w:pPr") + "/" + qn("w:numPr") + "/" + qn("w:numId")).get(qn("w:val"))
+        n2 = h2.find(qn("w:pPr") + "/" + qn("w:numPr") + "/" + qn("w:numId")).get(qn("w:val"))
+        # 同组共享同一克隆（只克隆一次），且都不是原 numId
+        self.assertEqual(n1, n2)
+        self.assertNotEqual(n1, "1")
+
+        num_root = etree.parse(os.path.join(wd, "out_pkg", "word", "numbering.xml")).getroot()
+        abs0 = [a for a in num_root.findall(qn("w:abstractNum"))
+                if a.get(qn("w:abstractNumId")) == "0"][0]
+        ind0 = abs0.find(qn("w:lvl") + "/" + qn("w:pPr") + "/" + qn("w:ind"))
+        self.assertEqual(ind0.get(qn("w:hanging")), "420")
+        # 只新增了一条 abstractNum（克隆一次）：共 2 条
+        self.assertEqual(len(num_root.findall(qn("w:abstractNum"))), 2)
 
 
 if __name__ == "__main__":

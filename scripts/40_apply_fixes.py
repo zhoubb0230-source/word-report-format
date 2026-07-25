@@ -511,6 +511,65 @@ def _toc_style_level(sid, name):
     return int(m.group(1)) if m else None
 
 
+def _toc_text_width_twips(pkg_dir, default=8674):
+    """Right-tab (page-number column) position = the正文宽度右边界 = 页宽 − 左右
+    页边距. Read from the OUTPUT document's first sectPr (pgSz.w − pgMar.left −
+    pgMar.right). Falls back to A4 正文宽 8674 (11906 − 1616×2) when absent."""
+    doc = os.path.join(pkg_dir, "word", "document.xml")
+    if not os.path.exists(doc):
+        return default
+    try:
+        root = parse_xml(doc).getroot()
+    except Exception:
+        return default
+    sect = None
+    for s in root.iter(qn("w:sectPr")):
+        sect = s
+        break
+    if sect is None:
+        return default
+    pgsz = sect.find(qn("w:pgSz"))
+    pgmar = sect.find(qn("w:pgMar"))
+    if pgsz is None or pgmar is None:
+        return default
+
+    def gi(el, a):
+        v = el.get(qn("w:" + a))
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+    w = gi(pgsz, "w")
+    ml = gi(pgmar, "left")
+    mr = gi(pgmar, "right")
+    if w is None or ml is None or mr is None:
+        return default
+    tw = w - ml - mr
+    return tw if tw > 0 else default
+
+
+def _set_toc_tabs(ppr, left_twips, right_twips, leader="dot"):
+    """Rewrite the TOC entry style's w:tabs to the canonical pair:
+    a LEFT tab at ``left_twips`` (标题文字起点，按级 4/5/6 字符) and a RIGHT tab
+    with a dot leader at ``right_twips`` (页码列). Existing tabs in the style are
+    cleared first so a REFRESHED TOC rebuilds each entry with exactly these two —
+    the missing 页码右制表位 is what makes page numbers wrap (见 handoff 4.2)."""
+    old = ppr.find(qn("w:tabs"))
+    if old is not None:
+        ppr.remove(old)
+    tabs = _get_or_make(ppr, "w:tabs",
+                        before_tags=("w:spacing", "w:ind", "w:jc", "w:rPr"))
+    if left_twips:
+        lt = etree.SubElement(tabs, qn("w:tab"))
+        lt.set(qn("w:val"), "left")
+        lt.set(qn("w:pos"), str(left_twips))
+    rt = etree.SubElement(tabs, qn("w:tab"))
+    rt.set(qn("w:val"), "right")
+    rt.set(qn("w:pos"), str(right_twips))
+    if leader:
+        rt.set(qn("w:leader"), leader)
+
+
 def _patch_toc_styles(pkg_dir, toc_spec, char_unit_hp=21):
     """Force the TOC entry styles (toc 1..N) to the spec's font/size and the
     per-level indent (一级0/二级2字符/三级4字符), so a REFRESHED TOC renders
@@ -530,6 +589,9 @@ def _patch_toc_styles(pkg_dir, toc_spec, char_unit_hp=21):
     ea = toc_spec["east_asia"]
     sz = str(toc_spec["size_hp"])
     by_level = toc_spec.get("indent_chars_by_level") or {}
+    tab_by_level = toc_spec.get("tab_left_chars_by_level") or {}
+    tab_leader = toc_spec.get("tab_leader") or "dot"
+    right_tab = _toc_text_width_twips(pkg_dir) if tab_by_level else None
     patched = 0
     for st in root.findall(qn("w:style")):
         if st.get(qn("w:type")) != "paragraph":
@@ -559,6 +621,12 @@ def _patch_toc_styles(pkg_dir, toc_spec, char_unit_hp=21):
         for a in ("w:startChars", "w:start", "w:hanging", "w:hangingChars"):
             if ind.get(qn(a)) is not None:
                 del ind.attrib[qn(a)]
+        # w:tabs: 标题文字起点左制表位（按级4/5/6字符）+ 页码列右制表位（点线号）。
+        # 位置=正文宽度右边界，保证 updateFields 刷新后页码不换行。
+        if right_tab is not None:
+            tab_chars = tab_by_level.get(str(lvl)) if (lvl is not None) else None
+            left_tab = _char_twips(tab_chars, char_unit_hp) if tab_chars else 0
+            _set_toc_tabs(ppr, left_tab, right_tab, tab_leader)
         patched += 1
     if patched:
         tree.write(path, xml_declaration=True, encoding="UTF-8", standalone=True)

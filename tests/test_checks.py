@@ -277,6 +277,48 @@ class TestLibreOfficeTocStyle(unittest.TestCase):
         self.assertEqual(headings.toc_level_from_style("Contents2", resolver), 2)
 
 
+class TestTocTabStops(unittest.TestCase):
+    """#5 目录制表位：标题文字起点左制表位(按级4/5/6字符) + 页码右制表位(点线号)，
+    写进 TOC 条目样式，保证 updateFields 刷新后页码不换行。"""
+
+    W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+    def _make_pkg(self, tmp):
+        word = os.path.join(tmp, "word")
+        os.makedirs(word)
+        with open(os.path.join(word, "styles.xml"), "wb") as f:
+            f.write(('<w:styles xmlns:w="%s">'
+                     '<w:style w:type="paragraph" w:styleId="TOC2">'
+                     '<w:name w:val="toc 2"/></w:style></w:styles>' % self.W
+                     ).encode("utf-8"))
+        # A4 页宽 11906，左右页边距 1616 -> 正文宽 8674
+        with open(os.path.join(word, "document.xml"), "wb") as f:
+            f.write(('<w:document xmlns:w="%s"><w:body><w:sectPr>'
+                     '<w:pgSz w:w="11906" w:h="16838"/>'
+                     '<w:pgMar w:left="1616" w:right="1616" w:top="1984" w:bottom="1814"/>'
+                     '</w:sectPr></w:body></w:document>' % self.W).encode("utf-8"))
+        return tmp
+
+    def test_toc_style_gets_left_and_right_dot_tab(self):
+        mod = helpers.load_script("40_apply_fixes.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            self._make_pkg(tmp)
+            n = mod._patch_toc_styles(tmp, SPEC["toc"], char_unit_hp=21)
+            self.assertEqual(n, 1)
+            root = etree.parse(os.path.join(tmp, "word", "styles.xml")).getroot()
+            tabs = root.find(".//{%s}tabs" % self.W)
+            self.assertIsNotNone(tabs)
+            tab_els = tabs.findall("{%s}tab" % self.W)
+            vals = {t.get("{%s}val" % self.W): t for t in tab_els}
+            # 左制表位：二级 = 5字符 @21hp = 1050 twips
+            self.assertIn("left", vals)
+            self.assertEqual(vals["left"].get("{%s}pos" % self.W), "1050")
+            # 右制表位：正文宽度 8674，带点线号
+            self.assertIn("right", vals)
+            self.assertEqual(vals["right"].get("{%s}pos" % self.W), "8674")
+            self.assertEqual(vals["right"].get("{%s}leader" % self.W), "dot")
+
+
 class TestInt2Cn(unittest.TestCase):
     def test_basic_range(self):
         self.assertEqual(checks.int2cn(1), "一")

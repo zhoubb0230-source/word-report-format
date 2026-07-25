@@ -254,6 +254,81 @@ class StyleResolver:
             _merge(rpr, read_rpr(mark_rpr_el))
         return ppr, rpr
 
+    def resolve_cascade(self, style_id, direct_ppr_el, mark_rpr_el,
+                        num_levels=None):
+        """Like ``resolve`` but folds the NUMBERING layer into the cascade.
+
+        The real WordprocessingML precedence for a numbered paragraph's
+        indentation is::
+
+            docDefaults  <  paragraph style chain  <  numbering level  <  direct
+
+        ``resolve`` above stops at the style chain and never consults the
+        numbering level, so an indent (very often a ``w:hanging``) that a
+        heading inherits from its list level is INVISIBLE to it — the paragraph
+        looks compliant while Word renders a hanging indent. This method inserts
+        the numbering level's ``w:pPr`` between the style chain and the direct
+        pPr, at the correct precedence (it OVERRIDES the style chain but is
+        OVERRIDDEN by any direct value), so the returned ppr reflects the indent
+        the reader actually sees. That is the "把编号层折进有效值" requirement
+        from the 方案C 契约 (§2.3) and the foundation the collapse-invariant
+        check builds on.
+
+        ``num_levels`` is the map returned by :func:`load_numbering_levels`
+        (numId -> {ilvl: pPr_dict}). When it is None/empty this degrades to
+        exactly ``resolve``'s result, so callers without a numbering.xml are
+        unaffected. Only the paragraph pPr is folded (that is where a list level
+        carries its indent); the numbering level's own rPr is not merged — a
+        deliberate, documented limitation kept to match
+        ``load_numbering_levels``.
+
+        The winning numId/ilvl is computed with the same precedence: a direct
+        ``w:numPr`` beats one inherited from the style chain. numId "0" is the
+        OOXML "no numbering" override and disables the fold.
+        """
+        # 1) docDefaults + full style chain (no direct yet).
+        ppr = dict(self.doc_ppr)
+        rpr = dict(self.doc_rpr)
+        sid = style_id or self.default_para_style
+        for st in self._style_chain(sid):
+            spr = st.find(qn("w:pPr"))
+            if spr is not None:
+                _merge(ppr, read_ppr(spr))
+            srp = st.find(qn("w:rPr"))
+            if srp is not None:
+                _merge(rpr, read_rpr(srp))
+
+        # 2) Resolve the effective numbering reference: a direct numPr wins over
+        #    one inherited through the style chain (already in ppr from step 1).
+        direct_ppr = read_ppr(direct_ppr_el) if direct_ppr_el is not None else {}
+        num_id = direct_ppr.get("num_id")
+        if num_id is None:
+            num_id = ppr.get("num_id")
+        ilvl = direct_ppr.get("ilvl")
+        if ilvl is None:
+            ilvl = ppr.get("ilvl")
+
+        # 3) Fold the numbering level's pPr in — over the style chain, under the
+        #    direct pPr applied next.
+        if num_levels and num_id and num_id != "0":
+            try:
+                il = int(ilvl) if ilvl is not None else 0
+            except (ValueError, TypeError):
+                il = 0
+            lvl_ppr = num_levels.get(num_id, {}).get(il)
+            if lvl_ppr:
+                _merge(ppr, lvl_ppr)
+
+        # 4) Direct paragraph pPr + paragraph-mark rPr (highest precedence).
+        if direct_ppr_el is not None:
+            _merge(ppr, direct_ppr)
+            mrp = direct_ppr_el.find(qn("w:rPr"))
+            if mrp is not None:
+                _merge(rpr, read_rpr(mrp))
+        if mark_rpr_el is not None:
+            _merge(rpr, read_rpr(mark_rpr_el))
+        return ppr, rpr
+
 
 def _merge(base, extra):
     """Overlay non-None values from extra onto base."""

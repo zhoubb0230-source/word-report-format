@@ -14,11 +14,27 @@
 - 分支：`claude/scheme-c-style-injection-h3apcl`（已推送）。最新提交：
   - `03a68cb` 批次A（字体/字号/行距/间距类新规则）
   - `06e3b4a` #5 目录制表位（写进 `_patch_toc_styles`＝样式层，方案C第一块）
-- 测试：**65 passing**（`pip install lxml` 后 `python3 -m unittest discover -s tests -p "test_*.py"`）。
+- **阶段1 已落地**（分支 `claude/scheme-c-codegen-wf5tw6`，零行为改变、全程回归）：
+  - `docxcommon.StyleResolver.resolve_cascade()`：含**编号层**的统一 cascade
+    （docDefaults→样式链→**编号层**→直接），正确优先级（编号层压过样式、直接压过编号层）。旧
+    `resolve()` **保留不动**（阶段1 不改判定路径）；`20_extract_structure.py` 也**暂不**改用它。
+  - `scripts/lib/cascade.py`（归一模块）：`effective_paragraph_props()` 便捷装配有效属性、
+    `resolve_ppr_with_provenance()` / `contested_indent_report()` 产出**每个属性由哪层供给**的
+    provenance——这是"量化还剩几层没钳干净"的量尺（apply 后重跑，凡有效值仍由 `numbering`/`direct`
+    供给的 canonical 属性＝没钳干净、会在 Word 泄漏）。
+  - `tests/test_cascade.py`：对抗性合成 fixtures（同一竞争值分塞样式/编号/直接层，断言坍缩到正确层，
+    并对照旧 `resolve` 漏看编号层）。
+  - **已知取舍**：编号层只折 pPr（缩进），**不折** rPr（与 `load_numbering_levels` 一致）；此为刻意
+    限制，别当 bug"补全"——真要折 rPr 需同步扩 `load_numbering_levels` 的返回并验回归。
+- 测试：**74 passing**（65 基线 + 9 新，`pip install lxml` 后
+  `python3 -m unittest discover -s tests -p "test_*.py"`）。
 - 流水线：`05→10→20→(27)→30→40→45→50→59`，唯一依赖 lxml，判定阈值全部来自 `spec/format_spec.json`。
 - 17 项实测问题的分诊/进度在 `HANDOFF_格式化架构讨论.md` §12。已落 #1-#4/#6/#8/#9/#10/#15/#5 +
   #12/#14 的"直接 hanging"部分。**搁置/留给方案C**：#11（内容层插 `\t`）、#7（提取层标 cell 行号）、
   #13/#16/#17（bug）、#12/#14 的"编号层/样式层继承 hanging"这一半。
+- **下一步（阶段2，需先办 §6 决策 + §5 阶段0 的 Word 人肉验收，沙箱验不了渲染，见 §1）**：把
+  `resolve_cascade` 接进 20 的判定路径、把 `_patch_toc_styles` 推广成全角色 canonical 样式注入 +
+  指派 + 清直接覆盖 + 钳编号层（克隆而非改共享），并删掉绝对伴随值 hack（§2.2）。
 
 ---
 

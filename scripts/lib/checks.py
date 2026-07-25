@@ -10,8 +10,11 @@ Fix object shapes
 format fix (auto-fixable, one per paragraph, combines all its violations):
   {"para_index": i, "op": "format",
    "set_east_asia": str|None, "set_ascii": str|None, "set_size_hp": int|None,
-   "set_line_exact": int|None, "set_first_line_chars": int|None,
+   "set_line_exact": int|None, "set_line_rule": "exact"|"auto"|None,
+   "clear_space_before_after": bool,
+   "set_first_line_chars": int|None, "set_left_chars": int|None,
    "clear_left_indent": bool, "clear_right_indent": bool, "set_jc": str|None,
+   "strip_text": "both"|"leading"|None,
    "rule_id": "combined", "rule_text": "<multi-line 违反规范>", "comment": true}
 
 renumber fix (auto-fixable text change on the leading ordinal):
@@ -173,7 +176,9 @@ def _new_sets():
     apply stage and the summary never trip over a key that only some check
     branches happened to include."""
     return {"set_east_asia": None, "set_ascii": None, "set_size_hp": None,
-            "set_line_exact": None, "set_first_line_chars": None,
+            "set_line_exact": None, "set_line_rule": None,
+            "clear_space_before_after": False,
+            "set_first_line_chars": None,
             "set_left_chars": None,
             "clear_left_indent": False, "clear_right_indent": False,
             "set_jc": None, "strip_text": None}
@@ -223,6 +228,15 @@ def check_paragraph(rec, spec):
             if eff.get("size_hp") != t["size_hp"]:
                 sets["set_size_hp"] = t["size_hp"]
                 violations.append("题目字号应为20磅")
+            # 题目内的数字/西文用西文字体（Times New Roman）。封面其余部分刻意不套
+            # 西文（陷阱#7），但题目是明确例外——仅当题目【含数字/西文】时才校验，
+            # 纯中文题目不会被误报。
+            western = spec.get("western_font")
+            if t.get("enforce_western") and western and rec.get("has_western") \
+                    and eff.get("ascii") != western:
+                sets["set_ascii"] = western
+                violations.append("题目内数字/西文字体应为%s（实际：%s）"
+                                  % (western, eff.get("ascii")))
             if eff.get("jc") != "center":
                 sets["set_jc"] = "center"
                 violations.append("题目应居中")
@@ -258,13 +272,11 @@ def check_paragraph(rec, spec):
         label = "封面要素"
         if entry and entry.get("east_asia") and entry.get("size_hp"):
             _check_font_size(eff, entry, sets, violations, label=label)
-        # 行距：报告题目下的各要素为固定值（spec.cover_field.line_twips，29.4磅），
-        # 与正文的 28 磅不同——单独按 cover_field 的行距规则校验。
+        # 行距：报告题目下的各要素为 2 倍行距（spec.cover_field，lineRule=auto/
+        # line=480），与正文的固定 28 磅不同——单独按 cover_field 的行距规则校验。
         if entry and entry.get("line_twips") and entry.get("line_rule"):
-            if not (eff.get("line") == entry["line_twips"]
-                    and eff.get("line_rule") == entry["line_rule"]):
-                sets["set_line_exact"] = entry["line_twips"]
-                violations.append("封面要素行距应为固定值%g磅" % (entry["line_twips"] / 20.0))
+            _check_line_spacing(eff, entry["line_twips"], entry["line_rule"],
+                                sets, violations, "封面要素")
         _check_cover_field_left(rec, eff, sets, violations)
         return _mk_format(rec["i"], sets, violations)
 
@@ -285,25 +297,29 @@ def check_paragraph(rec, spec):
         h = spec["headings"][str(lvl)]
         _check_font_size(eff, h, sets, violations,
                          label="%d级标题" % lvl, western=western, has_western=has_western)
+        # 一~四级标题行距固定值28磅（与正文一致，取 spec.line_spacing）。
+        ls = spec["line_spacing"]
+        _check_line_spacing(eff, ls["line_twips"], ls["line_rule"],
+                            sets, violations, "%d级标题" % lvl)
         _check_first_line(eff, h, sets, violations, auto_num=rec.get("auto_num"))
-        # headings are not forced to a specific line rule by the spec table
     else:
         b = spec["body"]
         _check_font_size(eff, b, sets, violations, label="正文",
                          western=western, has_western=has_western)
         # line spacing: fixed value 28pt (exact 560)
         ls = spec["line_spacing"]
-        if not (eff.get("line") == ls["line_twips"] and eff.get("line_rule") == ls["line_rule"]):
-            sets["set_line_exact"] = ls["line_twips"]
-            violations.append("行距应为固定值28磅")
+        _check_line_spacing(eff, ls["line_twips"], ls["line_rule"],
+                            sets, violations, "正文")
+        # 去除段前/段后间距（正文规范）
+        if b.get("no_space_before_after"):
+            _check_space_before_after(eff, sets, violations, "正文")
         _check_first_line(eff, b, sets, violations, auto_num=rec.get("auto_num"))
 
     return _mk_format(rec["i"], sets, violations)
 
 
 def _check_table_body(rec, spec):
-    """表格内容：仿宋 14磅。Only font + size are checked (the spec says nothing
-    about a cell's indent/line spacing, so we do not invent those)."""
+    """表格内容：仿宋 四号、行距固定值28磅、无任何缩进（悬挂/左/右/首行全部清零）。"""
     tb = spec.get("table_body")
     if not tb or not tb.get("east_asia") or not tb.get("size_hp"):
         return None  # spec not configured for table content; nothing to check
@@ -313,17 +329,33 @@ def _check_table_body(rec, spec):
     _check_font_size(eff, tb, sets, violations, label="表格内容",
                      western=spec.get("western_font"),
                      has_western=rec.get("has_western", False))
+    # 行距固定值28磅
+    if tb.get("line_twips") and tb.get("line_rule"):
+        _check_line_spacing(eff, tb["line_twips"], tb["line_rule"],
+                            sets, violations, "表格内容")
+    # 无任何缩进：悬挂/左/右/首行全部清零
+    if tb.get("no_indent"):
+        _check_no_indent(eff, sets, violations, "表格内容")
     return _mk_format(rec["i"], sets, violations)
 
 
 def _check_caption_format(rec, spec):
-    """图表标题：居中、无任何缩进（首行/左/右全部清零）。字体字号规范未定义，不动。"""
+    """图/表标题：仿宋 三号、行距固定值28磅、居中、无任何缩进（首行/左/右全部清零）。"""
     cf = spec.get("caption_format")
     if not cf:
         return None
     eff = rec["eff"]
     sets = _new_sets()
     violations = []
+    # 字体字号（仿宋 三号）：spec 定义了才校验
+    if cf.get("east_asia") and cf.get("size_hp"):
+        _check_font_size(eff, cf, sets, violations, label="图表标题",
+                         western=spec.get("western_font"),
+                         has_western=rec.get("has_western", False))
+    # 行距固定值28磅
+    if cf.get("line_twips") and cf.get("line_rule"):
+        _check_line_spacing(eff, cf["line_twips"], cf["line_rule"],
+                            sets, violations, "图表标题")
     want_jc = cf.get("jc")
     if want_jc and eff.get("jc") != want_jc:
         sets["set_jc"] = want_jc
@@ -440,6 +472,27 @@ def _check_font_size(eff, spec_entry, sets, violations, label,
         violations.append("%s字号应为%s" % (label, _size_name(spec_entry["size_hp"])))
 
 
+def _check_line_spacing(eff, line_twips, line_rule, sets, violations, label):
+    """行距校验：eff.line/line_rule 必须与规范一致，否则记违规并让 apply 写。
+    lineRule=exact 报"固定值X磅"，lineRule=auto 报"N倍行距"（480=2倍）。"""
+    if not (eff.get("line") == line_twips and eff.get("line_rule") == line_rule):
+        sets["set_line_exact"] = line_twips
+        sets["set_line_rule"] = line_rule
+        if line_rule == "auto":
+            violations.append("%s行距应为%g倍" % (label, line_twips / 240.0))
+        else:
+            violations.append("%s行距应为固定值%g磅" % (label, line_twips / 20.0))
+
+
+def _check_space_before_after(eff, sets, violations, label):
+    """段前/段后间距应为 0（正文规范：去除段前段后）。任何非零的绝对间距
+    (space_before/after) 或行单位间距 (space_*_lines) 都记违规并清零。"""
+    if any(eff.get(k) for k in ("space_before", "space_after",
+                                "space_before_lines", "space_after_lines")):
+        sets["clear_space_before_after"] = True
+        violations.append("%s应去除段前/段后间距" % label)
+
+
 def _check_first_line(eff, spec_entry, sets, violations, auto_num=False):
     want = spec_entry.get("first_line_chars")
     if want is None:
@@ -455,9 +508,18 @@ def _check_first_line(eff, spec_entry, sets, violations, auto_num=False):
         sets["clear_right_indent"] = True
         violations.append("首行缩进应为2字符，并清除左右缩进（含自动编号带来的缩进）")
         return
-    if eff.get("first_line_chars") != want:
+    # 悬挂缩进：即使首行缩进值看起来已对，只要段落带 hanging（首行缩进被误显示成
+    # 悬挂缩进的成因，见 #12/#14），也要强制重写首行缩进——apply 的
+    # _set_first_line_and_clear_left 在写 firstLine 时会清掉直接 hanging。
+    # 注：继承自【编号层/样式层】的 hanging 需完整方案C（钳编号层）才能根除，
+    # 这里只处理段落直接 hanging。
+    has_hanging = any(eff.get(k) for k in ("hanging", "hanging_chars"))
+    if eff.get("first_line_chars") != want or has_hanging:
         sets["set_first_line_chars"] = want
-        violations.append("首行缩进应为2字符")
+        if eff.get("first_line_chars") != want:
+            violations.append("首行缩进应为2字符")
+        elif has_hanging:
+            violations.append("应为首行缩进2字符（清除悬挂缩进）")
     # left/right indent must NOT be stacked on top of the first-line indent:
     # an existing left indent makes the first line indent by (left + 2 chars),
     # i.e. more than the required 2 characters, so any left/right indent is

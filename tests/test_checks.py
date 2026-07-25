@@ -52,7 +52,7 @@ class TestCoverTitle(unittest.TestCase):
         self.assertEqual(fix["set_jc"], "center")
         self.assertTrue(fix["clear_left_indent"])
         self.assertTrue(fix["clear_right_indent"], "右缩进必须与左缩进一起清零")
-        self.assertEqual(fix["set_east_asia"], "方正小标宋")
+        self.assertEqual(fix["set_east_asia"], "方正小标宋_GBK")
 
 
 class TestCoverField(unittest.TestCase):
@@ -72,14 +72,15 @@ class TestCoverField(unittest.TestCase):
         self.assertEqual(fix["set_east_asia"], "方正黑体_GBK")
 
     def test_field_font_size_and_line_spacing(self):
-        # 报告题目下的要素：方正黑体_GBK / 小三（30半点）/ 固定行距29.4磅（588）。
+        # 报告题目下的要素：方正黑体_GBK / 小三（30半点）/ 2倍行距（auto/480）。
         r = rec(region="cover", text="项目名称：先进项目",
                 eff_=eff(east_asia="宋体", size_hp=32, jc="both",
                          first_line_chars=200, line=560, line_rule="exact"))
         fix = checks.check_paragraph(r, SPEC)
         self.assertEqual(fix["set_east_asia"], "方正黑体_GBK")
         self.assertEqual(fix["set_size_hp"], 30)            # 小三
-        self.assertEqual(fix["set_line_exact"], 588)        # 固定值29.4磅
+        self.assertEqual(fix["set_line_exact"], 480)        # 2倍行距
+        self.assertEqual(fix["set_line_rule"], "auto")
 
     def test_project_number_is_field_not_classification(self):
         # 问题1：项目编号是报告题目下的要素（方正黑体_GBK 小三），不是密级/文本
@@ -95,23 +96,38 @@ class TestCoverField(unittest.TestCase):
     def test_compliant_field_no_fix(self):
         r = rec(region="cover", text="项目名称：先进项目",
                 eff_=eff(east_asia="方正黑体_GBK", size_hp=30, jc="both",
-                         first_line_chars=200, line=588, line_rule="exact"))
+                         first_line_chars=200, line=480, line_rule="auto"))
         self.assertIsNone(checks.check_paragraph(r, SPEC))
 
 
 class TestTableBody(unittest.TestCase):
-    """表格内容：仿宋 四号（28半点）；仅校验字体字号，不动缩进/行距。"""
+    """表格内容：仿宋 四号（28半点）、行距固定值28磅、无任何缩进。"""
 
     def test_table_size_is_sihao(self):
         r = rec(in_table=True, text="设备名称123", has_western=True,
-                eff_=eff(east_asia="仿宋", size_hp=32, ascii="仿宋"))
+                eff_=eff(east_asia="仿宋", size_hp=32, ascii="仿宋",
+                         first_line_chars=None))
         fix = checks.check_paragraph(r, SPEC)
         self.assertEqual(fix["set_size_hp"], 28)   # 四号，非三号
 
     def test_table_sihao_compliant_no_fix(self):
+        # 合规表格内容：四号 + 固定28磅 + 无缩进
         r = rec(in_table=True, text="设备名称", has_western=False,
-                eff_=eff(east_asia="仿宋", size_hp=28, ascii="仿宋"))
+                eff_=eff(east_asia="仿宋", size_hp=28, ascii="仿宋",
+                         first_line_chars=None, line=560, line_rule="exact"))
         self.assertIsNone(checks.check_paragraph(r, SPEC))
+
+    def test_table_indent_and_line_spacing_flagged(self):
+        # 表格内容带缩进 + 行距非28磅固定 -> 都要被清/改
+        r = rec(in_table=True, text="设备名称", has_western=False,
+                eff_=eff(east_asia="仿宋", size_hp=28, ascii="仿宋",
+                         first_line_chars=200, left_chars=100,
+                         line=480, line_rule="auto"))
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertEqual(fix["set_line_exact"], 560)
+        self.assertEqual(fix["set_line_rule"], "exact")
+        self.assertTrue(fix["clear_left_indent"])
+        self.assertEqual(fix["set_first_line_chars"], 0)
 
 
 class TestCoverTextNumberVsProjectNumber(unittest.TestCase):
@@ -144,7 +160,7 @@ class TestTocExcluded(unittest.TestCase):
                 eff_=eff(east_asia="黑体", size_hp=28))
         fix = checks.check_paragraph(r, SPEC)
         self.assertEqual(fix["set_east_asia"], "仿宋")  # toc font, not 黑体
-        self.assertEqual(fix["set_size_hp"], 32)         # 三号
+        self.assertEqual(fix["set_size_hp"], 30)         # 小三
 
     def test_toc_not_counted_in_continuity(self):
         recs = [rec(i=0, region="toc", is_toc=True, is_heading=False,
@@ -309,7 +325,8 @@ class TestWesternFont(unittest.TestCase):
     def test_pure_chinese_table_no_western_fix(self):
         # Bug2 exact report: 表格内容纯中文 误判 "西文应为 TNR（实际：仿宋）".
         r = rec(in_table=True, text="设备名称", has_western=False,
-                eff_=eff(east_asia="仿宋", size_hp=28, ascii="仿宋"))
+                eff_=eff(east_asia="仿宋", size_hp=28, ascii="仿宋",
+                         first_line_chars=None, line=560, line_rule="exact"))
         self.assertIsNone(checks.check_paragraph(r, SPEC))
 
     def test_heading_with_western_gets_tnr(self):
@@ -323,9 +340,82 @@ class TestWesternFont(unittest.TestCase):
         # an otherwise-compliant field with a wrong Latin font gets NO fix.
         r = rec(region="cover", text="项目名称ABC", has_western=True,
                 eff_=eff(east_asia="方正黑体_GBK", size_hp=30, ascii="Calibri",
-                         jc="both", first_line_chars=200, line=588,
-                         line_rule="exact"))
+                         jc="both", first_line_chars=200, line=480,
+                         line_rule="auto"))
         self.assertIsNone(checks.check_paragraph(r, SPEC))  # western not enforced here
+
+
+class TestNewFormatRules2026(unittest.TestCase):
+    """2026-07 批次新增/调整的规则（见 HANDOFF §12 分诊 A/B）。每条锁一个决策。"""
+
+    def test_classification_font_is_fangzheng_heiti_gbk(self):
+        # #1 密级/文本编号 -> 方正黑体_GBK（三号不变）
+        r = rec(region="cover", above_title=True, text="机密　2025013",
+                eff_=eff(east_asia="仿宋", size_hp=32))
+        self.assertEqual(checks.cover_role(r, SPEC), "classification")
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertEqual(fix["set_east_asia"], "方正黑体_GBK")
+        self.assertIsNone(fix["set_size_hp"])  # 三号(32) 不变
+
+    def test_title_font_gbk_and_digits_western(self):
+        # #2 题目字体 方正小标宋_GBK；题目内数字用西文(TNR)
+        r = rec(region="cover", is_title=True, text="2024年度自评价报告",
+                has_western=True,
+                eff_=eff(east_asia="宋体", size_hp=40, jc="center", ascii="宋体",
+                         first_line_chars=None))
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertEqual(fix["set_east_asia"], "方正小标宋_GBK")
+        self.assertEqual(fix["set_ascii"], "Times New Roman")
+
+    def test_title_pure_chinese_no_western_flag(self):
+        # 纯中文题目（无数字）不因西文被误报
+        r = rec(region="cover", is_title=True, text="先进项目自评价报告",
+                has_western=False,
+                eff_=eff(east_asia="方正小标宋_GBK", size_hp=40, jc="center",
+                         first_line_chars=None))
+        self.assertIsNone(checks.check_paragraph(r, SPEC))
+
+    def test_heading_line_spacing_28pt(self):
+        # #6 一~四级标题行距固定值28磅(560/exact)
+        r = rec(is_heading=True, level=2, level_source="outline", num_raw="（一）",
+                text="（一）研究背景",
+                eff_=eff(east_asia="楷体", size_hp=32, line=None, line_rule=None))
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertEqual(fix["set_line_exact"], 560)
+        self.assertEqual(fix["set_line_rule"], "exact")
+
+    def test_caption_font_size_line(self):
+        # #8 图/表标题 仿宋 三号 + 行距固定28磅 + 居中 + 无缩进
+        r = rec(text="图1 系统结构", caption={"kind": "figure", "num_raw": "1",
+                "has_content": True, "source": "style"},
+                eff_=eff(east_asia="黑体", size_hp=40, jc="left",
+                         first_line_chars=200, line=None, line_rule=None))
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertEqual(fix["set_east_asia"], "仿宋")
+        self.assertEqual(fix["set_size_hp"], 32)
+        self.assertEqual(fix["set_line_exact"], 560)
+        self.assertEqual(fix["set_jc"], "center")
+        self.assertEqual(fix["set_first_line_chars"], 0)
+
+    def test_body_removes_space_before_after(self):
+        # #15 正文去段前/段后间距
+        r = rec(text="正文一段。",
+                eff_=eff(space_before=100, space_after=50))
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertTrue(fix["clear_space_before_after"])
+
+    def test_body_compliant_with_zero_spacing_no_fix(self):
+        r = rec(text="正文一段。",
+                eff_=eff(space_before=None, space_after=None))
+        self.assertIsNone(checks.check_paragraph(r, SPEC))
+
+    def test_direct_hanging_forces_first_line_rewrite(self):
+        # #12/#14 段落带直接 hanging，即使首行缩进值看似已对，也强制重写首行缩进
+        # （apply 写 firstLine 时清直接 hanging）
+        r = rec(text="正文一段。",
+                eff_=eff(first_line_chars=200, hanging=420))
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertEqual(fix["set_first_line_chars"], 200)
 
 
 class TestDocHints(unittest.TestCase):

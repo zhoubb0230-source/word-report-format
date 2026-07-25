@@ -145,12 +145,29 @@ def _apply_run_props(p, east_asia, ascii_, size_hp):
         _set_size(mark, size_hp)
 
 
-def _set_line_exact(pPr, line_twips):
+def _set_line_exact(pPr, line_twips, line_rule="exact"):
+    """Set line spacing. line_rule="exact" (固定值, twips) or "auto" (倍数，
+    line=480 => 2倍). The caller passes the spec's own rule so 封面要素的 2倍行距
+    (auto) and正文/标题的固定28磅(exact) share one apply path."""
     sp = _get_or_make(pPr, "w:spacing")
     sp.set(qn("w:line"), str(line_twips))
-    sp.set(qn("w:lineRule"), "exact")
+    sp.set(qn("w:lineRule"), line_rule)
     # remove auto-spacing that would override the fixed value
     for a in ("w:beforeAutospacing", "w:afterAutospacing"):
+        if sp.get(qn(a)) is not None:
+            del sp.attrib[qn(a)]
+
+
+def _clear_space_before_after(pPr):
+    """Zero the paragraph's 段前/段后 spacing as a DIRECT override (正文规范：
+    去除段前段后). Explicit 0 (not attribute deletion) so an inherited非零
+    段前/段后 from the style is overridden; the *Lines forms are dropped so they
+    can't re-supply spacing alongside our 0."""
+    sp = _get_or_make(pPr, "w:spacing")
+    sp.set(qn("w:before"), "0")
+    sp.set(qn("w:after"), "0")
+    for a in ("w:beforeLines", "w:afterLines",
+              "w:beforeAutospacing", "w:afterAutospacing"):
         if sp.get(qn(a)) is not None:
             del sp.attrib[qn(a)]
 
@@ -748,7 +765,10 @@ def main():
                              fix.get("set_ascii"), fix.get("set_size_hp"))
             pPr = get_pPr(p)
             if fix.get("set_line_exact") is not None:
-                _set_line_exact(pPr, fix["set_line_exact"])
+                _set_line_exact(pPr, fix["set_line_exact"],
+                                fix.get("set_line_rule") or "exact")
+            if fix.get("clear_space_before_after"):
+                _clear_space_before_after(pPr)
             if (fix.get("set_first_line_chars") is not None
                     or fix.get("clear_left_indent") or fix.get("clear_right_indent")
                     or fix.get("set_left_chars") is not None):

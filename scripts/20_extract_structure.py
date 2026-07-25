@@ -403,6 +403,10 @@ def main():
             "eff": {
                 "east_asia": ea, "ascii": asc, "size_hp": sz,
                 "line": ppr.get("line"), "line_rule": ppr.get("line_rule"),
+                "space_before": ppr.get("space_before"),
+                "space_after": ppr.get("space_after"),
+                "space_before_lines": ppr.get("space_before_lines"),
+                "space_after_lines": ppr.get("space_after_lines"),
                 "first_line_chars": ppr.get("first_line_chars"),
                 "first_line": ppr.get("first_line"),
                 "left_chars": ppr.get("left_chars"), "left": ppr.get("left"),

@@ -288,6 +288,8 @@ def read_rpr(rpr):
 def read_ppr(ppr):
     d = {"jc": None, "outline": None,
          "line": None, "line_rule": None,
+         "space_before": None, "space_after": None,
+         "space_before_lines": None, "space_after_lines": None,
          "first_line_chars": None, "first_line": None,
          "left_chars": None, "left": None,
          "start_chars": None, "start": None,
@@ -326,6 +328,15 @@ def read_ppr(ppr):
             except ValueError:
                 pass
         d["line_rule"] = sp.get(qn("w:lineRule"))
+        for attr, key in (("before", "space_before"), ("after", "space_after"),
+                          ("beforeLines", "space_before_lines"),
+                          ("afterLines", "space_after_lines")):
+            v = sp.get(qn("w:" + attr))
+            if v is not None:
+                try:
+                    d[key] = int(v)
+                except ValueError:
+                    d[key] = v
     ind = ppr.find(qn("w:ind"))
     if ind is not None:
         for attr, key in (("firstLineChars", "first_line_chars"),

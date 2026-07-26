@@ -126,6 +126,10 @@ cover-field / cover-classification / toc1..N）都：① 注入一份完全指�
 - **阶段0（人肉一次性）**：构造一份 **canonical 参考 .docx**——每角色一段、套注入样式。用户在 **Word** 里
   打开、按清单确认"每角色渲染正确 + 首行缩进显示为'N字符'而非厘米 + 目录页码不换行"。这是整套方案
   唯一的人肉环节，替代收集大量语料（用户明确收不到足够 LibreOffice 语料）。
+  - **已提供生成器**：`python3 scripts/make_canonical_reference.py [输出路径]`（纯 stdlib，值全读 spec，
+    不进流水线）。产物含封面（密级/题目/要素）、真 TOC 域（打开更新验页码不换行）、自动编号 H1（验甲法
+    克隆钳的 2 字符首行 vs -0.74cm 悬挂）、一~四级标题/正文/图表标题/表格内容，每段前有【角色·规范】标签
+    与验收清单。文件头 docstring 即验收清单。**待用户 Word 反馈**后再据以做阶段2 全角色样式注入。
 - **阶段1（纯代码、零行为改变、可全跑回归）**：
   ① 写**含编号层的统一 cascade resolver**（docDefaults→样式链→**编号层**→直接，逐属性合并）；
   ② 把散在 `checks/headings/apply` 的兼容逻辑收进一个 `compat`/`normalize` 模块（纯搬移）；

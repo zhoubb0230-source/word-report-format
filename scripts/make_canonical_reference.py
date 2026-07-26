@@ -90,18 +90,20 @@ def build_styles(spec):
     line_twips = ls.get("line_twips")
     styles = []
 
-    # docDefaults：默认五号 21 半点（字符单位宽度基准，见 _default_char_unit_hp）
+    # docDefaults：默认五号 21 半点 + lang（照抄规范文档 styles.xml）。行网格 15.6磅/41行
+    # 由 settings 的 compat 块（useFELayout/compatMode15）保证，与默认字号无关。
     docdef = ('<w:docDefaults><w:rPrDefault><w:rPr>'
-              '<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" '
-              'w:eastAsia="仿宋" w:cs="Times New Roman"/><w:sz w:val="21"/>'
-              '<w:szCs w:val="21"/></w:rPr></w:rPrDefault></w:docDefaults>')
-    # Normal 显式给五号 rPr：Word 的【文档网格】按 Normal 字号算行网格间距，字号=五号
-    # (10.5pt) 时才尊重 15.6 磅/41 行；缺省或落到三号会被顶高到 21.75 磅/29 行（用户实测）。
+              '<w:rFonts w:ascii="Times New Roman" w:eastAsia="仿宋" w:hAnsi="Times New Roman" '
+              'w:cs="Times New Roman"/><w:sz w:val="21"/><w:szCs w:val="21"/>'
+              '<w:lang w:val="en-US" w:eastAsia="zh-CN" w:bidi="ar-SA"/>'
+              '</w:rPr></w:rPrDefault><w:pPrDefault/></w:docDefaults>')
+    # Normal ＝ 正文本身（规范文档如此）：仿宋 三号、行距固定值 28磅、首行缩进 2 字符。
     styles.append('<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
-                  '<w:name w:val="Normal"/><w:rPr>'
-                  '<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" '
-                  'w:eastAsia="仿宋" w:cs="Times New Roman"/>'
-                  '<w:sz w:val="21"/><w:szCs w:val="21"/></w:rPr></w:style>')
+                  '<w:name w:val="Normal"/><w:qFormat/>'
+                  '<w:pPr><w:spacing w:line="%d" w:lineRule="exact"/>'
+                  '<w:ind w:firstLineChars="200"/></w:pPr>'
+                  '<w:rPr><w:sz w:val="32"/><w:szCs w:val="32"/></w:rPr></w:style>'
+                  % line_twips)
 
     # 题目
     t = spec["title"]
@@ -163,16 +165,31 @@ def build_styles(spec):
         _spacing(line_twips) + '<w:jc w:val="center"/>' + _ind(no_indent=True),
         _rpr(b_toc["east_asia"], b_toc["size_hp"], western)))
 
-    # 目录 1/2/3（标准 toc 样式名）。制表位【不写进样式】——规范文档里 Word 是把制表位
-    # 直接写在每条【目录条目段落】上（见 build_document 的 TOC 域缓存条目），样式只钉
-    # 字体/字号/左缩进。目录不套西文（陷阱#7）。
+    # 目录 1/2/3（标准 toc 样式名）——【照抄规范文档 styles.xml 的精确值】：
+    #   制表位写在【样式】里；左制表位 4/5/6 字符按【三号 320 twips/字符】= 1280/1600/1920
+    #   （不是五号 210！这是之前算错、编号越过制表位的根因）；页码右制表位带点线 = 13203
+    #   （41.26 字符×320）；左缩进 leftChars 0/200/400；单倍行距(line 240 auto)；仿宋 小三。
     toc = spec["toc"]
-    by_level = toc.get("indent_chars_by_level", {})
+    toc_rpr = ('<w:rFonts w:ascii="仿宋" w:hAnsi="仿宋" w:cs="仿宋"/>'
+               '<w:sz w:val="%d"/><w:szCs w:val="%d"/>'
+               % (toc["size_hp"], toc["size_hp"]))
+    RIGHT_TAB = 13203
+    toc_defs = {
+        "1": (1280, '<w:ind w:firstLineChars="0" w:firstLine="0"/>'),
+        "2": (1600, '<w:ind w:leftChars="200" w:left="200"/>'),
+        "3": (1920, '<w:ind w:leftChars="400" w:left="400" w:firstLineChars="0" w:firstLine="0"/>'),
+    }
     for lvl in ("1", "2", "3"):
-        styles.append(_style(
-            "TOC%s" % lvl, "toc %s" % lvl,
-            _ind(left_chars=by_level.get(lvl, 0)),
-            _rpr(toc["east_asia"], toc["size_hp"])))
+        left_tab, ind = toc_defs[lvl]
+        tabs = ('<w:tabs><w:tab w:val="left" w:pos="%d"/>'
+                '<w:tab w:val="right" w:leader="dot" w:pos="%d"/></w:tabs>'
+                % (left_tab, RIGHT_TAB))
+        ppr = tabs + '<w:spacing w:line="240" w:lineRule="auto"/>' + ind
+        styles.append('<w:style w:type="paragraph" w:styleId="TOC%s"><w:name w:val="toc %s"/>'
+                      '<w:basedOn w:val="Normal"/><w:next w:val="Normal"/>'
+                      '<w:uiPriority w:val="39"/><w:qFormat/>'
+                      '<w:pPr>%s</w:pPr><w:rPr>%s</w:rPr></w:style>'
+                      % (lvl, lvl, ppr, toc_rpr))
 
     return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<w:styles xmlns:w="%s">%s%s</w:styles>' % (W, docdef, "".join(styles)))
@@ -258,25 +275,19 @@ def build_document(spec):
     pagebreak = ('<w:p><w:r><w:br w:type="page"/></w:r></w:p>')
 
     toc = spec["toc"]
-    # 目录＝真正的 TOC 域（真实文档如此），其【缓存结果】为按规范文档结构写好的条目：
-    # 每条目段落上【直接】写制表位（左 840/1050/1260 + 右 8664 点线，一级只左制表位），
-    # 编号用半角 (一)/1.，故打开即正确显示"编号+制表符+标题+点线+页码"；右键更新域后
-    # Word 按大纲级别重建（本文正文标题带 outlineLvl）。取自规范文档 word/document.xml。
-    LEFT_TAB = {1: 840, 2: 1050, 3: 1260}
-    RIGHT_TAB = 8664   # 41.26 字符 ≈ 正文宽度右边界（规范文档实测值）
-
+    # 目录＝真正的 TOC 域（真实文档如此），其【缓存结果】为写好的条目。制表位【继承自
+    # TOC1/2/3 样式】（左 1280/1600/1920 + 右 13203 点线，取自规范文档 styles.xml），故条目
+    # 段落自身不再写直接制表位；编号用半角 (一)/1.。打开即正确显示"编号+制表符+标题+
+    # 点线+页码"；右键更新域后 Word 按大纲级别（本文正文标题带 outlineLvl）重建。
     def toc_entry(level, number, title, page, is_last=False):
-        tabs = '<w:tab w:val="left" w:pos="%d"/>' % LEFT_TAB[level]
-        if level != 1:   # 一级目录规范文档只有左制表位（无页码点线右制表位）
-            tabs += '<w:tab w:val="right" w:leader="dot" w:pos="%d"/>' % RIGHT_TAB
         end_run = '<w:r><w:fldChar w:fldCharType="end"/></w:r>' if is_last else ''
-        return ('<w:p><w:pPr><w:pStyle w:val="TOC%d"/><w:tabs>%s</w:tabs></w:pPr>'
+        return ('<w:p><w:pPr><w:pStyle w:val="TOC%d"/></w:pPr>'
                 '<w:r><w:t xml:space="preserve">%s</w:t></w:r>'
                 '<w:r><w:tab/></w:r>'
                 '<w:r><w:t xml:space="preserve">%s</w:t></w:r>'
                 '<w:r><w:tab/></w:r>'
                 '<w:r><w:t xml:space="preserve">%s</w:t></w:r>%s</w:p>'
-                % (level, tabs, _esc(number), _esc(title), _esc(page), end_run))
+                % (level, _esc(number), _esc(title), _esc(page), end_run))
 
     toc_field = (
         '<w:p><w:pPr><w:pStyle w:val="CanonTocTitle"/></w:pPr>'

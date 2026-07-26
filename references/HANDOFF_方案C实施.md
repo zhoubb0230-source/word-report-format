@@ -35,16 +35,24 @@
   - **目录只认 leftChars**：删掉 `_patch_toc_styles` 写死的制表位（`_set_toc_tabs`/`_toc_text_width_twips` 及
     spec 的 `tab_left_chars_by_level`/`tab_leader` 一并移除）；Word `updateFields` 会自建制表位。测试
     `TestTocTabStops`→`TestTocStyleLeftCharsOnly`。
-- 测试：**75 passing**（`pip install lxml` 后 `python3 -m unittest discover -s tests -p "test_*.py"`）。
+  - **检测接入 `resolve_cascade`**：`20_extract_structure.py` 改用 `resolve_cascade` 折编号层（**正确优先级**：
+    编号层压过样式、直接压过编号层），替代旧的"只兜 None"gap-fill——样式**也**设了同一缩进键时，编号层的
+    hanging 仍能 surface 进 `eff`（旧 gap-fill 会被样式值挡掉而漏看）。测试
+    `test_extraction_surfaces_numbering_indent_over_style_indent`。
+  - **阶段3 坍缩不变量（甲法部分）**：`45_validate_output.py` 新增 check#5——对"拿到缩进修复的自动编号段"用
+    `cascade` provenance 重解析，**有效 hanging 仍由 `numbering` 供给＝克隆钳失败→硬失败退2**；样式层继承
+    hanging 属已知未修（Word-gated）→ 非致命 note，不误杀交付。测试 `TestCollapseInvariant`。
+- 测试：**79 passing**（`pip install lxml` 后 `python3 -m unittest discover -s tests -p "test_*.py"`）。
 - 流水线：`05→10→20→(27)→30→40→45→50→59`，唯一依赖 lxml，判定阈值全部来自 `spec/format_spec.json`。
 - 17 项实测问题的分诊/进度在 `HANDOFF_格式化架构讨论.md` §12。已落 #1-#4/#6/#8/#9/#10/#15/#5 +
   #12/#14 的"直接 hanging"部分，**+ 甲法落地后 #12/#14 的"编号层继承 hanging"这一半 + #17**（均待 Word 实测）。
   **搁置/留给方案C**：#11（内容层插 `\t`）、#7（提取层标 cell 行号）、#13/#16、#12/#14 的"**样式层**继承 hanging"
   这一半（非编号，需全角色样式注入）。
-- **下一步（阶段2 剩余 + 阶段3，需 §5 阶段0 的 Word 人肉验收，沙箱验不了渲染，见 §1）**：把
-  `resolve_cascade` 接进 20 的判定路径；把 `_patch_toc_styles` 推广成**全角色** canonical 样式注入 + 指派 +
-  清直接覆盖，删掉**非编号情形**的绝对伴随值 hack（§2.2）；阶段3 在 `45` 加坍缩不变量断言（用 `cascade.py`
-  的 provenance）。
+- **下一步（阶段2 唯一剩余大块，Word-gated，需 §5 阶段0 的 Word 人肉验收，沙箱验不了渲染，见 §1）**：把
+  `_patch_toc_styles` 推广成**全角色** canonical 样式注入 + 指派（`pStyle`）+ 清直接覆盖，并删掉**非编号情形**
+  的绝对伴随值 hack（§2.2）。此块落地后：① `45` 的 check#5 可从"只查编号层泄漏"升级成"任一 canonical 属性
+  仍由 `direct`/`numbering`/非规范 `style` 供给即硬失败"（全坍缩不变量，用 `cascade` provenance 已就绪）；
+  ② 溶解 #12/#14 的"样式层继承 hanging"这半、#1(0.85cm)。**别在 Word 验收前删非编号伴随值 hack**（陷阱 #10）。
 
 ---
 

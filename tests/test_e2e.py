@@ -394,6 +394,53 @@ class TestLibreOfficeHeadingIndentPipeline(unittest.TestCase):
         cind = clone.find(qn("w:lvl") + "/" + qn("w:pPr") + "/" + qn("w:ind"))
         self.assertIsNone(cind.get(qn("w:hanging")))
 
+    def test_extraction_surfaces_numbering_indent_over_style_indent(self):
+        """检测接入 resolve_cascade（关键：竞争同一个键）：标题样式自身设了 left=200，
+        编号层同样设了 left=420（+hanging=420）。正确优先级下编号层压过样式 →
+        eff.left=420；旧 gap-fill 只兜 None，样式的 left=200 非 None 就把编号层的 left
+        挡掉、eff.left 停在 200，从而漏看真实缩进（方案C §2.3）。断言 eff.left=420 才
+        证明编号层被折进有效值、且压过了样式。"""
+        import zipfile
+        styles = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>'
+            '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/>'
+            '<w:basedOn w:val="Normal"/>'
+            # 样式自身带 left=200（与编号层的 left 竞争同一个键）
+            '<w:pPr><w:outlineLvl w:val="0"/><w:ind w:left="200"/></w:pPr></w:style>'
+            '</w:styles>')
+        src = os.path.join(self.tmp, "lo_style_indent.docx")
+        doc = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>'
+            '<w:p><w:pPr><w:pStyle w:val="Heading1"/>'
+            '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>'
+            '<w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="32"/></w:rPr>'
+            '<w:t xml:space="preserve">概述</w:t></w:r></w:p>'
+            '<w:p><w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="32"/></w:rPr>'
+            '<w:t xml:space="preserve">正文内容。</w:t></w:r></w:p>'
+            '</w:body></w:document>')
+        with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", _CT_LO)
+            z.writestr("_rels/.rels", helpers.ROOT_RELS)
+            z.writestr("word/_rels/document.xml.rels", _DRELS_LO)
+            z.writestr("word/document.xml", doc)
+            z.writestr("word/styles.xml", styles)
+            z.writestr("word/numbering.xml", _NUM_LO)   # abstractNum 0: left=420 hanging=420
+
+        base = os.path.join(self.tmp, "wbse")
+        wd = run(self._script("05_new_workdir.py"), base)["workdir"]
+        run(self._script("10_prepare_input.py"), src, wd)
+        run(self._script("20_extract_structure.py"), wd)
+        with open(os.path.join(wd, "structure.json"), encoding="utf-8") as f:
+            recs = json.load(f)["records"]
+        heading = recs[0]
+        self.assertTrue(heading["auto_num"])
+        # 编号层压过样式：竞争键 left = 420（非样式的 200）；hanging 也 surface
+        self.assertEqual(heading["eff"]["left"], 420)
+        self.assertEqual(heading["eff"]["hanging"], 420)
+
     def test_shared_abstractnum_not_mutated(self):
         """两个共享 numId=1 的标题都被钳：都改指同一新 numId，原 abstractNum 0 不变。"""
         from lxml import etree
@@ -417,6 +464,91 @@ class TestLibreOfficeHeadingIndentPipeline(unittest.TestCase):
         self.assertEqual(ind0.get(qn("w:hanging")), "420")
         # 只新增了一条 abstractNum（克隆一次）：共 2 条
         self.assertEqual(len(num_root.findall(qn("w:abstractNum"))), 2)
+
+
+@unittest.skipUnless(HAVE_LXML, "lxml not installed")
+class TestCollapseInvariant(unittest.TestCase):
+    """45 的方案C 甲法坍缩不变量：拿到缩进修复的自动编号段，有效 hanging 不得仍由
+    编号层供给。用 provenance 区分致命泄漏（numbering）与非致命提示（style）。"""
+
+    W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="wrf_ci_")
+        self.mod = helpers.load_script("45_validate_output.py")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _pkg(self, name, styles, numbering):
+        import zipfile
+        doc = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<w:document xmlns:w="%s"><w:body>'
+            '<w:p><w:pPr><w:pStyle w:val="Heading1"/>'
+            '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>'
+            '<w:r><w:t xml:space="preserve">概述</w:t></w:r></w:p>'
+            '<w:p><w:r><w:t xml:space="preserve">正文。</w:t></w:r></w:p>'
+            '</w:body></w:document>' % self.W)
+        path = os.path.join(self.tmp, name)
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", _CT_LO)
+            z.writestr("_rels/.rels", helpers.ROOT_RELS)
+            z.writestr("word/_rels/document.xml.rels", _DRELS_LO)
+            z.writestr("word/document.xml", doc)
+            z.writestr("word/styles.xml", styles)
+            z.writestr("word/numbering.xml", numbering)
+        return path
+
+    _STYLES_MIN = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>'
+        '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/>'
+        '<w:pPr><w:outlineLvl w:val="0"/></w:pPr></w:style></w:styles>')
+
+    def _num(self, lvl_ind):
+        return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<w:numbering xmlns:w="%s">'
+                '<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/>'
+                '<w:numFmt w:val="decimal"/><w:lvlText w:val="%%1、"/>'
+                '<w:pPr><w:ind %s/></w:pPr></w:lvl></w:abstractNum>'
+                '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>'
+                % (self.W, lvl_ind))
+
+    def _leaks(self, path):
+        import zipfile
+        with zipfile.ZipFile(path) as zf:
+            return self.mod._check_numbering_clamp(zf, [0])
+
+    def test_numbering_hanging_is_a_leak(self):
+        # 编号层仍有 hanging，段落 numPr 仍指它 → 有效 hanging 由 numbering 供给 = 致命泄漏
+        path = self._pkg("leak.docx", self._STYLES_MIN, self._num('w:left="420" w:hanging="420"'))
+        leaks, notes = self._leaks(path)
+        self.assertEqual(len(leaks), 1)
+        self.assertEqual(leaks[0]["owner"], "numbering")
+        self.assertEqual(leaks[0]["key"], "hanging")
+
+    def test_clamped_numbering_no_leak(self):
+        # 编号层已中和（无 hanging，left=0）→ 无泄漏
+        path = self._pkg("ok.docx", self._STYLES_MIN, self._num('w:left="0" w:leftChars="0"'))
+        leaks, notes = self._leaks(path)
+        self.assertEqual(leaks, [])
+        self.assertEqual(notes, [])
+
+    def test_style_hanging_is_note_not_leak(self):
+        # hanging 来自【样式】而非编号层 → 非致命 note（已知未修，不阻断交付）
+        styles = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<w:styles xmlns:w="%s">'
+            '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>'
+            '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/>'
+            '<w:pPr><w:outlineLvl w:val="0"/><w:ind w:hanging="300"/></w:pPr></w:style></w:styles>' % self.W)
+        path = self._pkg("note.docx", styles, self._num('w:left="0" w:leftChars="0"'))
+        leaks, notes = self._leaks(path)
+        self.assertEqual(leaks, [])
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0]["owner"], "style")
 
 
 if __name__ == "__main__":

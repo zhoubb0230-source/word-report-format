@@ -15,8 +15,9 @@
      不是 0.74cm/0.85cm 之类。这是严格-spec §2.2 的关键判据（canonical 只写字符单位、无绝对伴随值）。
   3. **自动编号标题**（一~四级都自动编号："一、/（一）/1./（1）"）：首行是 2 字符缩进、不是 -0.74cm
      悬挂缩进——验证甲法克隆钳。编号后的制表位位置留待用户确认（当前不设 defaultTabStop）。
-  4. **目录**："目录"二字为正文样式（仿宋/三号/居中）；目录为真正的 TOC 域，右键更新域生成条目。
-     （条目制表位/编号宽度的精确值取自规范文档 XML，待定。）
+  4. **目录**：为真正的 TOC 域，打开即显示正确缓存条目（编号+制表符+标题+点线+页码）——制表位、
+     半角编号、右点线位置(8664)全部照规范文档 XML；点线应在标题与页码之间、页码右对齐不换行。
+     （一级目录只有左制表位、无页码点线，与规范文档一致。）
   5. 封面各要素：方正黑体_GBK、题目居中、题目下要素两端对齐+首行缩进2字符。
   6. **图/表标题自动编号**："图1/表1"应为一个整体（不能拆选"图""1"），编号后是空格不是制表位。
   7. **文档网格**：只指定行网格（行距 15.6 磅），与规范文档一致——封面要素仍设 2 倍行距。
@@ -162,27 +163,16 @@ def build_styles(spec):
         _spacing(line_twips) + '<w:jc w:val="center"/>' + _ind(no_indent=True),
         _rpr(b_toc["east_asia"], b_toc["size_hp"], western)))
 
-    # 目录 1/2/3（用标准 toc 样式名，Word 刷新目录时按 outline 级别套用）。
-    # 目录条目版式＝自动编号 + 制表符 + 标题 + 点线号 + 页码（用户对照规范文档）：
-    #   * 左缩进 leftChars 一/二/三 = 0/200/400（0/2/4 字符）。
-    #   * 标题起点【左制表位】一/二/三 = 4/5/6 字符（按文档字符单位 210 twips 换算 840/1050/1260）。
-    #   * 页码列【右制表位带点线号】= 41.26 字符 = 正文宽度右边界 8674 twips。
-    # 字符单位按文档默认字号（五号 21 半点＝210 twips/字符），与 leftChars 的渲染一致。
-    CHAR = 210  # 1 字符 = 五号 10.5pt = 210 twips（文档默认字符单位）
-    RIGHT_TAB = 8674  # 41.26 字符 ≈ 正文宽度右边界（A4：11906 − 1616×2）
+    # 目录 1/2/3（标准 toc 样式名）。制表位【不写进样式】——规范文档里 Word 是把制表位
+    # 直接写在每条【目录条目段落】上（见 build_document 的 TOC 域缓存条目），样式只钉
+    # 字体/字号/左缩进。目录不套西文（陷阱#7）。
     toc = spec["toc"]
     by_level = toc.get("indent_chars_by_level", {})
-    left_tab_chars = {"1": 4, "2": 5, "3": 6}
     for lvl in ("1", "2", "3"):
-        tabs = ('<w:tabs>'
-                '<w:tab w:val="left" w:pos="%d"/>'
-                '<w:tab w:val="right" w:leader="dot" w:pos="%d"/>'
-                '</w:tabs>'
-                % (left_tab_chars[lvl] * CHAR, RIGHT_TAB))
         styles.append(_style(
             "TOC%s" % lvl, "toc %s" % lvl,
-            tabs + _ind(left_chars=by_level.get(lvl, 0)),
-            _rpr(toc["east_asia"], toc["size_hp"])))   # 目录不套西文（陷阱#7）
+            _ind(left_chars=by_level.get(lvl, 0)),
+            _rpr(toc["east_asia"], toc["size_hp"])))
 
     return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<w:styles xmlns:w="%s">%s%s</w:styles>' % (W, docdef, "".join(styles)))
@@ -205,11 +195,13 @@ def build_numbering():
       * abstractNum 1 / numId 2 —— 图标题：图%%1，decimal，suff=tab（编号后制表符）。
       * abstractNum 2 / numId 3 —— 表标题：表%%1，decimal，suff=tab。
     图/表标题自动编号后"图1"是一个整体（不能拆选），序号后有制表符。"""
+    # 编号用【半角括号 (一)】而非全角（一）——规范文档如此；全角括号更宽，会越过目录左
+    # 制表位、把点线挤到编号与标题之间（用户 v4 实测的乱象根因）。
     headings = "".join([
         _lvl(0, "chineseCounting", "%1、"),
-        _lvl(1, "chineseCounting", "（%2）"),
+        _lvl(1, "chineseCounting", "(%2)"),
         _lvl(2, "decimal", "%3."),
-        _lvl(3, "decimal", "（%4）"),
+        _lvl(3, "decimal", "(%4)"),
     ])
     # 图/表标题：序号后要【制表符】（用户 Word 验收订正——用默认 suff=tab，不写 space）
     figure = _lvl(0, "decimal", "图%1")
@@ -255,6 +247,8 @@ def build_document(spec):
             '<w:pgSz w:w="11906" w:h="16838"/>'
             '<w:pgMar w:top="%d" w:right="%d" w:bottom="%d" w:left="%d" '
             'w:header="%d" w:footer="%d" w:gutter="0"/>'
+            '<w:pgNumType w:start="1"/>'
+            '<w:cols w:space="720"/>'
             '<w:docGrid w:type="lines" w:linePitch="312"/>'
             '</w:sectPr>'
             % (pg["margin_top_twips"], pg["margin_right_twips"],
@@ -264,16 +258,35 @@ def build_document(spec):
     pagebreak = ('<w:p><w:r><w:br w:type="page"/></w:r></w:p>')
 
     toc = spec["toc"]
-    # 目录＝真正的 TOC 域（真实文档如此，更新域后仍须正确）。"目录"二字用正文样式居中。
-    # 注：目录条目的制表位/编号宽度精确值取自规范文档 XML（待用户提供），此处先保留域结构。
+    # 目录＝真正的 TOC 域（真实文档如此），其【缓存结果】为按规范文档结构写好的条目：
+    # 每条目段落上【直接】写制表位（左 840/1050/1260 + 右 8664 点线，一级只左制表位），
+    # 编号用半角 (一)/1.，故打开即正确显示"编号+制表符+标题+点线+页码"；右键更新域后
+    # Word 按大纲级别重建（本文正文标题带 outlineLvl）。取自规范文档 word/document.xml。
+    LEFT_TAB = {1: 840, 2: 1050, 3: 1260}
+    RIGHT_TAB = 8664   # 41.26 字符 ≈ 正文宽度右边界（规范文档实测值）
+
+    def toc_entry(level, number, title, page, is_last=False):
+        tabs = '<w:tab w:val="left" w:pos="%d"/>' % LEFT_TAB[level]
+        if level != 1:   # 一级目录规范文档只有左制表位（无页码点线右制表位）
+            tabs += '<w:tab w:val="right" w:leader="dot" w:pos="%d"/>' % RIGHT_TAB
+        end_run = '<w:r><w:fldChar w:fldCharType="end"/></w:r>' if is_last else ''
+        return ('<w:p><w:pPr><w:pStyle w:val="TOC%d"/><w:tabs>%s</w:tabs></w:pPr>'
+                '<w:r><w:t xml:space="preserve">%s</w:t></w:r>'
+                '<w:r><w:tab/></w:r>'
+                '<w:r><w:t xml:space="preserve">%s</w:t></w:r>'
+                '<w:r><w:tab/></w:r>'
+                '<w:r><w:t xml:space="preserve">%s</w:t></w:r>%s</w:p>'
+                % (level, tabs, _esc(number), _esc(title), _esc(page), end_run))
+
     toc_field = (
         '<w:p><w:pPr><w:pStyle w:val="CanonTocTitle"/></w:pPr>'
-        '<w:r><w:t>目录</w:t></w:r></w:p>'
-        '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+        '<w:r><w:t>目录</w:t></w:r>'
+        '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
         '<w:r><w:instrText xml:space="preserve"> TOC \\o &quot;1-3&quot; \\h \\z \\u </w:instrText></w:r>'
-        '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
-        '<w:r><w:t>右键→更新域 生成目录。</w:t></w:r>'
-        '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>')
+        '<w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>'
+        + toc_entry(1, "一、", "概述", "3")
+        + toc_entry(2, "(一)", "研究方法", "3")
+        + toc_entry(3, "1.", "数据来源", "3", is_last=True))
 
     body = []
     body.append(_label("== 封面 == 每段标签给出应符合的规范；用 Word 逐段核对字体/字号/居中/缩进"))
@@ -398,13 +411,31 @@ DOC_RELS = (
 SETTINGS = (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
     '<w:settings xmlns:w="%s">'
-    # 默认制表位 2 字符 = 420 twips（用户订正：目录/正文默认制表位 2 字符）。
-    '<w:defaultTabStop w:val="420"/>'
-    # 绘图网格：垂直 156=0.5行（0.5×行网格312，已验正确）；水平 105=0.5字符（0.5×五号
-    # 字符宽210，配合 Normal=五号 后单位为 210）。schema 顺序：defaultTabStop→drawingGrid*→updateFields。
-    '<w:drawingGridHorizontalSpacing w:val="105"/>'
-    '<w:drawingGridVerticalSpacing w:val="156"/>'
-    '<w:updateFields w:val="true"/>'
+    '<w:zoom w:percent="100"/>'
+    '<w:bordersDoNotSurroundHeader/><w:bordersDoNotSurroundFooter/>'
+    '<w:defaultTabStop w:val="420"/>'          # 默认制表位 2 字符
+    '<w:drawingGridHorizontalSpacing w:val="105"/>'   # 0.5 字符（配合 compat 后单位）
+    '<w:drawingGridVerticalSpacing w:val="156"/>'     # 0.5 行
+    '<w:displayHorizontalDrawingGridEvery w:val="2"/>'
+    '<w:displayVerticalDrawingGridEvery w:val="2"/>'
+    '<w:noPunctuationKerning/>'
+    '<w:characterSpacingControl w:val="compressPunctuation"/>'
+    # ▼ 关键：compat 块（尤其 useFELayout + compatibilityMode=15）让 Word 尊重行网格
+    #   linePitch=312 → 15.6 磅/41 行。缺它时 Word 用旧版式把行距顶到 21.75 磅/29 行。
+    #   取自规范文档 settings.xml。
+    '<w:compat>'
+    '<w:spaceForUL/><w:balanceSingleByteDoubleByteWidth/><w:doNotLeaveBackslashAlone/>'
+    '<w:ulTrailSpace/><w:doNotExpandShiftReturn/><w:adjustLineHeightInTable/><w:useFELayout/>'
+    '<w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/>'
+    '<w:compatSetting w:name="overrideTableStyleFontSizeAndJustification" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/>'
+    '<w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/>'
+    '<w:compatSetting w:name="doNotFlipMirrorIndents" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/>'
+    '<w:compatSetting w:name="differentiateMultirowTableHeaders" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/>'
+    '</w:compat>'
+    '<w:themeFontLang w:val="en-US" w:eastAsia="zh-CN"/>'
+    '<w:decimalSymbol w:val="."/><w:listSeparator w:val=","/>'
+    # 不设 updateFields：目录缓存条目已是正确版式，避免打开时提示更新域后按（我们暂无
+    # 规范文档 toc 样式的）重建逻辑覆盖掉正确缓存。页码/目录如需刷新可手动 F9。
     '</w:settings>' % W)
 
 

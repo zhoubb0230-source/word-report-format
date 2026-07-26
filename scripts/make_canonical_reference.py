@@ -413,7 +413,9 @@ SETTINGS = (
     '<w:settings xmlns:w="%s">'
     '<w:zoom w:percent="100"/>'
     '<w:bordersDoNotSurroundHeader/><w:bordersDoNotSurroundFooter/>'
-    '<w:defaultTabStop w:val="420"/>'          # 默认制表位 2 字符
+    '<w:proofState w:spelling="clean" w:grammar="clean"/>'
+    # defaultTabStop=640：取自用户手动修好目录后的 settings.xml（原 420 目录不对）。
+    '<w:defaultTabStop w:val="640"/>'
     '<w:drawingGridHorizontalSpacing w:val="105"/>'   # 0.5 字符（配合 compat 后单位）
     '<w:drawingGridVerticalSpacing w:val="156"/>'     # 0.5 行
     '<w:displayHorizontalDrawingGridEvery w:val="2"/>'
@@ -431,6 +433,7 @@ SETTINGS = (
     '<w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/>'
     '<w:compatSetting w:name="doNotFlipMirrorIndents" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/>'
     '<w:compatSetting w:name="differentiateMultirowTableHeaders" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/>'
+    '<w:compatSetting w:name="useWord2013TrackBottomHyphenation" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/>'
     '</w:compat>'
     '<w:themeFontLang w:val="en-US" w:eastAsia="zh-CN"/>'
     '<w:decimalSymbol w:val="."/><w:listSeparator w:val=","/>'

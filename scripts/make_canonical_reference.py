@@ -15,9 +15,8 @@
      不是 0.74cm/0.85cm 之类。这是严格-spec §2.2 的关键判据（canonical 只写字符单位、无绝对伴随值）。
   3. **自动编号标题**（一~四级都自动编号："一、/（一）/1./（1）"）：首行是 2 字符缩进、不是 -0.74cm
      悬挂缩进——验证甲法克隆钳。编号后的制表位位置留待用户确认（当前不设 defaultTabStop）。
-  4. **目录**："目录"二字为正文样式（仿宋/三号/居中）；条目为静态（直接制表位）＝自动编号+制表符+
-     标题+点线+页码，看点线是否在标题与页码之间、页码是否右对齐不换行。（TOC 域刷新不继承样式制表位，
-     故用静态直接制表位，与你手动设置一致。）
+  4. **目录**："目录"二字为正文样式（仿宋/三号/居中）；目录为真正的 TOC 域，右键更新域生成条目。
+     （条目制表位/编号宽度的精确值取自规范文档 XML，待定。）
   5. 封面各要素：方正黑体_GBK、题目居中、题目下要素两端对齐+首行缩进2字符。
   6. **图/表标题自动编号**："图1/表1"应为一个整体（不能拆选"图""1"），编号后是空格不是制表位。
   7. **文档网格**：只指定行网格（行距 15.6 磅），与规范文档一致——封面要素仍设 2 倍行距。
@@ -265,32 +264,16 @@ def build_document(spec):
     pagebreak = ('<w:p><w:r><w:br w:type="page"/></w:r></w:p>')
 
     toc = spec["toc"]
-    # 目录：改用【静态条目 + 直接制表位】而非 TOC 域。原因：Word 刷新 TOC 域时生成的
-    # 条目【不继承目录样式里的 w:tabs】（所以你手动在段落里设直接制表位才正常）——故把
-    # 4/5/6 字符左制表位 + 41.26 字符点线右制表位直接写到每条目段落的 pPr 上，渲染即与
-    # 你手动设置一致：自动编号 + 制表符 + 标题 + 点线 + 页码。"目录"二字用正文样式居中。
-    CHAR = 210
-    RIGHT_TAB = 8674
-    left_tab_chars = {1: 4, 2: 5, 3: 6}
-
-    def toc_entry(level, number, title, page):
-        tabs = ('<w:tabs><w:tab w:val="left" w:pos="%d"/>'
-                '<w:tab w:val="right" w:leader="dot" w:pos="%d"/></w:tabs>'
-                % (left_tab_chars[level] * CHAR, RIGHT_TAB))
-        return ('<w:p><w:pPr><w:pStyle w:val="TOC%d"/>%s</w:pPr>'
-                '<w:r><w:t xml:space="preserve">%s</w:t></w:r>'
-                '<w:r><w:tab/></w:r>'
-                '<w:r><w:t xml:space="preserve">%s</w:t></w:r>'
-                '<w:r><w:tab/></w:r>'
-                '<w:r><w:t xml:space="preserve">%s</w:t></w:r></w:p>'
-                % (level, tabs, _esc(number), _esc(title), _esc(page)))
-
+    # 目录＝真正的 TOC 域（真实文档如此，更新域后仍须正确）。"目录"二字用正文样式居中。
+    # 注：目录条目的制表位/编号宽度精确值取自规范文档 XML（待用户提供），此处先保留域结构。
     toc_field = (
         '<w:p><w:pPr><w:pStyle w:val="CanonTocTitle"/></w:pPr>'
         '<w:r><w:t>目录</w:t></w:r></w:p>'
-        + toc_entry(1, "一、", "概述", "1")
-        + toc_entry(2, "（一）", "研究方法", "2")
-        + toc_entry(3, "1.", "数据来源", "3"))
+        '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+        '<w:r><w:instrText xml:space="preserve"> TOC \\o &quot;1-3&quot; \\h \\z \\u </w:instrText></w:r>'
+        '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+        '<w:r><w:t>右键→更新域 生成目录。</w:t></w:r>'
+        '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>')
 
     body = []
     body.append(_label("== 封面 == 每段标签给出应符合的规范；用 Word 逐段核对字体/字号/居中/缩进"))

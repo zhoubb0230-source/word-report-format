@@ -104,19 +104,19 @@ def build_styles(spec):
         '<w:jc w:val="%s"/>' % t.get("jc", "center"),
         _rpr(t["east_asia"], t["size_hp"], western if t.get("enforce_western") else None)))
 
-    # 封面密级/文本编号行
+    # 封面密级/文本编号行（数字/字母用西文字体——用户 Word 验收要求）
     cc = spec["cover_classification"]
     styles.append(_style("CanonCoverClass", "封面密级编号",
                          '<w:jc w:val="center"/>',
-                         _rpr(cc["east_asia"], cc["size_hp"])))
+                         _rpr(cc["east_asia"], cc["size_hp"], western)))
 
-    # 封面题目下要素（field）：2倍行距、两端对齐、首行缩进2字符
+    # 封面题目下要素（field）：2倍行距、两端对齐、首行缩进2字符；数字/字母用西文字体
     cf = spec["cover_field"]
     styles.append(_style(
         "CanonCoverField", "封面要素",
         _spacing(cf.get("line_twips"), cf.get("line_rule"))
         + '<w:jc w:val="both"/>' + _ind(first_line_chars=200),
-        _rpr(cf["east_asia"], cf["size_hp"])))
+        _rpr(cf["east_asia"], cf["size_hp"], western)))
 
     # 一~四级标题
     for lvl in ("1", "2", "3", "4"):
@@ -157,13 +157,26 @@ def build_styles(spec):
         _spacing(line_twips) + '<w:jc w:val="center"/>' + _ind(no_indent=True),
         _rpr(b_toc["east_asia"], b_toc["size_hp"], western)))
 
-    # 目录 1/2/3（用标准 toc 样式名，Word 刷新目录时按 outline 级别套用）
+    # 目录 1/2/3（用标准 toc 样式名，Word 刷新目录时按 outline 级别套用）。
+    # 目录条目版式＝自动编号 + 制表符 + 标题 + 点线号 + 页码（用户对照规范文档）：
+    #   * 左缩进 leftChars 一/二/三 = 0/200/400（0/2/4 字符）。
+    #   * 标题起点【左制表位】一/二/三 = 4/5/6 字符（按文档字符单位 210 twips 换算 840/1050/1260）。
+    #   * 页码列【右制表位带点线号】= 41.26 字符 = 正文宽度右边界 8674 twips。
+    # 字符单位按文档默认字号（五号 21 半点＝210 twips/字符），与 leftChars 的渲染一致。
+    CHAR = 210  # 1 字符 = 五号 10.5pt = 210 twips（文档默认字符单位）
+    RIGHT_TAB = 8674  # 41.26 字符 ≈ 正文宽度右边界（A4：11906 − 1616×2）
     toc = spec["toc"]
     by_level = toc.get("indent_chars_by_level", {})
+    left_tab_chars = {"1": 4, "2": 5, "3": 6}
     for lvl in ("1", "2", "3"):
+        tabs = ('<w:tabs>'
+                '<w:tab w:val="left" w:pos="%d"/>'
+                '<w:tab w:val="right" w:leader="dot" w:pos="%d"/>'
+                '</w:tabs>'
+                % (left_tab_chars[lvl] * CHAR, RIGHT_TAB))
         styles.append(_style(
             "TOC%s" % lvl, "toc %s" % lvl,
-            _ind(left_chars=by_level.get(lvl, 0)),
+            tabs + _ind(left_chars=by_level.get(lvl, 0)),
             _rpr(toc["east_asia"], toc["size_hp"])))   # 目录不套西文（陷阱#7）
 
     return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -183,18 +196,19 @@ def _lvl(ilvl, num_fmt, lvl_text, suff=None):
 
 def build_numbering():
     """三条 canonical 编号定义（级别缩进全部中和，甲法目标形态）：
-      * abstractNum 0 / numId 1 —— 多级标题：一、/（一）/1./（1），suff=tab（标题编号后有制表位）。
-      * abstractNum 1 / numId 2 —— 图标题：图%%1，decimal，suff=space（编号后无制表位）。
-      * abstractNum 2 / numId 3 —— 表标题：表%%1，decimal，suff=space。
-    图/表标题自动编号后"图1"是一个整体（不能拆选），且编号后是空格不是制表位。"""
+      * abstractNum 0 / numId 1 —— 多级标题：一、/（一）/1./（1），suff=tab（编号后制表符）。
+      * abstractNum 1 / numId 2 —— 图标题：图%%1，decimal，suff=tab（编号后制表符）。
+      * abstractNum 2 / numId 3 —— 表标题：表%%1，decimal，suff=tab。
+    图/表标题自动编号后"图1"是一个整体（不能拆选），序号后有制表符。"""
     headings = "".join([
         _lvl(0, "chineseCounting", "%1、"),
         _lvl(1, "chineseCounting", "（%2）"),
         _lvl(2, "decimal", "%3."),
         _lvl(3, "decimal", "（%4）"),
     ])
-    figure = _lvl(0, "decimal", "图%1", suff="space")
-    table = _lvl(0, "decimal", "表%1", suff="space")
+    # 图/表标题：序号后要【制表符】（用户 Word 验收订正——用默认 suff=tab，不写 space）
+    figure = _lvl(0, "decimal", "图%1")
+    table = _lvl(0, "decimal", "表%1")
     return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<w:numbering xmlns:w="%s">'
             '<w:abstractNum w:abstractNumId="0">%s</w:abstractNum>'
@@ -309,8 +323,14 @@ def build_document(spec):
                 '<w:top w:w="0" w:type="dxa"/><w:left w:w="108" w:type="dxa"/>'
                 '<w:bottom w:w="0" w:type="dxa"/><w:right w:w="108" w:type="dxa"/>'
                 '</w:tblCellMar>')
+    # 单元格垂直居中（vAlign=center）；tcW 后写。tcPr 是单元格属性，与 tblCellMar（表级
+    # 默认边距）是两回事——用户订正：表格左缩进(tblInd)要 0，别跟单元格边距搞混。
+    def cell(text):
+        return ('<w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/>'
+                '<w:vAlign w:val="center"/></w:tcPr>' + _p("CanonTableBody", text) + '</w:tc>')
     body.append(
         '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>'
+        '<w:tblInd w:w="0" w:type="dxa"/>'   # 表格左缩进 0（不是 0.19cm）
         '<w:tblBorders>'
         '<w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
         '<w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
@@ -319,12 +339,7 @@ def build_document(spec):
         '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
         '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
         '</w:tblBorders>' + cell_mar + '</w:tblPr>'
-        '<w:tr>'
-        '<w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>'
-        + _p("CanonTableBody", "指标") + '</w:tc>'
-        '<w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>'
-        + _p("CanonTableBody", "数值示例 123") + '</w:tc>'
-        '</w:tr></w:tbl>')
+        '<w:tr>' + cell("指标") + cell("数值示例 123") + '</w:tr></w:tbl>')
 
     return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<w:document xmlns:w="%s" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
@@ -377,9 +392,12 @@ DOC_RELS = (
 SETTINGS = (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
     '<w:settings xmlns:w="%s">'
-    # 绘图网格：水平 0.86 字符=105 twips、垂直 0.5 行=156 twips（=行网格 312 的一半）。
-    # schema 顺序：drawingGrid* 在 updateFields 之前。
-    '<w:drawingGridHorizontalSpacing w:val="105"/>'
+    # 默认制表位 2 字符 = 420 twips（用户订正：目录/正文默认制表位 2 字符）。
+    '<w:defaultTabStop w:val="420"/>'
+    # 绘图网格：水平/垂直均 156 twips。Word 的绘图网格显示单位≈值÷行网格 linePitch，
+    # 312 的一半 156 → 显示"0.5 字符 / 0.5 行"，与规范文档一致。schema 顺序：
+    # defaultTabStop → drawingGrid* → updateFields。
+    '<w:drawingGridHorizontalSpacing w:val="156"/>'
     '<w:drawingGridVerticalSpacing w:val="156"/>'
     '<w:updateFields w:val="true"/>'
     '</w:settings>' % W)

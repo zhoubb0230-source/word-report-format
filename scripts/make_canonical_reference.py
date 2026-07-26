@@ -13,9 +13,14 @@
   1. 每个角色的字体/字号/居中/行距是否与规范一致（每段前有【角色·规范】标签）。
   2. **首行缩进显示为"2 字符"而非厘米**——选中正文/标题段，看"段落→缩进→首行缩进 2 字符"，
      不是 0.74cm/0.85cm 之类。这是严格-spec §2.2 的关键判据（canonical 只写字符单位、无绝对伴随值）。
-  3. **自动编号标题**（"概述"那段带"一、"）：首行是 2 字符缩进、不是 -0.74cm 悬挂缩进——验证甲法克隆钳。
-  4. **目录页码不换行**：打开时选"是"更新域，目录按 toc 样式重建，看二/三级页码是否顶到右边界仍不换行。
+  3. **自动编号标题**（一~四级都自动编号："一、/（一）/1./（1）"）：首行是 2 字符缩进、不是 -0.74cm
+     悬挂缩进——验证甲法克隆钳。编号后的制表位位置留待用户确认（当前不设 defaultTabStop）。
+  4. **目录**："目录"二字为正文样式（仿宋/三号/居中、不进目录）；打开时选"是"更新域，目录按 toc
+     样式重建，看二/三级页码是否顶到右边界仍不换行。
   5. 封面各要素：方正黑体_GBK、题目居中、题目下要素两端对齐+首行缩进2字符。
+  6. **图/表标题自动编号**："图1/表1"应为一个整体（不能拆选"图""1"），编号后是空格不是制表位。
+  7. **文档网格**：只指定行网格（行距 15.6 磅），与规范文档一致——封面要素仍设 2 倍行距。
+  8. **表格默认单元格边距**：上0/左0.19cm/下0/右0.19cm。
 
 判据只来自 spec（红线）：本脚本不写死任何字体/字号/缩进，全部读 `spec/format_spec.json`。
 纯 stdlib（zipfile）+ 少量字符串拼装，不依赖 lxml，也不进判定流水线。
@@ -145,6 +150,13 @@ def build_styles(spec):
         + '<w:jc w:val="%s"/>' % cap.get("jc", "center") + _ind(no_indent=True),
         _rpr(cap["east_asia"], cap["size_hp"], western)))
 
+    # 目录标题"目录"二字：用正文字体字号但居中、无缩进（非标题，不进 TOC）
+    b_toc = spec["body"]
+    styles.append(_style(
+        "CanonTocTitle", "目录标题",
+        _spacing(line_twips) + '<w:jc w:val="center"/>' + _ind(no_indent=True),
+        _rpr(b_toc["east_asia"], b_toc["size_hp"], western)))
+
     # 目录 1/2/3（用标准 toc 样式名，Word 刷新目录时按 outline 级别套用）
     toc = spec["toc"]
     by_level = toc.get("indent_chars_by_level", {})
@@ -158,17 +170,40 @@ def build_styles(spec):
             '<w:styles xmlns:w="%s">%s%s</w:styles>' % (W, docdef, "".join(styles)))
 
 
+def _lvl(ilvl, num_fmt, lvl_text, suff=None):
+    """一个编号级别：缩进【已中和】（left=0、无 hanging）——甲法克隆钳后的目标形态；
+    段落自身写 firstLineChars=200（字符单位）负责首行缩进。suff 控编号后的分隔符
+    （默认 tab；图表标题用 space＝编号后无制表位）。"""
+    suff_el = ('<w:suff w:val="%s"/>' % suff) if suff else ""
+    return ('<w:lvl w:ilvl="%d"><w:start w:val="1"/>%s'
+            '<w:numFmt w:val="%s"/><w:lvlText w:val="%s"/><w:lvlJc w:val="left"/>'
+            '<w:pPr><w:ind w:left="0" w:leftChars="0"/></w:pPr></w:lvl>'
+            % (ilvl, suff_el, num_fmt, lvl_text))
+
+
 def build_numbering():
-    """一条 canonical 编号定义：级别缩进【已中和】（left=0、无 hanging）——就是甲法克隆
-    钳后的目标形态。自动编号标题指向它，段落自身写 firstLineChars=200（字符单位）。"""
+    """三条 canonical 编号定义（级别缩进全部中和，甲法目标形态）：
+      * abstractNum 0 / numId 1 —— 多级标题：一、/（一）/1./（1），suff=tab（标题编号后有制表位）。
+      * abstractNum 1 / numId 2 —— 图标题：图%%1，decimal，suff=space（编号后无制表位）。
+      * abstractNum 2 / numId 3 —— 表标题：表%%1，decimal，suff=space。
+    图/表标题自动编号后"图1"是一个整体（不能拆选），且编号后是空格不是制表位。"""
+    headings = "".join([
+        _lvl(0, "chineseCounting", "%1、"),
+        _lvl(1, "chineseCounting", "（%2）"),
+        _lvl(2, "decimal", "%3."),
+        _lvl(3, "decimal", "（%4）"),
+    ])
+    figure = _lvl(0, "decimal", "图%1", suff="space")
+    table = _lvl(0, "decimal", "表%1", suff="space")
     return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<w:numbering xmlns:w="%s">'
-            '<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0">'
-            '<w:start w:val="1"/><w:numFmt w:val="chineseCounting"/>'
-            '<w:lvlText w:val="%%1、"/><w:lvlJc w:val="left"/>'
-            '<w:pPr><w:ind w:left="0" w:leftChars="0"/></w:pPr></w:lvl></w:abstractNum>'
+            '<w:abstractNum w:abstractNumId="0">%s</w:abstractNum>'
+            '<w:abstractNum w:abstractNumId="1">%s</w:abstractNum>'
+            '<w:abstractNum w:abstractNumId="2">%s</w:abstractNum>'
             '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>'
-            '</w:numbering>' % W)
+            '<w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num>'
+            '<w:num w:numId="3"><w:abstractNumId w:val="2"/></w:num>'
+            '</w:numbering>' % (W, headings, figure, table))
 
 
 def _p(style_id, text, extra_ppr=""):
@@ -192,11 +227,16 @@ def build_document(spec):
         return d.get("source", "")
 
     pg = spec["page_setup"]
+    # 文档网格：只指定行网格（type=lines），行间距 15.6 磅 = 312 twips（每页约 41 行）。
+    # 与规范文档一致——有行网格时段落 snapToGrid（默认开），单倍/1.5/2 倍行距会贴到
+    # 网格线而看起来接近，故封面要素仍保留 2 倍行距设置以与规范文档一致。docGrid 须放
+    # 在 sectPr 末尾（schema 顺序），footerReference 须在 pgSz 之前。
     sect = ('<w:sectPr>'
+            '<w:footerReference w:type="default" r:id="rIdF"/>'
             '<w:pgSz w:w="11906" w:h="16838"/>'
             '<w:pgMar w:top="%d" w:right="%d" w:bottom="%d" w:left="%d" '
             'w:header="%d" w:footer="%d" w:gutter="0"/>'
-            '<w:footerReference w:type="default" r:id="rIdF"/>'
+            '<w:docGrid w:type="lines" w:linePitch="312"/>'
             '</w:sectPr>'
             % (pg["margin_top_twips"], pg["margin_right_twips"],
                pg["margin_bottom_twips"], pg["margin_left_twips"],
@@ -205,9 +245,10 @@ def build_document(spec):
     pagebreak = ('<w:p><w:r><w:br w:type="page"/></w:r></w:p>')
 
     toc = spec["toc"]
-    # 真正的 TOC 域：Word 打开时刷新，按 toc 样式重建条目——验证"只认 leftChars + 页码不换行"
+    # 真正的 TOC 域：Word 打开时刷新，按 toc 样式重建条目——验证"只认 leftChars + 页码不换行"。
+    # "目录"二字用正文样式（仿宋/三号/居中），非标题——否则会把自己也收进目录。
     toc_field = (
-        '<w:p><w:pPr><w:pStyle w:val="CanonH1"/></w:pPr>'
+        '<w:p><w:pPr><w:pStyle w:val="CanonTocTitle"/></w:pPr>'
         '<w:r><w:t>目录</w:t></w:r></w:p>'
         '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>'
         '<w:r><w:instrText xml:space="preserve"> TOC \\o &quot;1-3&quot; \\h \\z \\u </w:instrText></w:r>'
@@ -235,28 +276,39 @@ def build_document(spec):
     body.append(toc_field)
     body.append(pagebreak)
 
+    def numpr(ilvl, num_id):
+        return '<w:numPr><w:ilvl w:val="%d"/><w:numId w:val="%d"/></w:numPr>' % (ilvl, num_id)
+
     body.append(_label("== 正文 =="))
     body.append(_label("【一级标题·自动编号·%s】首行应为 2 字符缩进，不是 -0.74cm 悬挂缩进（甲法验证）"
                        % src("headings", "1")))
-    body.append(_p("CanonH1", "概述", extra_ppr='<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>'))
+    body.append(_p("CanonH1", "概述", extra_ppr=numpr(0, 1)))
     body.append(_label("【正文·%s】选中该段看首行缩进应为 2 字符而非厘米" % src("body")))
     body.append(_p("CanonBody",
                    "这是一段正文，用于确认仿宋三号、行距固定值 28 磅、首行缩进 2 字符，"
                    "并在 Word 的段落对话框里确认首行缩进显示为 2 字符而不是 0.74/0.85 厘米。"
                    "含数字 12345 与英文 ABC 应显示为 Times New Roman。"))
-    body.append(_label("【二级标题·%s】" % src("headings", "2")))
-    body.append(_p("CanonH2", "研究方法"))
+    body.append(_label("【二级标题·自动编号·%s】" % src("headings", "2")))
+    body.append(_p("CanonH2", "研究方法", extra_ppr=numpr(1, 1)))
     body.append(_p("CanonBody", "二级标题下的正文示例段落。"))
-    body.append(_label("【三级标题·%s】" % src("headings", "3")))
-    body.append(_p("CanonH3", "数据来源"))
+    body.append(_label("【三级标题·自动编号·%s】" % src("headings", "3")))
+    body.append(_p("CanonH3", "数据来源", extra_ppr=numpr(2, 1)))
     body.append(_p("CanonBody", "三级标题下的正文示例段落。"))
-    body.append(_label("【四级标题·%s】" % src("headings", "4")))
-    body.append(_p("CanonH4", "指标口径"))
+    body.append(_label("【四级标题·自动编号·%s】" % src("headings", "4")))
+    body.append(_p("CanonH4", "指标口径", extra_ppr=numpr(3, 1)))
     body.append(_p("CanonBody", "四级标题下的正文示例段落。"))
-    body.append(_label("【图表标题·%s】居中、无缩进" % src("caption_format")))
-    body.append(_p("CanonCaption", "图1 系统总体架构示意图"))
-    body.append(_label("【表格内容·%s】四号、行距 28 磅、无缩进（下方表格单元格）"
+    body.append(_label("【图标题·自动编号·%s】“图1”应为一个整体（不能拆选“图”“1”）、编号后无制表位"
+                       % src("caption_format")))
+    body.append(_p("CanonCaption", "系统总体架构示意图", extra_ppr=numpr(0, 2)))
+    body.append(_label("【表标题·自动编号】“表1”自动生成、编号后无制表位（下方表格）"))
+    body.append(_p("CanonCaption", "主要指标对照表", extra_ppr=numpr(0, 3)))
+    body.append(_label("【表格内容·%s】四号、行距 28 磅、无缩进；默认单元格边距 上0/左0.19cm/下0/右0.19cm"
                        % src("table_body")))
+    # 表格默认单元格边距：上0/下0/左右 108 twips(0.19cm)。tblCellMar 须在 tblBorders 之后。
+    cell_mar = ('<w:tblCellMar>'
+                '<w:top w:w="0" w:type="dxa"/><w:left w:w="108" w:type="dxa"/>'
+                '<w:bottom w:w="0" w:type="dxa"/><w:right w:w="108" w:type="dxa"/>'
+                '</w:tblCellMar>')
     body.append(
         '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>'
         '<w:tblBorders>'
@@ -266,7 +318,7 @@ def build_document(spec):
         '<w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
         '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
         '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
-        '</w:tblBorders></w:tblPr>'
+        '</w:tblBorders>' + cell_mar + '</w:tblPr>'
         '<w:tr>'
         '<w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>'
         + _p("CanonTableBody", "指标") + '</w:tc>'
@@ -324,7 +376,13 @@ DOC_RELS = (
 
 SETTINGS = (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-    '<w:settings xmlns:w="%s"><w:updateFields w:val="true"/></w:settings>' % W)
+    '<w:settings xmlns:w="%s">'
+    # 绘图网格：水平 0.86 字符=105 twips、垂直 0.5 行=156 twips（=行网格 312 的一半）。
+    # schema 顺序：drawingGrid* 在 updateFields 之前。
+    '<w:drawingGridHorizontalSpacing w:val="105"/>'
+    '<w:drawingGridVerticalSpacing w:val="156"/>'
+    '<w:updateFields w:val="true"/>'
+    '</w:settings>' % W)
 
 
 def build(out_path):

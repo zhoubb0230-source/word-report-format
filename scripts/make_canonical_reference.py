@@ -15,8 +15,9 @@
      不是 0.74cm/0.85cm 之类。这是严格-spec §2.2 的关键判据（canonical 只写字符单位、无绝对伴随值）。
   3. **自动编号标题**（一~四级都自动编号："一、/（一）/1./（1）"）：首行是 2 字符缩进、不是 -0.74cm
      悬挂缩进——验证甲法克隆钳。编号后的制表位位置留待用户确认（当前不设 defaultTabStop）。
-  4. **目录**："目录"二字为正文样式（仿宋/三号/居中、不进目录）；打开时选"是"更新域，目录按 toc
-     样式重建，看二/三级页码是否顶到右边界仍不换行。
+  4. **目录**："目录"二字为正文样式（仿宋/三号/居中）；条目为静态（直接制表位）＝自动编号+制表符+
+     标题+点线+页码，看点线是否在标题与页码之间、页码是否右对齐不换行。（TOC 域刷新不继承样式制表位，
+     故用静态直接制表位，与你手动设置一致。）
   5. 封面各要素：方正黑体_GBK、题目居中、题目下要素两端对齐+首行缩进2字符。
   6. **图/表标题自动编号**："图1/表1"应为一个整体（不能拆选"图""1"），编号后是空格不是制表位。
   7. **文档网格**：只指定行网格（行距 15.6 磅），与规范文档一致——封面要素仍设 2 倍行距。
@@ -94,8 +95,13 @@ def build_styles(spec):
               '<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" '
               'w:eastAsia="仿宋" w:cs="Times New Roman"/><w:sz w:val="21"/>'
               '<w:szCs w:val="21"/></w:rPr></w:rPrDefault></w:docDefaults>')
+    # Normal 显式给五号 rPr：Word 的【文档网格】按 Normal 字号算行网格间距，字号=五号
+    # (10.5pt) 时才尊重 15.6 磅/41 行；缺省或落到三号会被顶高到 21.75 磅/29 行（用户实测）。
     styles.append('<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
-                  '<w:name w:val="Normal"/></w:style>')
+                  '<w:name w:val="Normal"/><w:rPr>'
+                  '<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" '
+                  'w:eastAsia="仿宋" w:cs="Times New Roman"/>'
+                  '<w:sz w:val="21"/><w:szCs w:val="21"/></w:rPr></w:style>')
 
     # 题目
     t = spec["title"]
@@ -259,16 +265,32 @@ def build_document(spec):
     pagebreak = ('<w:p><w:r><w:br w:type="page"/></w:r></w:p>')
 
     toc = spec["toc"]
-    # 真正的 TOC 域：Word 打开时刷新，按 toc 样式重建条目——验证"只认 leftChars + 页码不换行"。
-    # "目录"二字用正文样式（仿宋/三号/居中），非标题——否则会把自己也收进目录。
+    # 目录：改用【静态条目 + 直接制表位】而非 TOC 域。原因：Word 刷新 TOC 域时生成的
+    # 条目【不继承目录样式里的 w:tabs】（所以你手动在段落里设直接制表位才正常）——故把
+    # 4/5/6 字符左制表位 + 41.26 字符点线右制表位直接写到每条目段落的 pPr 上，渲染即与
+    # 你手动设置一致：自动编号 + 制表符 + 标题 + 点线 + 页码。"目录"二字用正文样式居中。
+    CHAR = 210
+    RIGHT_TAB = 8674
+    left_tab_chars = {1: 4, 2: 5, 3: 6}
+
+    def toc_entry(level, number, title, page):
+        tabs = ('<w:tabs><w:tab w:val="left" w:pos="%d"/>'
+                '<w:tab w:val="right" w:leader="dot" w:pos="%d"/></w:tabs>'
+                % (left_tab_chars[level] * CHAR, RIGHT_TAB))
+        return ('<w:p><w:pPr><w:pStyle w:val="TOC%d"/>%s</w:pPr>'
+                '<w:r><w:t xml:space="preserve">%s</w:t></w:r>'
+                '<w:r><w:tab/></w:r>'
+                '<w:r><w:t xml:space="preserve">%s</w:t></w:r>'
+                '<w:r><w:tab/></w:r>'
+                '<w:r><w:t xml:space="preserve">%s</w:t></w:r></w:p>'
+                % (level, tabs, _esc(number), _esc(title), _esc(page)))
+
     toc_field = (
         '<w:p><w:pPr><w:pStyle w:val="CanonTocTitle"/></w:pPr>'
         '<w:r><w:t>目录</w:t></w:r></w:p>'
-        '<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>'
-        '<w:r><w:instrText xml:space="preserve"> TOC \\o &quot;1-3&quot; \\h \\z \\u </w:instrText></w:r>'
-        '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
-        '<w:r><w:t>打开时选"是"更新域，此处将生成目录。</w:t></w:r>'
-        '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>')
+        + toc_entry(1, "一、", "概述", "1")
+        + toc_entry(2, "（一）", "研究方法", "2")
+        + toc_entry(3, "1.", "数据来源", "3"))
 
     body = []
     body.append(_label("== 封面 == 每段标签给出应符合的规范；用 Word 逐段核对字体/字号/居中/缩进"))
@@ -286,7 +308,8 @@ def build_document(spec):
         body.append(_p("CanonCoverField", line))
     body.append(pagebreak)
 
-    body.append(_label("== 目录 == 打开时更新域；看二/三级页码是否顶到右边界仍不换行（只认 leftChars）"))
+    body.append(_label("== 目录 == 静态条目（直接制表位）：自动编号+制表符+标题+点线+页码；"
+                       "看点线是否在标题与页码之间、页码是否右对齐不换行"))
     body.append(toc_field)
     body.append(pagebreak)
 
@@ -394,10 +417,9 @@ SETTINGS = (
     '<w:settings xmlns:w="%s">'
     # 默认制表位 2 字符 = 420 twips（用户订正：目录/正文默认制表位 2 字符）。
     '<w:defaultTabStop w:val="420"/>'
-    # 绘图网格：水平/垂直均 156 twips。Word 的绘图网格显示单位≈值÷行网格 linePitch，
-    # 312 的一半 156 → 显示"0.5 字符 / 0.5 行"，与规范文档一致。schema 顺序：
-    # defaultTabStop → drawingGrid* → updateFields。
-    '<w:drawingGridHorizontalSpacing w:val="156"/>'
+    # 绘图网格：垂直 156=0.5行（0.5×行网格312，已验正确）；水平 105=0.5字符（0.5×五号
+    # 字符宽210，配合 Normal=五号 后单位为 210）。schema 顺序：defaultTabStop→drawingGrid*→updateFields。
+    '<w:drawingGridHorizontalSpacing w:val="105"/>'
     '<w:drawingGridVerticalSpacing w:val="156"/>'
     '<w:updateFields w:val="true"/>'
     '</w:settings>' % W)

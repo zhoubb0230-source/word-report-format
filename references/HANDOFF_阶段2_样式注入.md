@@ -1,12 +1,13 @@
 # Handoff：方案C 阶段2（全角色 canonical 样式注入）
 
-> **用途**：给**新 session 冷启动做阶段2**用。冷启动读本文件 + `make_canonical_reference.py` 即可动手。
-> 背景/契约见 `HANDOFF_方案C实施.md`（不重复）；Word 保真真值的"为什么"见 `已知陷阱…md` #10/#11/#12。
+> **✅ 2026-07：阶段2 主体已实施完成（93 passing）**，本文件转为**已实施记录 + 待 Word 验收清单**。
+> 契约与"为什么"已归档进 `已知陷阱与设计决策.md` #10/#11/#12（那里才是长期真源）；canonical 样式的
+> 可执行定义现在是 **`scripts/lib/canonstyles.py`**（参考件与流水线共用同一份字符串）。
 >
-> **一句话**：阶段0/1 + 阶段2首块（甲法）已完成并经用户 Word 验收；剩阶段2 主体——把
-> `_patch_toc_styles` 推广成**全角色 canonical 命名样式注入 + 指派 pStyle + 清直接覆盖**，并删掉**非编号
-> 情形**的绝对伴随值 hack。canonical 样式的**精确参数已由用户逐像素验收**，权威真源是
-> `scripts/make_canonical_reference.py`。
+> **落地内容**：全角色 canonical 命名样式**注入 + 指派 pStyle + 清直接覆盖**；绝对伴随值 hack **整体删除**；
+> 文档网格（docGrid + settings compat 块 + Normal/docDefaults 五号）与表格默认值写入；目录制表位按
+> spec 字符数回写 TOC 样式；`45` 升级出**全坍缩不变量**。**剩余唯一动作是用户在 Word 里对真实样本验收**
+> （见文末 §6）。
 
 ---
 
@@ -104,13 +105,29 @@
 
 ---
 
-## 5. 起步动作清单（新 session 照做）
+## 5. 实施结果（已完成，供追溯）
 
-1. `pip install lxml`；跑回归确认 79 passing 基线。
-2. 读本文件 + `已知陷阱…md` #10/#11/#12 + `HANDOFF_方案C实施.md` §2 契约。
-3. 通读 `scripts/make_canonical_reference.py`（全角色 canonical 样式的可执行规格）。
-4. 把 §3 参数落进 `spec/format_spec.json`（新增网格/compat/单元格/目录制表位/封面西文字段）+
-   `40_apply_fixes.py` 的全角色样式注入/指派/清覆盖；删非编号伴随值 hack。**每步跑回归 + 生成参考件比对**。
-5. `45` 升级成全坍缩不变量（用 `cascade.py` provenance）。
-6. 每落一步同步 `SKILL.md`/`references/format_spec.md`/spec 的 `source` + `已知陷阱…md`（CLAUDE.md 要求）。
-7. 产出物请用户 Word 验收（沿用阶段0 的参考件验收闭环）。
+| 项 | 落点 |
+|---|---|
+| canonical 样式唯一定义（参考件+流水线共用） | `scripts/lib/canonstyles.py` |
+| 注入样式 / 钉 Normal·docDefaults 五号 | `40_apply_fixes.py::_inject_canonical_styles` / `_patch_normal_and_defaults` |
+| 指派 pStyle + 清直接覆盖 + 保号 | `::_assign_canonical_style` / `_clear_ppr_governed` / `_clear_run_props` |
+| 判定与指派共用角色分派 | `scripts/lib/checks.py::paragraph_role` |
+| 文档网格（settings compat / docGrid） | `::_apply_document_grid` / `::_apply_doc_grid_to_sections` |
+| 表格默认值（tblInd / tblCellMar / vAlign） | `::_apply_table_defaults` |
+| 目录制表位按 spec 字符数回写 | `::_patch_toc_styles` + `spec.toc.tab_*` |
+| 删除绝对伴随值 hack | `::_set_first_line_and_clear_left`（只写字符单位） |
+| 全坍缩不变量 | `45_validate_output.py::_check_canonical_collapse` |
+| spec 新增 | `document_grid` / `table_defaults` / `toc.tab_*` / 各角色 `enforce_western` |
+| 测试 | `tests/test_e2e.py::TestCanonicalStyleInjection`（11 例）+ 既有用例改写 |
+
+## 6. 待用户 Word 验收（沙箱验不了渲染，handoff §1）
+
+1. 跑一份**真实样本**过全流水线，在 Word 里确认：首行缩进仍显示"2 字符"、标题/正文字体字号、
+   目录点线与页码不换行、每页 41 行/行距 15.6 磅。
+2. **churn 是否可接受**：严格-spec 下"看着对但用直接属性表达"的段落也会被改写成样式承载，
+   XML 变动面比以前大（渲染应不变）。
+3. **空行高度**：空段落没有角色、不指派样式，会跟随 Normal（五号）。若真实样本里空行被用作版面留白，
+   确认其高度变化是否可接受——不可接受的话，下一轮给空行加"冻结原字号"的保护。
+4. **封面西文**：密级/文本编号行与题目下要素里的数字现在会被改成 Times New Roman（`enforce_western`）。
+   这是照阶段0 参考件的验收结论做的，若与规范文档不符请回退 spec 里这两处的 `enforce_western`。

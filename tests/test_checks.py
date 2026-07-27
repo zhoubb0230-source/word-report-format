@@ -278,10 +278,14 @@ class TestLibreOfficeTocStyle(unittest.TestCase):
 
 
 class TestTocStyleLeftCharsOnly(unittest.TestCase):
-    """目录合规【只认 leftChars】（用户决策，2026-07）：_patch_toc_styles 钉
-    font/size/leftChars(按级 0/200/400)，且【不再写死制表位】——Word updateFields
-    刷新时会自建页码制表位，写进样式的那对 tab 达不到效果、反而是一处与 Word 打架
-    的多余物，故删。此测试锁住"不写 tab"的反回退。"""
+    """目录样式回写：_patch_toc_styles 钉 font/size/leftChars(按级 0/200/400) **以及
+    制表位**（左制表位 + 右点线制表位）。
+
+    别再删制表位：2026-07 曾以"Word updateFields 会自建、写死会被盖掉"为由删掉，
+    阶段0 的 Word 逐项验收**推翻**了它——目录条目的"编号→标题→点线→页码"排布正是
+    靠样式制表位撑起来的，缺了点线会跑到编号与标题之间、页码换行（陷阱 #12）。
+    制表位没有字符单位形式，只能按【文档字符单位字号】把字符数换算成绝对 twips：
+    Normal=五号(21) → 二级左 1050、右点线 8665。判定层仍只按 leftChars 判合规。"""
 
     W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
@@ -300,7 +304,7 @@ class TestTocStyleLeftCharsOnly(unittest.TestCase):
                      '</w:sectPr></w:body></w:document>' % self.W).encode("utf-8"))
         return tmp
 
-    def test_toc_style_gets_leftchars_no_tabs(self):
+    def test_toc_style_gets_leftchars_and_tabs(self):
         mod = helpers.load_script("40_apply_fixes.py")
         with tempfile.TemporaryDirectory() as tmp:
             self._make_pkg(tmp)
@@ -311,8 +315,22 @@ class TestTocStyleLeftCharsOnly(unittest.TestCase):
             self.assertIsNotNone(ind)
             # 二级 leftChars = 200（2字符）
             self.assertEqual(ind.get("{%s}leftChars" % self.W), "200")
-            # 关键反回退：样式里不写死任何制表位
-            self.assertIsNone(root.find(".//{%s}tabs" % self.W))
+            # 制表位：左 5字符=1050、右点线 41.26字符=8665（均按五号 210/字符换算）
+            tabs = root.findall(".//{%s}tabs/{%s}tab" % (self.W, self.W))
+            got = [(t.get("{%s}val" % self.W), t.get("{%s}pos" % self.W),
+                    t.get("{%s}leader" % self.W)) for t in tabs]
+            self.assertEqual(got, [("left", "1050", None), ("right", "8665", "dot")])
+
+    def test_toc_tab_positions_follow_char_unit_size(self):
+        # 字符单位随 Normal 字号走：Normal=三号(32) 时同样的字符数换算成 1600/13203。
+        mod = helpers.load_script("40_apply_fixes.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            self._make_pkg(tmp)
+            mod._patch_toc_styles(tmp, SPEC["toc"], char_unit_hp=32)
+            root = etree.parse(os.path.join(tmp, "word", "styles.xml")).getroot()
+            pos = [t.get("{%s}pos" % self.W)
+                   for t in root.findall(".//{%s}tabs/{%s}tab" % (self.W, self.W))]
+            self.assertEqual(pos, ["1600", "13203"])
 
 
 class TestInt2Cn(unittest.TestCase):
@@ -373,14 +391,30 @@ class TestWesternFont(unittest.TestCase):
                 eff_=eff(ascii="Arial"))
         self.assertEqual(checks.check_paragraph(r, SPEC)["set_ascii"], "Times New Roman")
 
-    def test_cover_field_not_forced_western(self):
-        # cover layout lines deliberately opt out of western enforcement:
-        # an otherwise-compliant field with a wrong Latin font gets NO fix.
-        r = rec(region="cover", text="项目名称ABC", has_western=True,
+    def test_cover_field_western_enforced_when_line_has_digits(self):
+        # 阶段0 Word 验收推翻了陷阱#7 在封面的范围：封面要素/密级行里的数字与西文
+        # 也要走 Times（spec 的 cover_field.enforce_western）。含西文的行才校验。
+        r = rec(region="cover", text="项目编号：KJ-2024-001", has_western=True,
                 eff_=eff(east_asia="方正黑体_GBK", size_hp=30, ascii="Calibri",
                          jc="both", first_line_chars=200, line=480,
                          line_rule="auto"))
-        self.assertIsNone(checks.check_paragraph(r, SPEC))  # western not enforced here
+        self.assertEqual(checks.check_paragraph(r, SPEC)["set_ascii"], "Times New Roman")
+
+    def test_pure_chinese_cover_field_no_western_fix(self):
+        # 但纯中文的封面行没有西文可规范，仍然一个字都不动（has_western 保护）。
+        r = rec(region="cover", text="承担单位（盖章）：某某研究院", has_western=False,
+                eff_=eff(east_asia="方正黑体_GBK", size_hp=30, ascii="仿宋",
+                         jc="both", first_line_chars=200, line=480,
+                         line_rule="auto"))
+        self.assertIsNone(checks.check_paragraph(r, SPEC))
+
+    def test_toc_still_not_forced_western(self):
+        # 目录仍**不**套西文（_check_toc 不传 western）——只有封面被推翻，别顺手扩大。
+        r = rec(region="toc", is_toc=True, toc_level=1, text="一、概述 3",
+                has_western=True,
+                eff_=eff(east_asia="仿宋", size_hp=30, ascii="Calibri"))
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertIsNone(fix if fix is None else fix.get("set_ascii"))
 
 
 class TestNewFormatRules2026(unittest.TestCase):

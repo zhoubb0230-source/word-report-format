@@ -31,175 +31,34 @@ import os
 import sys
 import zipfile
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+
+import canonstyles
+from canonstyles import STYLE_ID_BY_ROLE, _esc
+
 SPEC_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                          "spec", "format_spec.json")
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
-
-def _esc(s):
-    return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            .replace('"', "&quot;"))
-
-
-def _rpr(ea, size_hp, western_font=None):
-    """run props: eastAsia = CJK 字体；ascii/hAnsi = 西文字体（套西文的角色给 Times，
-    否则回退给 CJK 字体本身，让数字也走该字体——封面除题目外不套西文，陷阱#7）。"""
-    latin = western_font or ea
-    parts = ['<w:rFonts w:ascii="%s" w:hAnsi="%s" w:eastAsia="%s" w:cs="%s"/>'
-             % (_esc(latin), _esc(latin), _esc(ea), _esc(latin))]
-    if size_hp is not None:
-        parts.append('<w:sz w:val="%d"/><w:szCs w:val="%d"/>' % (size_hp, size_hp))
-    return "".join(parts)
-
-
-def _ind(first_line_chars=None, left_chars=None, no_indent=False):
-    """缩进：只写【字符单位】(firstLineChars/leftChars)，绝不补绝对伴随值——严格-spec
-    §2.2，这样 Word 才显示"N 字符"而非厘米。no_indent 显式把各向缩进清零。"""
-    a = []
-    if no_indent:
-        a += ['w:firstLine="0"', 'w:firstLineChars="0"',
-              'w:left="0"', 'w:leftChars="0"', 'w:right="0"', 'w:rightChars="0"']
-    else:
-        if first_line_chars is not None:
-            a.append('w:firstLineChars="%d"' % first_line_chars)
-        if left_chars is not None:
-            a.append('w:leftChars="%d"' % left_chars)
-    return ('<w:ind %s/>' % " ".join(a)) if a else ""
-
-
-def _spacing(line_twips=None, line_rule=None, zero_before_after=False):
-    a = []
-    if zero_before_after:
-        a += ['w:before="0"', 'w:after="0"']
-    if line_twips is not None:
-        a += ['w:line="%d"' % line_twips, 'w:lineRule="%s"' % (line_rule or "exact")]
-    return ('<w:spacing %s/>' % " ".join(a)) if a else ""
-
-
-def _style(sid, name, ppr_inner, rpr_inner, based_on=None):
-    based = '<w:basedOn w:val="%s"/>' % based_on if based_on else ''
-    return ('<w:style w:type="paragraph" w:styleId="%s"><w:name w:val="%s"/>%s'
-            '<w:qFormat/><w:pPr>%s</w:pPr><w:rPr>%s</w:rPr></w:style>'
-            % (sid, _esc(name), based, ppr_inner, rpr_inner))
+# 文档字符单位字号（Normal/docDefaults 的五号）——目录制表位按它把"字符"换算成
+# twips（陷阱 #12：字符单位随 Normal 走）。
+CHAR_UNIT_HP = 21
 
 
 def build_styles(spec):
-    """按 spec 造全角色 canonical 样式。返回 styles.xml 字符串。"""
-    western = spec.get("western_font", "Times New Roman")
-    ls = spec.get("line_spacing", {})
-    line_twips = ls.get("line_twips")
-    styles = []
+    """按 spec 造全角色 canonical 样式，返回 styles.xml 字符串。
 
-    # docDefaults：默认五号 21 半点 + lang（照抄规范文档 styles.xml）。行网格 15.6磅/41行
-    # 由 settings 的 compat 块（useFELayout/compatMode15）保证，与默认字号无关。
-    docdef = ('<w:docDefaults><w:rPrDefault><w:rPr>'
-              '<w:rFonts w:ascii="Times New Roman" w:eastAsia="仿宋" w:hAnsi="Times New Roman" '
-              'w:cs="Times New Roman"/><w:sz w:val="21"/><w:szCs w:val="21"/>'
-              '<w:lang w:val="en-US" w:eastAsia="zh-CN" w:bidi="ar-SA"/>'
-              '</w:rPr></w:rPrDefault><w:pPrDefault/></w:docDefaults>')
-    # Normal ＝ 五号（关键）：Word 的【文档网格字体】就是 Normal 样式的字号；只有 Normal=五号
-    # (10.5pt，行高≈14.5pt < 15.6pt) 时，Word 才尊重行网格 312→15.6磅/41行；Normal=三号
-    # (行高≈21.75pt>15.6pt) 会被顶高到 21.75磅/29行（用户实测：改文档网格字体=五号会连带把
-    # 正文改成五号，需再把正文单独设回三号——即"Normal=五号 + 正文用独立三号样式"）。
-    # 因此正文不走 Normal，改用独立的 CanonBody(三号)。
-    styles.append('<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
-                  '<w:name w:val="Normal"/><w:qFormat/>'
-                  '<w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="仿宋" '
-                  'w:hAnsi="Times New Roman" w:cs="Times New Roman"/>'
-                  '<w:sz w:val="21"/><w:szCs w:val="21"/></w:rPr></w:style>')
-
-    # 题目
-    t = spec["title"]
-    styles.append(_style(
-        "CanonTitle", "封面题目",
-        '<w:jc w:val="%s"/>' % t.get("jc", "center"),
-        _rpr(t["east_asia"], t["size_hp"], western if t.get("enforce_western") else None)))
-
-    # 封面密级/文本编号行（数字/字母用西文字体——用户 Word 验收要求）
-    cc = spec["cover_classification"]
-    styles.append(_style("CanonCoverClass", "封面密级编号",
-                         '<w:jc w:val="center"/>',
-                         _rpr(cc["east_asia"], cc["size_hp"], western)))
-
-    # 封面题目下要素（field）：2倍行距、两端对齐、首行缩进2字符；数字/字母用西文字体
-    cf = spec["cover_field"]
-    styles.append(_style(
-        "CanonCoverField", "封面要素",
-        _spacing(cf.get("line_twips"), cf.get("line_rule"))
-        + '<w:jc w:val="both"/>' + _ind(first_line_chars=200),
-        _rpr(cf["east_asia"], cf["size_hp"], western)))
-
-    # 一~四级标题
-    for lvl in ("1", "2", "3", "4"):
-        h = spec["headings"][lvl]
-        styles.append(_style(
-            "CanonH%s" % lvl, "标题 %s" % lvl,
-            '<w:outlineLvl w:val="%d"/>' % (int(lvl) - 1)
-            + _spacing(line_twips) + _ind(first_line_chars=h["first_line_chars"]),
-            _rpr(h["east_asia"], h["size_hp"], western)))
-
-    # 正文：命名为【FGW正文】、基于 Normal（照规范文档结构）。关键——不能叫"正文"：
-    # Word 把【文档网格字体】链接到名为"正文"(=Normal)的样式，若正文内容样式也叫"正文"
-    # 会抢占该链接、把网格字体拽成三号。规范文档用独立的"FGW正文"承载正文内容，Normal
-    # (五号) 专门驱动文档网格 → 网格 15.6磅/41行；正文内容仍是三号。
-    b = spec["body"]
-    styles.append(_style(
-        "CanonBody", "FGW正文",
-        _spacing(line_twips, zero_before_after=b.get("no_space_before_after"))
-        + _ind(first_line_chars=b["first_line_chars"]),
-        _rpr(b["east_asia"], b["size_hp"], western), based_on="Normal"))
-
-    # 表格内容
-    tb = spec["table_body"]
-    styles.append(_style(
-        "CanonTableBody", "表格内容",
-        _spacing(tb.get("line_twips"), tb.get("line_rule")) + _ind(no_indent=True),
-        _rpr(tb["east_asia"], tb["size_hp"], western)))
-
-    # 图/表标题
-    cap = spec["caption_format"]
-    styles.append(_style(
-        "CanonCaption", "图表标题",
-        _spacing(cap.get("line_twips"), cap.get("line_rule"))
-        + '<w:jc w:val="%s"/>' % cap.get("jc", "center") + _ind(no_indent=True),
-        _rpr(cap["east_asia"], cap["size_hp"], western)))
-
-    # 目录标题"目录"二字：用正文字体字号但居中、无缩进（非标题，不进 TOC）
-    b_toc = spec["body"]
-    styles.append(_style(
-        "CanonTocTitle", "目录标题",
-        _spacing(line_twips) + '<w:jc w:val="center"/>' + _ind(no_indent=True),
-        _rpr(b_toc["east_asia"], b_toc["size_hp"], western)))
-
-    # 目录 1/2/3（标准 toc 样式名）——【照抄规范文档 styles.xml，Normal=五号 语境】：
-    #   左制表位 4/5/6 字符按【五号 210 twips/字符】= 840/1050/1260（字符单位跟 Normal 走：
-    #   Normal=五号 就用 210；若 Normal=三号 才是 320→1280/1600/1920）；页码右制表位带点线
-    #   = 8665（41.26 字符×210 ≈ 正文宽度右边界）；左缩进 leftChars 0/200/400；仿宋 小三。
-    #   注：不写 firstLineChars——Normal=五号 无首行缩进，无可继承，故目录天然无首行缩进。
-    toc = spec["toc"]
-    toc_rpr = ('<w:rFonts w:ascii="仿宋" w:hAnsi="仿宋" w:cs="仿宋"/>'
-               '<w:sz w:val="%d"/><w:szCs w:val="%d"/>'
-               % (toc["size_hp"], toc["size_hp"]))
-    RIGHT_TAB = 8665
-    toc_defs = {
-        "1": (840, ''),
-        "2": (1050, '<w:ind w:leftChars="200" w:left="200"/>'),
-        "3": (1260, '<w:ind w:leftChars="400" w:left="400"/>'),
-    }
-    for lvl in ("1", "2", "3"):
-        left_tab, ind = toc_defs[lvl]
-        tabs = ('<w:tabs><w:tab w:val="left" w:pos="%d"/>'
-                '<w:tab w:val="right" w:leader="dot" w:pos="%d"/></w:tabs>'
-                % (left_tab, RIGHT_TAB))
-        styles.append('<w:style w:type="paragraph" w:styleId="TOC%s"><w:name w:val="toc %s"/>'
-                      '<w:basedOn w:val="Normal"/><w:next w:val="Normal"/>'
-                      '<w:uiPriority w:val="39"/><w:qFormat/>'
-                      '<w:pPr>%s</w:pPr><w:rPr>%s</w:rPr></w:style>'
-                      % (lvl, lvl, tabs + ind, toc_rpr))
-
+    样式本身**不在这里定义**——权威定义在 `scripts/lib/canonstyles.py`，与
+    `40_apply_fixes.py` 注入进真实文档的是同一份字符串（避免"参考件验收通过、
+    流水线注入的却是另一套"的漂移）。本函数只负责把它们拼成一个 styles.xml。"""
+    parts = [canonstyles.doc_defaults_xml(spec), canonstyles.normal_style_xml(spec)]
+    parts += [d["xml"] for d in canonstyles.canonical_style_defs(spec)]
+    # 目录 1/2/3（标准 toc 样式名）：仿宋 小三、leftChars 0/200/400、左制表位
+    # 4/5/6 字符 + 右点线制表位 41.26 字符（Normal=五号 → 840/1050/1260 + 8665）。
+    parts += [canonstyles.toc_style_xml(spec, lvl, CHAR_UNIT_HP) for lvl in ("1", "2", "3")]
     return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            '<w:styles xmlns:w="%s">%s%s</w:styles>' % (W, docdef, "".join(styles)))
+            '<w:styles xmlns:w="%s">%s</w:styles>' % (W, "".join(parts)))
 
 
 def _lvl(ilvl, num_fmt, lvl_text, suff=None):
@@ -266,6 +125,9 @@ def build_document(spec):
     # 与规范文档一致——有行网格时段落 snapToGrid（默认开），单倍/1.5/2 倍行距会贴到
     # 网格线而看起来接近，故封面要素仍保留 2 倍行距设置以与规范文档一致。docGrid 须放
     # 在 sectPr 末尾（schema 顺序），footerReference 须在 pgSz 之前。
+    grid = canonstyles.doc_grid_attrs(spec)
+    docgrid = ('<w:docGrid w:type="%s" w:linePitch="%s"/>'
+               % (grid["type"], grid["linePitch"])) if grid else ""
     sect = ('<w:sectPr>'
             '<w:footerReference w:type="default" r:id="rIdF"/>'
             '<w:pgSz w:w="11906" w:h="16838"/>'
@@ -273,11 +135,11 @@ def build_document(spec):
             'w:header="%d" w:footer="%d" w:gutter="0"/>'
             '<w:pgNumType w:start="1"/>'
             '<w:cols w:space="720"/>'
-            '<w:docGrid w:type="lines" w:linePitch="312"/>'
+            '%s'
             '</w:sectPr>'
             % (pg["margin_top_twips"], pg["margin_right_twips"],
                pg["margin_bottom_twips"], pg["margin_left_twips"],
-               pg["header_twips"], pg["footer_twips"]))
+               pg["header_twips"], pg["footer_twips"], docgrid))
 
     pagebreak = ('<w:p><w:r><w:br w:type="page"/></w:r></w:p>')
 
@@ -297,8 +159,8 @@ def build_document(spec):
                 % (level, _esc(number), _esc(title), _esc(page), end_run))
 
     toc_field = (
-        '<w:p><w:pPr><w:pStyle w:val="CanonTocTitle"/></w:pPr>'
-        '<w:r><w:t>目录</w:t></w:r>'
+        '<w:p><w:pPr><w:pStyle w:val="%s"/></w:pPr>' % STYLE_ID_BY_ROLE["toc_title"]
+        + '<w:r><w:t>目录</w:t></w:r>'
         '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
         '<w:r><w:instrText xml:space="preserve"> TOC \\o &quot;1-3&quot; \\h \\z \\u </w:instrText></w:r>'
         '<w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>'
@@ -309,9 +171,14 @@ def build_document(spec):
     body = []
     body.append(_label("== 封面 == 每段标签给出应符合的规范；用 Word 逐段核对字体/字号/居中/缩进"))
     body.append(_label("【封面密级编号·%s】" % src("cover_classification")))
-    body.append(_p("CanonCoverClass", "密级：内部　　　　　　　　文本编号：XXXX-2024-001"))
+    # 居中写成【段落直接属性】而非样式属性：规范对密级/文本编号行的**对齐方式没有
+    # 规定**（checks 也只校验字体字号），故 canonical 样式不承载 jc——否则注入真实
+    # 文档时会顺手改掉模板自己的版式。这里居中只是参考件的排版示范。
+    body.append(_p(STYLE_ID_BY_ROLE["cover_classification"],
+                   "密级：内部　　　　　　　　文本编号：XXXX-2024-001",
+                   extra_ppr='<w:jc w:val="center"/>'))
     body.append(_label("【封面题目·%s】" % src("title")))
-    body.append(_p("CanonTitle", "先进技术项目 2024 年度自评价报告"))
+    body.append(_p(STYLE_ID_BY_ROLE["title"], "先进技术项目 2024 年度自评价报告"))
     body.append(_label("【封面要素·%s】" % src("cover_field")))
     for line in ("项目名称：××××系统研制项目",
                  "项目编号：KJ-2024-001",
@@ -319,7 +186,7 @@ def build_document(spec):
                  "项目负责人（签字）：×××",
                  "项目起止时间：20  年  月 至 20  年  月",
                  "报告编制时间：2024 年 ×× 月"):
-        body.append(_p("CanonCoverField", line))
+        body.append(_p(STYLE_ID_BY_ROLE["cover_field"], line))
     body.append(pagebreak)
 
     body.append(_label("== 目录 == 静态条目（直接制表位）：自动编号+制表符+标题+点线+页码；"
@@ -333,41 +200,39 @@ def build_document(spec):
     body.append(_label("== 正文 =="))
     body.append(_label("【一级标题·自动编号·%s】首行应为 2 字符缩进，不是 -0.74cm 悬挂缩进（甲法验证）"
                        % src("headings", "1")))
-    body.append(_p("CanonH1", "概述", extra_ppr=numpr(0, 1)))
+    body.append(_p(STYLE_ID_BY_ROLE["heading1"], "概述", extra_ppr=numpr(0, 1)))
     body.append(_label("【正文·%s】选中该段看首行缩进应为 2 字符而非厘米" % src("body")))
-    body.append(_p("CanonBody",
+    body.append(_p(STYLE_ID_BY_ROLE["body"],
                    "这是一段正文，用于确认仿宋三号、行距固定值 28 磅、首行缩进 2 字符，"
                    "并在 Word 的段落对话框里确认首行缩进显示为 2 字符而不是 0.74/0.85 厘米。"
                    "含数字 12345 与英文 ABC 应显示为 Times New Roman。"))
     body.append(_label("【二级标题·自动编号·%s】" % src("headings", "2")))
-    body.append(_p("CanonH2", "研究方法", extra_ppr=numpr(1, 1)))
-    body.append(_p("CanonBody", "二级标题下的正文示例段落。"))
+    body.append(_p(STYLE_ID_BY_ROLE["heading2"], "研究方法", extra_ppr=numpr(1, 1)))
+    body.append(_p(STYLE_ID_BY_ROLE["body"], "二级标题下的正文示例段落。"))
     body.append(_label("【三级标题·自动编号·%s】" % src("headings", "3")))
-    body.append(_p("CanonH3", "数据来源", extra_ppr=numpr(2, 1)))
-    body.append(_p("CanonBody", "三级标题下的正文示例段落。"))
+    body.append(_p(STYLE_ID_BY_ROLE["heading3"], "数据来源", extra_ppr=numpr(2, 1)))
+    body.append(_p(STYLE_ID_BY_ROLE["body"], "三级标题下的正文示例段落。"))
     body.append(_label("【四级标题·自动编号·%s】" % src("headings", "4")))
-    body.append(_p("CanonH4", "指标口径", extra_ppr=numpr(3, 1)))
-    body.append(_p("CanonBody", "四级标题下的正文示例段落。"))
+    body.append(_p(STYLE_ID_BY_ROLE["heading4"], "指标口径", extra_ppr=numpr(3, 1)))
+    body.append(_p(STYLE_ID_BY_ROLE["body"], "四级标题下的正文示例段落。"))
     body.append(_label("【图标题·自动编号·%s】“图1”应为一个整体（不能拆选“图”“1”）、编号后无制表位"
                        % src("caption_format")))
-    body.append(_p("CanonCaption", "系统总体架构示意图", extra_ppr=numpr(0, 2)))
+    body.append(_p(STYLE_ID_BY_ROLE["caption"], "系统总体架构示意图", extra_ppr=numpr(0, 2)))
     body.append(_label("【表标题·自动编号】“表1”自动生成、编号后无制表位（下方表格）"))
-    body.append(_p("CanonCaption", "主要指标对照表", extra_ppr=numpr(0, 3)))
+    body.append(_p(STYLE_ID_BY_ROLE["caption"], "主要指标对照表", extra_ppr=numpr(0, 3)))
     body.append(_label("【表格内容·%s】四号、行距 28 磅、无缩进；默认单元格边距 上0/左0.19cm/下0/右0.19cm"
                        % src("table_body")))
-    # 表格默认单元格边距：上0/下0/左右 108 twips(0.19cm)。tblCellMar 须在 tblBorders 之后。
-    cell_mar = ('<w:tblCellMar>'
-                '<w:top w:w="0" w:type="dxa"/><w:left w:w="108" w:type="dxa"/>'
-                '<w:bottom w:w="0" w:type="dxa"/><w:right w:w="108" w:type="dxa"/>'
-                '</w:tblCellMar>')
-    # 单元格垂直居中（vAlign=center）；tcW 后写。tcPr 是单元格属性，与 tblCellMar（表级
+    # 表级默认单元格边距（spec.table_defaults）。tblCellMar 须在 tblBorders 之后。
+    cell_mar = canonstyles.cell_margins_xml(spec)
+    # 单元格垂直居中（vAlign）；tcW 后写。tcPr 是单元格属性，与 tblCellMar（表级
     # 默认边距）是两回事——用户订正：表格左缩进(tblInd)要 0，别跟单元格边距搞混。
     def cell(text):
         return ('<w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/>'
-                '<w:vAlign w:val="center"/></w:tcPr>' + _p("CanonTableBody", text) + '</w:tc>')
+                + canonstyles.cell_valign_xml(spec) + '</w:tcPr>'
+                + _p(STYLE_ID_BY_ROLE["table_body"], text) + '</w:tc>')
     body.append(
         '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>'
-        '<w:tblInd w:w="0" w:type="dxa"/>'   # 表格左缩进 0（不是 0.19cm）
+        + canonstyles.table_ind_xml(spec) +
         '<w:tblBorders>'
         '<w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
         '<w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>'
@@ -426,40 +291,22 @@ DOC_RELS = (
     '<Relationship Id="rIdF" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>'
     '</Relationships>')
 
-SETTINGS = (
-    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-    '<w:settings xmlns:w="%s">'
-    '<w:zoom w:percent="100"/>'
-    '<w:bordersDoNotSurroundHeader/><w:bordersDoNotSurroundFooter/>'
-    '<w:proofState w:spelling="clean" w:grammar="clean"/>'
-    # defaultTabStop=420＝2字符（五号 210×2）。标题自动编号后的制表符落到默认制表位，
-    # 640(≈3字符五号) 看起来太宽；用户要求 2 字符 → 420。目录不受影响（TOC 样式自带显式
-    # 左/右制表位，不依赖默认制表位）。
-    '<w:defaultTabStop w:val="420"/>'
-    '<w:drawingGridHorizontalSpacing w:val="105"/>'   # 0.5 字符（配合 compat 后单位）
-    '<w:drawingGridVerticalSpacing w:val="156"/>'     # 0.5 行
-    '<w:displayHorizontalDrawingGridEvery w:val="2"/>'
-    '<w:displayVerticalDrawingGridEvery w:val="2"/>'
-    '<w:noPunctuationKerning/>'
-    '<w:characterSpacingControl w:val="compressPunctuation"/>'
-    # ▼ 关键：compat 块（尤其 useFELayout + compatibilityMode=15）让 Word 尊重行网格
-    #   linePitch=312 → 15.6 磅/41 行。缺它时 Word 用旧版式把行距顶到 21.75 磅/29 行。
-    #   取自规范文档 settings.xml。
-    '<w:compat>'
-    '<w:spaceForUL/><w:balanceSingleByteDoubleByteWidth/><w:doNotLeaveBackslashAlone/>'
-    '<w:ulTrailSpace/><w:doNotExpandShiftReturn/><w:adjustLineHeightInTable/><w:useFELayout/>'
-    '<w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/>'
-    '<w:compatSetting w:name="overrideTableStyleFontSizeAndJustification" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/>'
-    '<w:compatSetting w:name="enableOpenTypeFeatures" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/>'
-    '<w:compatSetting w:name="doNotFlipMirrorIndents" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/>'
-    '<w:compatSetting w:name="differentiateMultirowTableHeaders" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/>'
-    '<w:compatSetting w:name="useWord2013TrackBottomHyphenation" w:uri="http://schemas.microsoft.com/office/word" w:val="1"/>'
-    '</w:compat>'
-    '<w:themeFontLang w:val="en-US" w:eastAsia="zh-CN"/>'
-    '<w:decimalSymbol w:val="."/><w:listSeparator w:val=","/>'
-    # 不设 updateFields：目录缓存条目已是正确版式，避免打开时提示更新域后按（我们暂无
-    # 规范文档 toc 样式的）重建逻辑覆盖掉正确缓存。页码/目录如需刷新可手动 F9。
-    '</w:settings>' % W)
+def build_settings(spec):
+    """settings.xml。承载【文档网格】的那几个子元素（defaultTabStop / 绘图网格 /
+    compat 块 / themeFontLang）由 `canonstyles.settings_children_xml` 从 spec 生成
+    ——40 往真实文档里写的是同一份，避免参考件与流水线漂移。
+
+    不设 updateFields：目录缓存条目已是正确版式，避免打开时提示更新域后覆盖掉正确
+    缓存。页码/目录如需刷新可手动 F9。"""
+    grid = "".join(xml for _tag, xml in canonstyles.settings_children_xml(spec))
+    return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<w:settings xmlns:w="%s">'
+            '<w:zoom w:percent="100"/>'
+            '<w:bordersDoNotSurroundHeader/><w:bordersDoNotSurroundFooter/>'
+            '<w:proofState w:spelling="clean" w:grammar="clean"/>'
+            '%s'
+            '<w:decimalSymbol w:val="."/><w:listSeparator w:val=","/>'
+            '</w:settings>' % (W, grid))
 
 
 def build(out_path):
@@ -471,7 +318,7 @@ def build(out_path):
         "word/_rels/document.xml.rels": DOC_RELS,
         "word/styles.xml": build_styles(spec),
         "word/numbering.xml": build_numbering(),
-        "word/settings.xml": SETTINGS,
+        "word/settings.xml": build_settings(spec),
         "word/footer1.xml": build_footer(spec),
         "word/document.xml": build_document(spec),
     }

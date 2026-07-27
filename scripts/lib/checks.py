@@ -184,13 +184,48 @@ def _new_sets():
             "set_jc": None, "strip_text": None}
 
 
-def check_paragraph(rec, spec):
-    """Return a combined 'format' fix for this paragraph, or None if compliant/skip."""
-    if rec.get("is_blank"):
-        return None  # an empty line has no format to judge
+def paragraph_role(rec, spec):
+    """本段的**格式角色**——`check_paragraph` 的分派依据，也是方案C 样式指派的依据。
 
+    返回值即 `canonstyles.ROLE_STYLES` 的角色名：
+        None（空行 / AI 豁免的封面 other 行：不判、也不指派样式）
+        'toc' | 'caption' | 'table_body'
+        'title' | 'cover_classification' | 'cover_field'
+        'heading1'..'heading4' | 'body'
+
+    **判定与指派共用同一份分派**（历史教训：同一规则各写一遍必然漂移，见 CLAUDE.md
+    「区域划分是共享逻辑」）。安全阀（陷阱#5）在这里体现为：pattern（仅凭形状认出、
+    未经确认）的标题**不返回 heading 角色**，按 body 处理——套错标题字体的风险大于
+    收益，模型确认（level_source 变 model_confirmed）后下一轮才享受标题待遇。"""
+    if rec.get("is_blank"):
+        return None
     region = rec.get("region", "body")
     if region == "toc":
+        return "toc"
+    if rec.get("caption"):
+        return "caption"
+    if rec.get("in_table"):
+        return "table_body"
+    if region == "cover":
+        role = cover_role(rec, spec)
+        if role == "other":
+            return None
+        return {"title": "title", "classification": "cover_classification",
+                "field": "cover_field"}.get(role)
+    if rec.get("is_heading") and rec.get("level_source") != "pattern":
+        lvl = min(max(rec.get("level") or 1, 1), 4)
+        return "heading%d" % lvl
+    return "body"
+
+
+def check_paragraph(rec, spec):
+    """Return a combined 'format' fix for this paragraph, or None if compliant/skip."""
+    role = paragraph_role(rec, spec)
+    if role is None:
+        # 空行没有可判的格式；封面 other 行是 AI 明确豁免的，原样不动。
+        return None
+
+    if role == "toc":
         # 目录条目只做字体/字号校验（仿宋 三号）；不动缩进/行距，避免破坏 TOC
         # 域代码自身的制表位/悬挂缩进结构。
         return _check_toc(rec, spec)
@@ -198,7 +233,7 @@ def check_paragraph(rec, spec):
     # Caption paragraphs (图.../表...): center them and remove all indent
     # (spec.caption_format). Font/size are left alone (the spec states no
     # caption font rule). Numbering is handled separately by continuity().
-    if rec.get("caption"):
+    if role == "caption":
         return _check_caption_format(rec, spec)
 
     # Table-cell content has its OWN font/size rule (仿宋 14磅), distinct from
@@ -207,7 +242,7 @@ def check_paragraph(rec, spec):
     # forced onto it — neither of which is right for tabular content. Only the
     # font/size are enforced here (the spec states nothing about a cell's indent
     # or line spacing, so those are left untouched).
-    if rec.get("in_table"):
+    if role == "table_body":
         return _check_table_body(rec, spec)
 
     eff = rec["eff"]
@@ -215,10 +250,7 @@ def check_paragraph(rec, spec):
     violations = []
 
     # -- Cover region: title / classification (密级·文本编号) / other fields --
-    if region == "cover":
-        role = cover_role(rec, spec)
-        if role == "other":
-            return None  # AI explicitly exempted this line; leave it untouched
+    if role in ("title", "cover_classification", "cover_field"):
         if role == "title":
             t = spec["title"]
             if not _font_ok(eff.get("east_asia"), t):
@@ -228,9 +260,8 @@ def check_paragraph(rec, spec):
             if eff.get("size_hp") != t["size_hp"]:
                 sets["set_size_hp"] = t["size_hp"]
                 violations.append("题目字号应为20磅")
-            # 题目内的数字/西文用西文字体（Times New Roman）。封面其余部分刻意不套
-            # 西文（陷阱#7），但题目是明确例外——仅当题目【含数字/西文】时才校验，
-            # 纯中文题目不会被误报。
+            # 题目内的数字/西文用西文字体（Times New Roman）。仅当题目【含数字/西文】
+            # 时才校验，纯中文题目不会被误报（enforce_western 的统一语义，见 §封面西文）。
             western = spec.get("western_font")
             if t.get("enforce_western") and western and rec.get("has_western") \
                     and eff.get("ascii") != western:
@@ -254,12 +285,14 @@ def check_paragraph(rec, spec):
         # classification (密级/文本编号): font/size only, per spec.
         # Alignment/indent are NOT enforced -- the spec states nothing about them
         # and the 密级/编号 line's position is template layout.
-        if role == "classification":
+        if role == "cover_classification":
             entry = spec.get("cover_classification")
             label = "封面密级/文本编号"
             if not entry or not entry.get("east_asia") or not entry.get("size_hp"):
                 return None  # spec not configured; nothing to check
-            _check_font_size(eff, entry, sets, violations, label=label)
+            _check_font_size(eff, entry, sets, violations, label=label,
+                             western=_western_for(spec, entry),
+                             has_western=rec.get("has_western", False))
             return _mk_format(rec["i"], sets, violations)
         # field role (项目名称/承担单位/项目负责人/起止时间/编制时间 等):
         # font/size per spec, PLUS these lines must be left-aligned. When they
@@ -271,7 +304,9 @@ def check_paragraph(rec, spec):
         entry = spec.get("cover_field")
         label = "封面要素"
         if entry and entry.get("east_asia") and entry.get("size_hp"):
-            _check_font_size(eff, entry, sets, violations, label=label)
+            _check_font_size(eff, entry, sets, violations, label=label,
+                             western=_western_for(spec, entry),
+                             has_western=rec.get("has_western", False))
         # 行距：报告题目下的各要素为 2 倍行距（spec.cover_field，lineRule=auto/
         # line=480），与正文的固定 28 磅不同——单独按 cover_field 的行距规则校验。
         if entry and entry.get("line_twips") and entry.get("line_rule"):
@@ -446,6 +481,17 @@ def _check_no_indent(eff, sets, violations, label):
         sets["clear_left_indent"] = True
         sets["clear_right_indent"] = True
         violations.append("%s不应有缩进" % label)
+
+
+def _western_for(spec, spec_entry):
+    """该角色是否套西文（Times）——**封面角色靠 spec 的 `enforce_western` 显式开启**。
+
+    正文/标题/表格/图表标题一律套西文；封面各行历史上整体不套（陷阱#7），阶段0 的
+    canonical 参考件经用户 Word 验收后确认：封面**密级/文本编号行与题目下要素行里的
+    数字/西文也走 Times**（"文本编号：XXXX-2024-001"、"20 年 月" 这类），故这两个角色
+    在 spec 里带上了 `enforce_western`。仍受 `has_western` 保护——纯中文的封面行没有
+    西文可规范，永远不会被标。目录仍不套（`_check_toc` 不传 western）。"""
+    return spec.get("western_font") if spec_entry.get("enforce_western") else None
 
 
 def _check_font_size(eff, spec_entry, sets, violations, label,

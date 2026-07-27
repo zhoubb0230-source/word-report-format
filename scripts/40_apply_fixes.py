@@ -34,7 +34,9 @@ from docxcommon import (qn, parse_xml, unzip_docx, rezip_docx,
                         get_style_id, get_pPr, get_mark_rpr)
 from commentwriter import CommentWriter
 from headings import ANY_LABEL_RE, CAPTION_STYLE_HINTS
-from checks import load_default_spec
+from checks import load_default_spec, paragraph_role
+import canonstyles
+from canonstyles import STYLE_ID_BY_ROLE
 
 # Paragraph styles that format the AUTO-GENERATED table-of-contents entries.
 # Word regenerates these paragraphs from their style (not from direct
@@ -188,44 +190,25 @@ def _char_twips(chars, size_hp):
 
 
 def _set_first_line_and_clear_left(pPr, first_line_chars, clear_left, clear_right=False,
-                                   set_left_chars=None, size_hp=21, char_only=False):
-    """Write the paragraph's indent as a DIRECT override.
+                                   set_left_chars=None):
+    """Write the paragraph's indent as a DIRECT override, **纯字符单位**。
 
-    ``char_only=True`` writes ONLY the character-unit values (w:firstLineChars /
-    w:leftChars) and omits every absolute w:firstLine/w:left companion. This is
-    the strict-spec shape (方案C §2.2: the absolute companion is itself a
-    spec violation — Word then shows the indent in cm, not "N 字符") and is used
-    for AUTO-NUMBERED paragraphs, whose inherited hanging is removed at the
-    NUMBERING layer instead (see _clamp_numbering_indent, 甲法) so no absolute
-    override is needed to out-muscle it. Non-numbered paragraphs still get the
-    companion (char_only=False) until full canonical-style injection replaces
-    that path — deleting it there would re-expose the LibreOffice-inherited
-    absolute hanging (see the 已知陷阱 #10 note); that removal is Word-gated.
+    严格-spec §2.2：实际缩进量只写 `w:firstLineChars`/`w:leftChars`，**绝不补非零的
+    绝对伴随值**（`w:firstLine`/`w:left` 的 twips）——补了 Word 就把缩进显示成厘米而
+    不是"N 字符"，那本身即不合规。要清掉的方向仍显式写 0（零值没有单位歧义），这样
+    才能压过继承来的绝对缩进。
 
-    When the companion IS written (char_only=False): every char-based value
-    (w:firstLineChars / w:leftChars) is paired with its ABSOLUTE equivalent
-    (w:firstLine / w:left) computed from ``size_hp`` — which
-    MUST be the document's CHARACTER-UNIT size (the default font size, ~五号
-    10.5pt=21 半点), NOT the paragraph's own font. Word measures "N 字符" against
-    that default size, so computing the companion at, say, a heading's 三号(32)
-    makes it ~1.52× too wide (2 字符 → 1.13cm instead of 0.74cm; the 目录 三级
-    even wraps its page number). Pairing the char value with a MATCHING absolute
-    value is what makes the override win over an absolute indent INHERITED from a
-    style / numbering level — the shape a LibreOffice .doc→.docx conversion
-    produces (LibreOffice emits no *Chars variants). A char-only first-line
-    indent does NOT neutralize an inherited absolute w:hanging in Word, so the
-    hanging survives and renders as a hanging indent (the "首行缩进变悬挂缩进 /
-    左缩进 -0.74cm" symptom). Because the two forms agree, this never changes the
-    Word-converted (already-correct) case."""
+    **历史（别照直觉加回来）**：这里曾按陷阱 #10 给每个字符单位值配一个绝对伴随值，
+    用来压过 LibreOffice 转换出的、继承自样式/编号层的绝对 hanging。方案C 阶段2 之后
+    两条继承路径都被根治——编号层由甲法克隆钳中和（`_clamp_numbering_indent`），样式层
+    由 canonical 命名样式注入+指派接管（`_inject_canonical_styles`/`_assign_canonical_style`，
+    canonical 样式自身把左右缩进显式归零、不带 hanging）——伴随值失去存在理由，删掉。
+    本函数如今只服务**没有 canonical 样式承载缩进**的角色（目录条目：它的缩进由文档
+    自己的 TOC 样式承载，见 `_patch_toc_styles`）。"""
     ind = _get_or_make(pPr, "w:ind")
     if first_line_chars is not None:
         ind.set(qn("w:firstLineChars"), str(first_line_chars))
-        # Absolute companion (may be 0 for the "no special indent" cases:
-        # title / caption / TOC) so an inherited absolute first-line/hanging is
-        # overridden rather than left to win. Skipped in char_only mode.
-        if not char_only:
-            ind.set(qn("w:firstLine"), str(_char_twips(first_line_chars, size_hp)))
-        elif ind.get(qn("w:firstLine")) is not None:
+        if ind.get(qn("w:firstLine")) is not None:
             del ind.attrib[qn("w:firstLine")]
         # remove hanging: firstLine and hanging are mutually exclusive, and any
         # direct hanging would otherwise take precedence over our first-line.
@@ -235,44 +218,29 @@ def _set_first_line_and_clear_left(pPr, first_line_chars, clear_left, clear_righ
     if set_left_chars is not None:
         # Set the left indent to a SPECIFIC character count (TOC per-level
         # indent: 0/200/400). leftChars governs (char-based, East-Asian aware);
-        # its absolute w:left companion is written too (so an inherited absolute
-        # left indent is overridden), and the w:start synonyms dropped.
+        # the absolute w:left form and the w:start synonyms are dropped.
         ind.set(qn("w:leftChars"), str(set_left_chars))
-        if not char_only:
-            ind.set(qn("w:left"), str(_char_twips(set_left_chars, size_hp)))
-        elif ind.get(qn("w:left")) is not None:
-            del ind.attrib[qn("w:left")]
-        for a in ("w:startChars", "w:start"):
+        for a in ("w:left", "w:startChars", "w:start"):
             if ind.get(qn(a)) is not None:
                 del ind.attrib[qn(a)]
     elif clear_left:
         # Force the left indent to 0 rather than merely deleting the direct
         # attribute: the indent we need to override is frequently INHERITED
-        # from the paragraph style (a title style, or the TOC1/2/3 styles),
-        # and deleting a direct attribute that isn't there leaves the style's
-        # indent in effect. An explicit direct 0 wins over the inherited value.
-        # The w:start/w:startChars synonyms are removed so they can't re-supply
-        # a non-zero left indent alongside our 0. In char_only mode the absolute
-        # w:left companion is dropped (the numbering-layer clamp removes the
-        # inherited left instead).
+        # from the paragraph style, and deleting a direct attribute that isn't
+        # there leaves the style's indent in effect. An explicit direct 0 wins
+        # over the inherited value. The w:start/w:startChars synonyms are
+        # removed so they can't re-supply a non-zero left indent alongside our 0.
         ind.set(qn("w:leftChars"), "0")
-        if not char_only:
-            ind.set(qn("w:left"), "0")
-        elif ind.get(qn("w:left")) is not None:
-            del ind.attrib[qn("w:left")]
+        ind.set(qn("w:left"), "0")
         for a in ("w:startChars", "w:start"):
             if ind.get(qn(a)) is not None:
                 del ind.attrib[qn(a)]
     if clear_right:
-        # Same reasoning for the right indent. Zeroing this (title/TOC only) is
-        # what makes jc=center actually center on the full page width instead
-        # of the width left after an un-cleared (often style-inherited) right
-        # indent narrows it asymmetrically.
+        # Same reasoning for the right indent. Zeroing this is what makes
+        # jc=center actually center on the full page width instead of the width
+        # left after an un-cleared (often style-inherited) right indent.
         ind.set(qn("w:rightChars"), "0")
-        if not char_only:
-            ind.set(qn("w:right"), "0")
-        elif ind.get(qn("w:right")) is not None:
-            del ind.attrib[qn("w:right")]
+        ind.set(qn("w:right"), "0")
         for a in ("w:endChars", "w:end"):
             if ind.get(qn(a)) is not None:
                 del ind.attrib[qn(a)]
@@ -550,10 +518,16 @@ def _patch_toc_styles(pkg_dir, toc_spec, char_unit_hp=21):
     0.74cm/1.49cm rather than the too-wide 1.13cm/2.26cm that wraps page
     numbers.
 
-    目录合规【只认 leftChars】（用户决策，2026-07）：不再往 TOC 样式写死制表位。
-    Word 的 TOC 是域，updateFields 刷新时按域开关自建每条目的制表位（含页码右
-    制表位），我们写进样式的那对 tab 会被它盖掉、达不到效果——故删掉，少一处与
-    Word 打架。此函数只钉 font/size/leftChars。"""
+    目录合规【只认 leftChars】——判定层只按 leftChars 判合规（`_check_toc`）。但样式
+    里仍要写**制表位**：阶段0 的 canonical 参考件经用户 Word 逐项验收确认，目录条目的
+    "编号→标题→点线→页码"排布靠 TOC 样式自带的左制表位 + 右点线制表位撑起来，缺了
+    点线会跑到编号与标题之间、页码换行（陷阱 #12）。制表位没有字符单位形式，只能写
+    绝对 twips，按 spec 的字符数 × 文档字符单位字号换算（Normal=五号 → 左 840/1050/1260
+    ＋右点线 8665）——`char_unit_hp` 就是这把尺子，取 docDefaults 的字号而**不是**目录
+    自己的小三，否则整体偏宽、三级页码换行。
+
+    历史（别照直觉再删一次）：2026-07 曾以"Word updateFields 会自建制表位、写死会被
+    盖掉"为由删掉这段；阶段0 Word 实测**推翻**了它——样式制表位确实生效。"""
     if not toc_spec or not toc_spec.get("east_asia") or not toc_spec.get("size_hp"):
         return 0
     path = os.path.join(pkg_dir, "word", "styles.xml")
@@ -581,6 +555,21 @@ def _patch_toc_styles(pkg_dir, toc_spec, char_unit_hp=21):
         lvl = _toc_style_level(sid, name)
         want_left = by_level.get(str(lvl), 0) if (lvl is not None) else 0
         ppr = _get_or_make(st, "w:pPr", before_tags=("w:rPr",))
+        # 制表位：左（编号→标题）+ 右点线（→页码）。w:tabs 在 CT_PPr 里排在
+        # spacing/ind 之前，_get_or_make 的 before_tags 保证插对位置。
+        tabs_spec = canonstyles.toc_level_props(toc_spec, lvl, char_unit_hp)["tabs"]
+        if tabs_spec:
+            tabs = _get_or_make(ppr, "w:tabs",
+                                before_tags=("w:spacing", "w:ind", "w:jc", "w:outlineLvl",
+                                             "w:rPr"))
+            for old in tabs.findall(qn("w:tab")):
+                tabs.remove(old)
+            for val, pos, leader in tabs_spec:
+                tab = etree.SubElement(tabs, qn("w:tab"))
+                tab.set(qn("w:val"), val)
+                if leader:
+                    tab.set(qn("w:leader"), leader)
+                tab.set(qn("w:pos"), str(pos))
         ind = _get_or_make(ppr, "w:ind")
         ind.set(qn("w:leftChars"), str(want_left))
         # absolute companion (0 for 一级) so the per-level indent overrides any
@@ -880,6 +869,383 @@ def _clamp_numbering_indent(pkg_dir, targets, resolver, numbering_levels):
     return changed
 
 
+# ---------------------------------------------------------------------------
+# 方案C 阶段2：全角色 canonical 样式注入 + 指派 + 清直接覆盖
+# ---------------------------------------------------------------------------
+W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
+REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+_OFFICE_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+_WML_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml."
+
+# CT_Settings 的子元素顺序（ECMA-376 序列，节选出常见项）。settings.xml 是严格
+# sequence，新插的元素必须落在正确位置，否则 Word 可能报"内容有问题"。
+_SETTINGS_ORDER = (
+    "writeProtection", "view", "zoom", "removePersonalInformation",
+    "removeDateAndTime", "doNotDisplayPageBoundaries", "displayBackgroundShape",
+    "printPostScriptOverText", "printFractionalCharacterWidth", "printFormsData",
+    "embedTrueTypeFonts", "embedSystemFonts", "saveSubsetFonts", "saveFormsData",
+    "mirrorMargins", "alignBordersAndEdges", "bordersDoNotSurroundHeader",
+    "bordersDoNotSurroundFooter", "gutterAtTop", "hideSpellingErrors",
+    "hideGrammaticalErrors", "activeWritingStyle", "proofState", "formsDesign",
+    "attachedTemplate", "linkStyles", "stylePaneFormatFilter", "stylePaneSortMethod",
+    "documentType", "mailMerge", "revisionView", "trackChanges", "doNotTrackMoves",
+    "doNotTrackFormatting", "documentProtection", "autoFormatOverride",
+    "styleLockTheme", "styleLockQFSet", "defaultTabStop", "autoHyphenation",
+    "consecutiveHyphenLimit", "hyphenationZone", "doNotHyphenateCaps", "showEnvelope",
+    "summaryLength", "clickAndTypeStyle", "defaultTableStyle", "evenAndOddHeaders",
+    "bookFoldRevPrinting", "bookFoldPrinting", "bookFoldPrintingSheets",
+    "drawingGridHorizontalSpacing", "drawingGridVerticalSpacing",
+    "displayHorizontalDrawingGridEvery", "displayVerticalDrawingGridEvery",
+    "doNotUseMarginsForDrawingGridOrigin", "drawingGridHorizontalOrigin",
+    "drawingGridVerticalOrigin", "doNotShadeFormData", "noPunctuationKerning",
+    "characterSpacingControl", "printTwoOnOne", "strictFirstAndLastChars",
+    "noLineBreaksAfter", "noLineBreaksBefore", "savePreviewPicture",
+    "doNotValidateAgainstSchema", "saveInvalidXml", "ignoreMixedContent",
+    "alwaysShowPlaceholderText", "doNotDemarcateInvalidXml", "saveXmlDataOnly",
+    "useXSLTWhenSaving", "saveThroughXslt", "showXMLTags", "alwaysMergeEmptyNamespace",
+    "updateFields", "hdrShapeDefaults", "footnotePr", "endnotePr", "compat",
+    "docVars", "rsids", "mathPr", "attachedSchema", "themeFontLang",
+    "clrSchemeMapping", "doNotIncludeSubdocsInStats", "doNotAutoCompressPictures",
+    "forceUpgrade", "captions", "readModeInkLockDown", "smartTagType",
+    "schemaLibrary", "shapeDefaults", "doNotEmbedSmartTags", "decimalSymbol",
+    "listSeparator",
+)
+
+
+def _parse_fragment(xml):
+    """把一个带 w: 前缀的 XML 片段解析成 lxml 元素（canonstyles 出的字符串）。"""
+    wrapped = '<w:wrap xmlns:w="%s">%s</w:wrap>' % (W_NS, xml)
+    return etree.fromstring(wrapped.encode("utf-8"))[0]
+
+
+def _local(el):
+    return etree.QName(el).localname
+
+
+def _ordered_insert(parent, el, order):
+    """按 ``order`` 给出的 schema 顺序把 el 插进 parent（未知子元素不参与比较）。"""
+    try:
+        idx = order.index(_local(el))
+    except ValueError:
+        parent.append(el)
+        return
+    for child in parent:
+        try:
+            if order.index(_local(child)) > idx:
+                child.addprevious(el)
+                return
+        except ValueError:
+            continue
+    parent.append(el)
+
+
+def _ensure_part(pkg_dir, fname, kind, empty_root):
+    """确保 word/<fname> 存在，并已注册进 [Content_Types].xml 与 document.xml.rels。
+
+    最小 docx（测试件、某些转换产物）可能根本没有 styles.xml / settings.xml，注入
+    前得先把这个部件建出来并挂上关系，否则 Word 看不到它。"""
+    path = os.path.join(pkg_dir, "word", fname)
+    if os.path.exists(path):
+        return path
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>%s' % empty_root)
+
+    ct_path = os.path.join(pkg_dir, "[Content_Types].xml")
+    if os.path.exists(ct_path):
+        tree = parse_xml(ct_path)
+        root = tree.getroot()
+        part = "/word/%s" % fname
+        if not any(ov.get("PartName") == part
+                   for ov in root.findall("{%s}Override" % CT_NS)):
+            ov = etree.SubElement(root, "{%s}Override" % CT_NS)
+            ov.set("PartName", part)
+            ov.set("ContentType", _WML_CT + kind + "+xml")
+        tree.write(ct_path, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+    rels_path = os.path.join(pkg_dir, "word", "_rels", "document.xml.rels")
+    if os.path.exists(rels_path):
+        tree = parse_xml(rels_path)
+        root = tree.getroot()
+        rels = root.findall("{%s}Relationship" % REL_NS)
+        if not any(r.get("Target") == fname for r in rels):
+            maxid = 0
+            for r in rels:
+                rid = r.get("Id", "")
+                if rid.startswith("rId") and rid[3:].isdigit():
+                    maxid = max(maxid, int(rid[3:]))
+            rel = etree.SubElement(root, "{%s}Relationship" % REL_NS)
+            rel.set("Id", "rId%d" % (maxid + 1))
+            rel.set("Type", _OFFICE_REL + kind)
+            rel.set("Target", fname)
+        tree.write(rels_path, xml_declaration=True, encoding="UTF-8", standalone=True)
+    return path
+
+
+def _merge_children(dst, src):
+    """把 src 的子元素并进 dst：同名子元素**整体替换**，没有的追加。"""
+    for child in list(src):
+        old = dst.find(child.tag)
+        if old is not None:
+            old.addprevious(child)
+            dst.remove(old)
+        else:
+            dst.append(child)
+
+
+def _patch_normal_and_defaults(styles_root, spec):
+    """把 docDefaults 与 Normal(正文) 样式的字体/字号钉成 canonical 的**五号**。
+
+    这是【文档网格】能不能是 15.6磅/41行 的前提（陷阱 #12）：Word 的"文档网格字体"
+    就是 Normal 样式的字号，Normal=三号 时行高 21.75磅 顶破 15.6磅 的网格。正文内容
+    不受影响——它由独立的 FGW正文(三号) 样式承载，且**每个有角色的段落都会被指派**
+    canonical 样式，不再依赖 Normal 供给字号（这正是"指派要覆盖全部有角色段落、而不
+    只是违规段落"的原因：否则改 Normal 会把原本合规、靠 Normal 拿到三号的段落悄悄
+    变成五号，成为"改了却没提示"的盲区）。
+
+    用**合并**而非整体替换：文档自己的 Normal/docDefaults 上的其它属性（语言、段落
+    默认值等）保留不动，只钉字体字号。"""
+    canon_def = _parse_fragment(canonstyles.doc_defaults_xml(spec))
+    dd = styles_root.find(qn("w:docDefaults"))
+    if dd is None:
+        styles_root.insert(0, canon_def)
+    else:
+        src_rpr = canon_def.find(qn("w:rPrDefault") + "/" + qn("w:rPr"))
+        rpr_default = _get_or_make(dd, "w:rPrDefault", before_tags=("w:pPrDefault",))
+        dst_rpr = _get_or_make(rpr_default, "w:rPr")
+        _merge_children(dst_rpr, src_rpr)
+
+    canon_normal = _parse_fragment(canonstyles.normal_style_xml(spec))
+    normal = None
+    for st in styles_root.findall(qn("w:style")):
+        if st.get(qn("w:type")) != "paragraph":
+            continue
+        if st.get(qn("w:default")) == "1" or st.get(qn("w:styleId")) == canonstyles.NORMAL_STYLE_ID:
+            normal = st
+            break
+    if normal is None:
+        styles_root.append(canon_normal)
+    else:
+        _merge_children(_get_or_make(normal, "w:rPr", before_tags=()),
+                        canon_normal.find(qn("w:rPr")))
+
+
+def _inject_canonical_styles(pkg_dir, spec):
+    """注入全角色 canonical 命名样式（方案C §4：把 `_patch_toc_styles` 推广到每个角色）。
+
+    同 styleId 的旧样式**整体替换**，因而幂等——对已处理过的文档重跑收敛到同一结果。
+    文档原有的其它样式一概不动（段落靠 pStyle 改指 canonical 样式，而不是就地篡改
+    共享样式：原地改会溢到未被指派的段落，就是 bug #17 那类事故）。
+
+    样式定义本身来自 `scripts/lib/canonstyles.py`，与阶段0 经用户 Word 验收的参考件
+    是**同一份字符串**。返回注入的样式数。"""
+    path = _ensure_part(pkg_dir, "styles.xml", "styles",
+                        '<w:styles xmlns:w="%s"/>' % W_NS)
+    tree = parse_xml(path)
+    root = tree.getroot()
+    _patch_normal_and_defaults(root, spec)
+
+    by_id = {st.get(qn("w:styleId")): st for st in root.findall(qn("w:style"))}
+    n = 0
+    for d in canonstyles.canonical_style_defs(spec):
+        el = _parse_fragment(d["xml"])
+        old = by_id.get(d["id"])
+        if old is not None:
+            old.addprevious(el)
+            root.remove(old)
+        else:
+            root.append(el)
+        n += 1
+    tree.write(path, xml_declaration=True, encoding="UTF-8", standalone=True)
+    return n
+
+
+def _clear_run_props(p, clear_ea, clear_latin, clear_size):
+    """清掉段落各 run 与段落标记 rPr 上、被 canonical 样式承载的字体/字号直接覆盖。
+
+    严格-spec（§6 用户裁决）：canonical 值必须由注入的命名样式承载，"渲染对但用直接
+    属性表达"不算合规。只清样式确实承载的键——加粗/颜色/上标之类样式没管的直接属性
+    一律保留，指派样式不该顺手抹掉作者的行内强调。"""
+    # 只处理**已存在**的 rPr（别用 _run_rpr 顺手建空壳），清空后连壳一起删掉。
+    owners = [(r, r.find(qn("w:rPr"))) for r in _iter_runs(p)]
+    pPr = get_pPr(p)
+    owners.append((pPr, pPr.find(qn("w:rPr"))))
+    for owner, rpr in owners:
+        if rpr is None:
+            continue
+        rf = rpr.find(qn("w:rFonts"))
+        if rf is not None:
+            attrs = []
+            if clear_ea:
+                attrs += ["w:eastAsia", "w:eastAsiaTheme"]
+            if clear_latin:
+                attrs += ["w:ascii", "w:asciiTheme", "w:hAnsi", "w:hAnsiTheme",
+                          "w:cs", "w:cstheme"]
+            for a in attrs:
+                if rf.get(qn(a)) is not None:
+                    del rf.attrib[qn(a)]
+            if not rf.attrib:
+                rpr.remove(rf)
+        if clear_size:
+            for tag in ("w:sz", "w:szCs"):
+                el = rpr.find(qn(tag))
+                if el is not None:
+                    rpr.remove(el)
+        if len(rpr) == 0 and not rpr.attrib:
+            owner.remove(rpr)
+
+
+def _clear_ppr_governed(pPr, gov):
+    """清掉段落 pPr 上被 canonical 样式承载的直接属性（缩进/行距/对齐/大纲级别）。"""
+    if gov.get("ind"):
+        for ind in pPr.findall(qn("w:ind")):
+            pPr.remove(ind)
+    sp = pPr.find(qn("w:spacing"))
+    if sp is not None:
+        attrs = []
+        if gov.get("line"):
+            attrs += ["w:line", "w:lineRule"]
+        if gov.get("space_before_after"):
+            attrs += ["w:before", "w:after", "w:beforeLines", "w:afterLines",
+                      "w:beforeAutospacing", "w:afterAutospacing"]
+        for a in attrs:
+            if sp.get(qn(a)) is not None:
+                del sp.attrib[qn(a)]
+        if not sp.attrib:
+            pPr.remove(sp)
+    if gov.get("jc"):
+        for jc in pPr.findall(qn("w:jc")):
+            pPr.remove(jc)
+    if gov.get("outline"):
+        for ol in pPr.findall(qn("w:outlineLvl")):
+            pPr.remove(ol)
+
+
+def _set_pstyle(p, style_id):
+    """给段落指派样式（w:pStyle 必须是 pPr 的第一个子元素）。"""
+    pPr = get_pPr(p)
+    for old in pPr.findall(qn("w:pStyle")):
+        pPr.remove(old)
+    el = etree.Element(qn("w:pStyle"))
+    el.set(qn("w:val"), style_id)
+    pPr.insert(0, el)
+
+
+def _assign_canonical_style(p, style_id, gov, num_ref=(None, None)):
+    """给段落指派 canonical 样式，并清掉该样式承载的直接覆盖。
+
+    ``num_ref`` 是**指派前**解析出的有效 (numId, ilvl)。自动编号常常挂在原样式的
+    numPr 上，改指 canonical 样式会把编号一起弄丢（"一、"消失＝改了原文），所以这里
+    把它**钉成段落的直接 numPr** 保号。编号层带来的缩进随后由甲法克隆钳中和。"""
+    _set_pstyle(p, style_id)
+    _clear_ppr_governed(get_pPr(p), gov)
+    _clear_run_props(p, gov.get("fonts", False), gov.get("western", False),
+                     gov.get("size", False))
+    nid, ilvl = num_ref
+    if nid:
+        _set_para_numid(p, nid, ilvl or 0)
+
+
+# 一个 fix 的 set_* 键分别由哪项样式承载 —— 段落已指派 canonical 样式时，这些键不再
+# 写成直接属性（样式已经供给了同一个值）。
+_FIX_KEY_GOVERNOR = {
+    "set_east_asia": "fonts", "set_ascii": "western", "set_size_hp": "size",
+    "set_line_exact": "line", "set_line_rule": "line",
+    "clear_space_before_after": "space_before_after",
+    "set_first_line_chars": "ind", "set_left_chars": "ind",
+    "clear_left_indent": "ind", "clear_right_indent": "ind",
+    "set_jc": "jc",
+}
+
+
+def _governed(gov, key):
+    return bool(gov.get(_FIX_KEY_GOVERNOR.get(key, ""), False))
+
+
+# ---------------------------------------------------------------------------
+# 文档网格 / 表格默认值
+# ---------------------------------------------------------------------------
+def _apply_document_grid(pkg_dir, spec):
+    """把 spec.document_grid 写进 settings.xml（默认制表位/绘图网格/compat 块/语言）。
+
+    行网格 15.6磅/41行 不是只靠 sectPr 的 docGrid——**compat 块（尤其 useFELayout +
+    compatibilityMode=15）才是开关**，缺它 Word 按旧版式把行距顶到 21.75磅/29行
+    （陷阱 #12，用户实测）。返回写入的子元素数。"""
+    children = canonstyles.settings_children_xml(spec)
+    if not children:
+        return 0
+    path = _ensure_part(pkg_dir, "settings.xml", "settings",
+                        '<w:settings xmlns:w="%s"/>' % W_NS)
+    tree = parse_xml(path)
+    root = tree.getroot()
+    for tag, xml in children:
+        el = _parse_fragment(xml)
+        old = root.find(qn("w:" + tag))
+        if old is not None:
+            old.addprevious(el)
+            root.remove(old)
+        else:
+            _ordered_insert(root, el, _SETTINGS_ORDER)
+    tree.write(path, xml_declaration=True, encoding="UTF-8", standalone=True)
+    return len(children)
+
+
+def _apply_doc_grid_to_sections(doc_root, spec):
+    """每个 sectPr 设行网格（docGrid，必须是 sectPr 的最后一个子元素）。"""
+    attrs = canonstyles.doc_grid_attrs(spec)
+    if not attrs:
+        return 0
+    n = 0
+    for sect in doc_root.iter(qn("w:sectPr")):
+        grid = sect.find(qn("w:docGrid"))
+        if grid is None:
+            grid = etree.SubElement(sect, qn("w:docGrid"))
+        for k, v in attrs.items():
+            grid.set(qn("w:" + k), v)
+        n += 1
+    return n
+
+
+def _apply_table_defaults(doc_root, spec):
+    """表格：左缩进 tblInd、表级默认单元格边距 tblCellMar、单元格垂直对齐 vAlign。
+
+    `tblInd`（表格整体左缩进）与 `tblCellMar`（单元格内边距）是两回事，别混
+    （陷阱 #12）。返回处理的表格数。"""
+    if not (spec.get("table_defaults") or {}):
+        return 0
+    ind_xml = canonstyles.table_ind_xml(spec)
+    mar_xml = canonstyles.cell_margins_xml(spec)
+    valign_xml = canonstyles.cell_valign_xml(spec)
+    n = 0
+    for tbl in doc_root.iter(qn("w:tbl")):
+        tblPr = _get_or_make(tbl, "w:tblPr", before_tags=("w:tblGrid", "w:tr"))
+        if ind_xml:
+            for old in tblPr.findall(qn("w:tblInd")):
+                tblPr.remove(old)
+            _ordered_insert(tblPr, _parse_fragment(ind_xml), _TBLPR_ORDER)
+        if mar_xml:
+            for old in tblPr.findall(qn("w:tblCellMar")):
+                tblPr.remove(old)
+            _ordered_insert(tblPr, _parse_fragment(mar_xml), _TBLPR_ORDER)
+        if valign_xml:
+            for tc in tbl.iter(qn("w:tc")):
+                tcPr = _get_or_make(tc, "w:tcPr", before_tags=("w:p", "w:tbl"))
+                for old in tcPr.findall(qn("w:vAlign")):
+                    tcPr.remove(old)
+                _ordered_insert(tcPr, _parse_fragment(valign_xml), _TCPR_ORDER)
+        n += 1
+    return n
+
+
+_TBLPR_ORDER = ("tblStyle", "tblpPr", "tblOverlap", "bidiVisual", "tblStyleRowBandSize",
+                "tblStyleColBandSize", "tblW", "tblJc", "tblCellSpacing", "tblInd",
+                "tblBorders", "shd", "tblLayout", "tblCellMar", "tblLook", "tblCaption",
+                "tblDescription")
+_TCPR_ORDER = ("cnfStyle", "tcW", "gridSpan", "hMerge", "vMerge", "tcBorders", "shd",
+               "noWrap", "tcMar", "textDirection", "tcFitText", "vAlign", "hideMark")
+
+
 def _set_update_fields(pkg_dir):
     """Set settings.xml <w:updateFields w:val="true"/> so Word refreshes the TOC
     (renumbered headings + new page numbers) when the document is opened.
@@ -928,14 +1294,31 @@ def main():
     # index -> paragraph element (same iterator as extraction)
     para_by_idx = {i: p for i, p in iter_body_paragraphs(root)}
 
+    applied = {"format": 0, "renumber_caption": 0, "renumber_heading": 0,
+               "section": 0, "hint": 0, "comments": 0, "skipped": 0}
+    try:
+        spec = load_default_spec()
+    except (OSError, ValueError):
+        spec = {}
+
+    # ---- 方案C 阶段2：先注入 canonical 样式 + 文档网格，再指派 ----------------
+    # 注入必须在算 char_unit_hp 之前：docDefaults 被钉成五号后，"N 字符"的尺子才是
+    # 21 半点，目录制表位/左缩进伴随值都按它换算（陷阱 #12）。
+    if spec:
+        applied["canonical_styles"] = _inject_canonical_styles(out_pkg, spec)
+        applied["grid_settings"] = _apply_document_grid(out_pkg, spec)
+        applied["doc_grid_sections"] = _apply_doc_grid_to_sections(root, spec)
+        applied["tables_normalized"] = _apply_table_defaults(root, spec)
+
     # Character-unit size for converting *Chars indents to absolute twips —
     # the DOCUMENT default font size, matching how Word measures "N 字符".
     char_unit_hp = _default_char_unit_hp(out_pkg)
 
     # Resolver + numbering map for the 甲法 numbering-layer clamp: an indent fix
-    # on an AUTO-NUMBERED paragraph is applied char-only, and the inherited
+    # on an AUTO-NUMBERED paragraph is written char-only, and the inherited
     # hanging is removed at the numbering layer (a cloned abstractNum) instead of
-    # being out-muscled by an absolute companion.
+    # being out-muscled by an absolute companion. Parsed AFTER injection so the
+    # resolver knows the canonical styles too.
     styles_path = os.path.join(out_pkg, "word", "styles.xml")
     styles_root = parse_xml(styles_path).getroot() if os.path.exists(styles_path) else None
     resolver = StyleResolver(styles_root)
@@ -945,9 +1328,37 @@ def main():
     numbering_levels = load_numbering_levels(numbering_root)
     clamp_targets = []
 
+    # ---- 指派 pStyle：每个【有角色】的段落都套 canonical 样式 ------------------
+    # 为什么是"全部有角色的段落"而不只是违规段落：① §6 用户裁决——"渲染对但用直接
+    # 属性表达"不算合规，canonical 值必须由命名样式承载；② 上面把 Normal 钉成五号
+    # （网格前提），原本靠 Normal 拿到三号的**合规**段落若不指派样式就会被悄悄改小，
+    # 那才是真正的"改了却没提示"盲区。对合规段落而言指派是**渲染中性**的：样式承载
+    # 的值本来就等于它的有效值，样式没承载的属性（如密级行的对齐）原样保留。
+    # 安全阀（陷阱#5）在 `checks.paragraph_role` 里：pattern 标题不算 heading 角色。
+    governs = ({d["id"]: d["governs"] for d in canonstyles.canonical_style_defs(spec)}
+               if spec else {})
+    assigned = {}
+    structure_path = os.path.join(workdir, "structure.json")
+    if spec and os.path.exists(structure_path):
+        try:
+            records = json.load(open(structure_path, encoding="utf-8"))["records"]
+        except (OSError, ValueError, KeyError):
+            records = []
+        for rec in records:
+            sid = STYLE_ID_BY_ROLE.get(paragraph_role(rec, spec) or "")
+            p = para_by_idx.get(rec.get("i"))
+            if sid is None or p is None:
+                continue
+            gov = governs.get(sid, {})
+            # 指派前解析编号（改指 canonical 样式会丢掉原样式携带的 numPr）
+            num_ref = _para_num_ref(p, resolver, numbering_levels)
+            _assign_canonical_style(p, sid, gov, num_ref)
+            assigned[rec["i"]] = sid
+            if gov.get("ind") and num_ref[0]:
+                clamp_targets.append(p)
+    applied["styles_assigned"] = len(assigned)
+
     cw = CommentWriter(out_pkg, author="XAgent")
-    applied = {"format": 0, "renumber_caption": 0, "renumber_heading": 0,
-               "section": 0, "hint": 0, "comments": 0, "skipped": 0}
     problems = []
     # idx -> [paragraph_el, [rule_texts]] in first-seen order. Multiple fixes on
     # ONE paragraph (e.g. a font fix + a renumber) are merged into a single
@@ -971,28 +1382,36 @@ def main():
 
         ok = True
         if op == "format":
-            _apply_run_props(p, fix.get("set_east_asia"),
-                             fix.get("set_ascii"), fix.get("set_size_hp"))
+            # 段落已指派 canonical 样式时，样式承载的属性**不再写成直接覆盖**
+            # （严格-spec §2.2/§6：canonical 值由命名样式供给，直接层要清空）；
+            # 样式没承载的属性仍按老路写直接属性（如目录条目——它没有 canonical
+            # 样式，缩进由文档自己的 TOC 样式承载）。
+            gov = governs.get(assigned.get(idx), {})
+            _apply_run_props(
+                p,
+                None if _governed(gov, "set_east_asia") else fix.get("set_east_asia"),
+                None if _governed(gov, "set_ascii") else fix.get("set_ascii"),
+                None if _governed(gov, "set_size_hp") else fix.get("set_size_hp"))
             pPr = get_pPr(p)
-            if fix.get("set_line_exact") is not None:
+            if (fix.get("set_line_exact") is not None
+                    and not _governed(gov, "set_line_exact")):
                 _set_line_exact(pPr, fix["set_line_exact"],
                                 fix.get("set_line_rule") or "exact")
-            if fix.get("clear_space_before_after"):
+            if (fix.get("clear_space_before_after")
+                    and not _governed(gov, "clear_space_before_after")):
                 _clear_space_before_after(pPr)
-            if (fix.get("set_first_line_chars") is not None
-                    or fix.get("clear_left_indent") or fix.get("clear_right_indent")
-                    or fix.get("set_left_chars") is not None):
-                nid, _ilvl = _para_num_ref(p, resolver, numbering_levels)
-                is_auto = nid is not None
+            if (not _governed(gov, "set_first_line_chars")
+                    and (fix.get("set_first_line_chars") is not None
+                         or fix.get("clear_left_indent") or fix.get("clear_right_indent")
+                         or fix.get("set_left_chars") is not None)):
                 _set_first_line_and_clear_left(
                     pPr, fix.get("set_first_line_chars"),
                     bool(fix.get("clear_left_indent")),
                     bool(fix.get("clear_right_indent")),
-                    fix.get("set_left_chars"),
-                    size_hp=char_unit_hp, char_only=is_auto)
-                if is_auto:
+                    fix.get("set_left_chars"))
+                if _para_num_ref(p, resolver, numbering_levels)[0]:
                     clamp_targets.append(p)
-            if fix.get("set_jc") is not None:
+            if fix.get("set_jc") is not None and not _governed(gov, "set_jc"):
                 _set_jc(pPr, fix["set_jc"])
             if fix.get("strip_text"):
                 _strip_para_ws(p, fix["strip_text"])
@@ -1027,14 +1446,11 @@ def main():
 
     cw.flush()
 
-    # Patch the TOC entry styles so a refreshed TOC keeps the spec font/size
-    # and no indent (the direct formatting applied above is otherwise wiped
-    # when Word rebuilds the field on open).
-    try:
-        _spec = load_default_spec()
-        applied["toc_styles"] = _patch_toc_styles(out_pkg, _spec.get("toc"), char_unit_hp)
-    except (OSError, ValueError):
-        applied["toc_styles"] = 0
+    # Patch the TOC entry styles so a refreshed TOC keeps the spec font/size,
+    # per-level indent and tab stops (the direct formatting applied above is
+    # otherwise wiped when Word rebuilds the field on open).
+    applied["toc_styles"] = (_patch_toc_styles(out_pkg, spec.get("toc"), char_unit_hp)
+                             if spec else 0)
 
     # Un-hide auto-generated caption numbers (图N/表N) obscured by a black
     # shading / zero size in the caption numbering definition.

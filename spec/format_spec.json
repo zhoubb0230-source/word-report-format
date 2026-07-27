@@ -14,6 +14,50 @@
   "tolerance_twips": 3,
   "source": "页边距 上3.5cm 下3.2cm 左/右2.85cm；页眉1.5cm 页脚1.75cm"
  },
+ "document_grid": {
+  "grid_type": "lines",
+  "line_pitch_twips": 312,
+  "normal_size_hp": 21,
+  "doc_defaults_size_hp": 21,
+  "default_tab_stop_twips": 420,
+  "drawing_grid_h_twips": 105,
+  "drawing_grid_v_twips": 156,
+  "display_grid_every_h": 2,
+  "display_grid_every_v": 2,
+  "no_punctuation_kerning": true,
+  "character_spacing_control": "compressPunctuation",
+  "theme_font_lang_east_asia": "zh-CN",
+  "compat_flags": [
+   "spaceForUL",
+   "balanceSingleByteDoubleByteWidth",
+   "doNotLeaveBackslashAlone",
+   "ulTrailSpace",
+   "doNotExpandShiftReturn",
+   "adjustLineHeightInTable",
+   "useFELayout"
+  ],
+  "compat_settings": {
+   "compatibilityMode": "15",
+   "overrideTableStyleFontSizeAndJustification": "1",
+   "enableOpenTypeFeatures": "1",
+   "doNotFlipMirrorIndents": "1",
+   "differentiateMultirowTableHeaders": "1",
+   "useWord2013TrackBottomHyphenation": "1"
+  },
+  "source": "文档网格：行网格（docGrid type=lines、linePitch=312 即行距15.6磅、每页41行）；网格能否生效取决于 settings 的 compat 块（尤其 useFELayout + compatibilityMode=15，缺它 Word 用旧版式把行距顶到21.75磅/29行）与 Normal 样式字号——Word 的【文档网格字体】链接的是 Normal（名'正文'）样式，故 Normal/docDefaults 必须是五号(21)，正文内容另走三号的独立正文样式；默认制表位 2 字符=420（标题自动编号后的制表符落此）；绘图网格 0.5字符/0.5行、每2个显示一条。阶段0 Word 逐项验收通过",
+  "hint_only": false
+ },
+ "table_defaults": {
+  "tbl_ind_twips": 0,
+  "cell_margin_twips": {
+   "top": 0,
+   "left": 108,
+   "bottom": 0,
+   "right": 108
+  },
+  "cell_valign": "center",
+  "source": "表格：表格左缩进 0（tblInd，与单元格边距是两回事）；默认单元格边距 上0/左0.19cm(108)/下0/右0.19cm(108)；单元格内容垂直居中"
+ },
  "line_spacing": {
   "line_rule": "exact",
   "line_twips": 560,
@@ -121,7 +165,14 @@
    "2": 200,
    "3": 400
   },
-  "source": "目录：仿宋 小三（15磅=30半点）；一级不缩进/二级缩进2字符/三级缩进4字符（leftChars 0/200/400）；目录合规只认 leftChars；页码列制表位交给 Word updateFields 刷新时自建（不写死进样式）；不超过三级标题",
+  "tab_left_chars_by_level": {
+   "1": 400,
+   "2": 500,
+   "3": 600
+  },
+  "tab_right_chars": 4126,
+  "tab_leader": "dot",
+  "source": "目录：仿宋 小三（15磅=30半点）；一级不缩进/二级缩进2字符/三级缩进4字符（leftChars 0/200/400）；目录合规只认 leftChars；制表位写进 TOC 样式——左制表位 4/5/6 字符、右制表位 41.26 字符带点线（字符单位随 Normal 字号换算：Normal=五号 → 840/1050/1260 + 8665 twips），阶段0 Word 验收确认 Word 更新域后沿用样式制表位；不超过三级标题",
   "hint_only": true
  },
  "caption_format": {
@@ -144,7 +195,8 @@
    "方正黑体_GBK"
   ],
   "size_hp": 32,
-  "source": "封面 密级/文本编号行（位于报告题目上方，同一行）方正黑体_GBK 三号（16磅=32半点，严格按档位不按磅换算）；文本编号字体字号与密级一致（仅校验字体字号）"
+  "enforce_western": true,
+  "source": "封面 密级/文本编号行（位于报告题目上方，同一行）方正黑体_GBK 三号（16磅=32半点，严格按档位不按磅换算）；文本编号字体字号与密级一致；行内数字/西文用 Times New Roman（阶段0 Word 验收确认——封面这一行的编号数字走西文，仅在该行含数字/西文时才校验）"
  },
  "cover_field": {
   "east_asia": "方正黑体_GBK",
@@ -154,7 +206,8 @@
   "size_hp": 30,
   "line_rule": "auto",
   "line_twips": 480,
-  "source": "封面 报告题目下的各要素（项目名称/项目编号/承担单位（盖章）/项目负责人（签字）/项目起止时间/报告编制时间等）方正黑体_GBK 小三（15磅）、2倍行距（lineRule=auto、line=480），两端对齐、首行缩进2字符（删除行首空格、清除左侧字符缩进；行内填空空格保留）"
+  "enforce_western": true,
+  "source": "封面 报告题目下的各要素（项目名称/项目编号/承担单位（盖章）/项目负责人（签字）/项目起止时间/报告编制时间等）方正黑体_GBK 小三（15磅）、2倍行距（lineRule=auto、line=480），两端对齐、首行缩进2字符（删除行首空格、清除左侧字符缩进；行内填空空格保留）；行内数字/西文用 Times New Roman（阶段0 Word 验收确认，仅在该行含数字/西文时才校验）"
  },
  "cover": {
   "required_fields": [

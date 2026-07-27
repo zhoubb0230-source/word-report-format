@@ -169,11 +169,16 @@ class TestPipelineEndToEnd(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_LXML, "lxml not installed")
 class TestApplyAbsoluteIndentCompanion(unittest.TestCase):
-    """LibreOffice .doc→.docx 把缩进表达成【绝对】twips 的 firstLine/hanging（挂
-    在样式或编号层，不发 *Chars 变体）。仅写字符单位 firstLineChars 不能压过一个
-    【继承来的绝对】hanging（Word 里 hanging 会赢），于是首行缩进被渲染成 -0.74cm
-    的悬挂缩进。40 现在给每个字符单位缩进补一个绝对 firstLine/left 伴随值，使直接
-    覆盖能压过继承的绝对缩进。此处锁死这一行为。"""
+    """严格-spec §2.2：直接层缩进**只写字符单位**，不补非零的绝对伴随值。
+
+    历史（别照直觉加回来）：40 曾给每个字符单位缩进补一个绝对 firstLine/left，用来
+    压过 LibreOffice 转换出的、继承自样式/编号层的绝对 hanging（陷阱 #10）。方案C
+    阶段2 之后两条继承路径都被根治——编号层由甲法克隆钳中和、样式层由 canonical 命名
+    样式注入+指派接管——伴随值失去理由且**自身违规**（Word 会把缩进显示成厘米而不是
+    "2 字符"），已删除。要清零的方向仍写显式 0（零值无单位歧义，用来挡继承）。
+
+    `_char_twips` / `_default_char_unit_hp` 仍在：目录样式的制表位与左缩进伴随值
+    必须写绝对 twips，按【文档字符单位字号】换算（陷阱 #12）。"""
 
     def setUp(self):
         self.mod = helpers.load_script("40_apply_fixes.py")
@@ -215,43 +220,42 @@ class TestApplyAbsoluteIndentCompanion(unittest.TestCase):
         self.assertEqual(self.mod._default_char_unit_hp(d), 24)
         shutil.rmtree(d, ignore_errors=True)
 
-    def test_first_line_gets_absolute_companion(self):
+    def test_first_line_is_char_only(self):
         pPr = self._ppr()
-        self.mod._set_first_line_and_clear_left(pPr, 200, False, False, None, size_hp=21)
+        self.mod._set_first_line_and_clear_left(pPr, 200, False)
         ind = self._ind(pPr)
         self.assertEqual(ind.get(self.mod.qn("w:firstLineChars")), "200")
-        # absolute companion present and positive -> beats an inherited hanging;
-        # at the char-unit size (21) it is 420 (0.74cm), matching Word's native
-        # firstLineChars width rather than over-indenting.
-        self.assertEqual(ind.get(self.mod.qn("w:firstLine")), "420")
+        # 无绝对伴随值——有它 Word 就把首行缩进显示成厘米而不是"2 字符"
+        self.assertIsNone(ind.get(self.mod.qn("w:firstLine")))
 
     def test_direct_hanging_removed_when_setting_first_line(self):
-        # a paragraph carrying an ABSOLUTE hanging (the LibreOffice shape) must
-        # come out with a positive first-line indent and NO hanging.
+        # 段落带【绝对 hanging】（LibreOffice 形态）时，首行缩进写字符单位、hanging 清掉
         pPr = self._ppr('<w:ind w:hanging="420" w:left="420"/>')
-        self.mod._set_first_line_and_clear_left(pPr, 200, True, False, None, size_hp=21)
+        self.mod._set_first_line_and_clear_left(pPr, 200, True)
         ind = self._ind(pPr)
         self.assertIsNone(ind.get(self.mod.qn("w:hanging")))
-        self.assertEqual(ind.get(self.mod.qn("w:firstLine")), "420")
+        self.assertIsNone(ind.get(self.mod.qn("w:firstLine")))
+        self.assertEqual(ind.get(self.mod.qn("w:firstLineChars")), "200")
+        # 要清零的左缩进写显式 0（挡住继承值），零值不涉及单位歧义
         self.assertEqual(ind.get(self.mod.qn("w:leftChars")), "0")
+        self.assertEqual(ind.get(self.mod.qn("w:left")), "0")
 
-    def test_clear_no_indent_writes_absolute_zero(self):
-        # title/caption "no indent": firstLineChars=0 must be paired with an
-        # absolute firstLine=0 so an inherited absolute hanging is overridden.
+    def test_clear_no_indent_zeroes_all_directions(self):
         pPr = self._ppr('<w:ind w:hanging="420"/>')
-        self.mod._set_first_line_and_clear_left(pPr, 0, True, True, None, size_hp=21)
+        self.mod._set_first_line_and_clear_left(pPr, 0, True, True)
         ind = self._ind(pPr)
-        self.assertEqual(ind.get(self.mod.qn("w:firstLine")), "0")
+        self.assertEqual(ind.get(self.mod.qn("w:firstLineChars")), "0")
         self.assertIsNone(ind.get(self.mod.qn("w:hanging")))
+        self.assertEqual(ind.get(self.mod.qn("w:left")), "0")
+        self.assertEqual(ind.get(self.mod.qn("w:right")), "0")
 
-    def test_left_chars_gets_absolute_companion(self):
-        # TOC per-level left indent (leftChars=200) also gets an absolute left,
-        # at the char-unit size (21) -> 420 (0.74cm), not the wrapping 640.
-        pPr = self._ppr()
-        self.mod._set_first_line_and_clear_left(pPr, None, False, False, 200, size_hp=21)
+    def test_left_chars_is_char_only(self):
+        # 目录条目的按级左缩进：只写 leftChars，绝对 left 被删掉
+        pPr = self._ppr('<w:ind w:left="999"/>')
+        self.mod._set_first_line_and_clear_left(pPr, None, False, False, 200)
         ind = self._ind(pPr)
         self.assertEqual(ind.get(self.mod.qn("w:leftChars")), "200")
-        self.assertEqual(ind.get(self.mod.qn("w:left")), "420")
+        self.assertIsNone(ind.get(self.mod.qn("w:left")))
 
 
 # Docx parts for the LibreOffice-shaped heading test (numbering-level hanging).
@@ -363,15 +367,26 @@ class TestLibreOfficeHeadingIndentPipeline(unittest.TestCase):
 
         root = etree.parse(os.path.join(wd, "out_pkg", "word", "document.xml")).getroot()
         heading_p = root.iter(qn("w:p")).__next__()  # first body paragraph = 概述 heading
-        ind = heading_p.find(qn("w:pPr") + "/" + qn("w:ind"))
-        self.assertIsNotNone(ind, "标题段落缺少 w:ind")
+
+        # 阶段2：缩进由【注入的 canonical 标题样式】承载，段落上不留直接 w:ind
+        # （严格-spec §6：canonical 值必须由命名样式供给、直接覆盖清掉）。
+        pstyle = heading_p.find(qn("w:pPr") + "/" + qn("w:pStyle"))
+        self.assertIsNotNone(pstyle, "标题段落未指派 canonical 样式")
+        self.assertEqual(pstyle.get(qn("w:val")), "FGWCanonH1")
+        self.assertIsNone(heading_p.find(qn("w:pPr") + "/" + qn("w:ind")),
+                          "canonical 样式承载缩进后，段落不应再有直接 w:ind")
+
+        styles_root = etree.parse(os.path.join(wd, "out_pkg", "word", "styles.xml")).getroot()
+        h1 = [s for s in styles_root.findall(qn("w:style"))
+              if s.get(qn("w:styleId")) == "FGWCanonH1"][0]
+        sind = h1.find(qn("w:pPr") + "/" + qn("w:ind"))
         # 首行缩进2字符：纯字符单位
-        self.assertEqual(ind.get(qn("w:firstLineChars")), "200")
-        # 严格-spec：不再写绝对伴随值 firstLine/left（编号层已钳，无需绝对值压制）
-        self.assertIsNone(ind.get(qn("w:firstLine")))
-        self.assertIsNone(ind.get(qn("w:left")))
-        # 段落直接属性上不残留 hanging
-        self.assertIsNone(ind.get(qn("w:hanging")))
+        self.assertEqual(sind.get(qn("w:firstLineChars")), "200")
+        # 严格-spec：不写非零绝对伴随值（编号层已钳，无需绝对值压制）；
+        # 左右显式归零只是挡继承，零值没有单位歧义。
+        self.assertIsNone(sind.get(qn("w:firstLine")))
+        self.assertEqual(sind.get(qn("w:left")), "0")
+        self.assertIsNone(sind.get(qn("w:hanging")))
 
         # 段落 numPr 已改指一个【新克隆的 numId】(不再是原 numId=1)
         numid = heading_p.find(qn("w:pPr") + "/" + qn("w:numPr") + "/" + qn("w:numId"))
@@ -549,6 +564,259 @@ class TestCollapseInvariant(unittest.TestCase):
         self.assertEqual(leaks, [])
         self.assertEqual(len(notes), 1)
         self.assertEqual(notes[0]["owner"], "style")
+
+
+@unittest.skipUnless(HAVE_LXML, "lxml not installed")
+class TestCanonicalStyleInjection(unittest.TestCase):
+    """方案C 阶段2 主体：全角色 canonical 样式**注入 + 指派 + 清直接覆盖**，
+    外加文档网格 / 表格默认值。每条锁一个"别回退"的决策。"""
+
+    W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="wrf_canon_")
+        with open(helpers.SPEC_PATH, encoding="utf-8") as f:
+            self.spec = json.load(f)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _script(self, name):
+        return os.path.join(helpers.SCRIPTS, name)
+
+    def qn(self, t):
+        return "{%s}%s" % (self.W, t.split(":")[1])
+
+    def _run(self, body, pg_mar=(1000, 1814, 1616, 1616, 850, 992)):
+        src = os.path.join(self.tmp, "in.docx")
+        helpers.build_docx(src, body, pg_mar=pg_mar)
+        wd = run(self._script("05_new_workdir.py"), os.path.join(self.tmp, "wb"))["workdir"]
+        run(self._script("10_prepare_input.py"), src, wd)
+        run(self._script("20_extract_structure.py"), wd)
+        run(self._script("30_check_format.py"), wd)
+        applied = run(self._script("40_apply_fixes.py"), wd)
+        return wd, applied
+
+    def _doc(self, wd):
+        from lxml import etree
+        return etree.parse(os.path.join(wd, "out_pkg", "word", "document.xml")).getroot()
+
+    def _styles(self, wd):
+        from lxml import etree
+        return etree.parse(os.path.join(wd, "out_pkg", "word", "styles.xml")).getroot()
+
+    _MIXED_BODY = (
+        helpers.para("先进项目2024年度自评价报告", east_asia="宋体", size_hp=44, jc="center")
+        + helpers.para("项目编号：KJ-2024-001", east_asia="宋体", size_hp=30)
+        + helpers.para("一、绪论", east_asia="宋体", size_hp=32, outline=0)
+        + helpers.para("这是正文内容含数字123。", east_asia="宋体", size_hp=32)
+        + helpers.para("图1 系统架构", east_asia="宋体", size_hp=32)
+        + '<w:tbl><w:tblPr/><w:tr><w:tc><w:tcPr/>'
+        + helpers.para("单元格", east_asia="宋体", size_hp=32) + '</w:tc></w:tr></w:tbl>')
+
+    def test_each_role_gets_its_canonical_style(self):
+        wd, _ = self._run(self._MIXED_BODY)
+        got = [p.find(self.qn("w:pPr") + "/" + self.qn("w:pStyle"))
+               for p in self._doc(wd).iter(self.qn("w:p"))]
+        got = [g.get(self.qn("w:val")) if g is not None else None for g in got]
+        self.assertEqual(got, ["FGWCanonTitle", "FGWCanonCoverField", "FGWCanonH1",
+                               "FGWCanonBody", "FGWCanonCaption", "FGWCanonTableBody"])
+
+    def test_direct_overrides_are_cleared_not_rewritten(self):
+        # 严格-spec §6：canonical 值由样式承载，段落上不再留同一属性的直接覆盖
+        # （"渲染对但用直接属性表达"不算合规）。
+        wd, _ = self._run(self._MIXED_BODY)
+        body_p = [p for p in self._doc(wd).iter(self.qn("w:p"))
+                  if (p.find(self.qn("w:pPr") + "/" + self.qn("w:pStyle")) is not None
+                      and p.find(self.qn("w:pPr") + "/" + self.qn("w:pStyle")).get(
+                          self.qn("w:val")) == "FGWCanonBody")][0]
+        self.assertIsNone(body_p.find(self.qn("w:pPr") + "/" + self.qn("w:ind")))
+        self.assertIsNone(body_p.find(self.qn("w:pPr") + "/" + self.qn("w:spacing")))
+        for r in body_p.iter(self.qn("w:r")):
+            rpr = r.find(self.qn("w:rPr"))
+            if rpr is None:
+                continue
+            self.assertIsNone(rpr.find(self.qn("w:sz")))
+            rf = rpr.find(self.qn("w:rFonts"))
+            if rf is not None:
+                self.assertIsNone(rf.get(self.qn("w:eastAsia")))
+
+    def test_style_carries_the_spec_values(self):
+        wd, _ = self._run(self._MIXED_BODY)
+        styles = {s.get(self.qn("w:styleId")): s
+                  for s in self._styles(wd).findall(self.qn("w:style"))}
+        body = styles["FGWCanonBody"]
+        rf = body.find(self.qn("w:rPr") + "/" + self.qn("w:rFonts"))
+        self.assertEqual(rf.get(self.qn("w:eastAsia")), self.spec["body"]["east_asia"])
+        self.assertEqual(rf.get(self.qn("w:ascii")), self.spec["western_font"])
+        self.assertEqual(body.find(self.qn("w:rPr") + "/" + self.qn("w:sz")).get(
+            self.qn("w:val")), str(self.spec["body"]["size_hp"]))
+        sp = body.find(self.qn("w:pPr") + "/" + self.qn("w:spacing"))
+        self.assertEqual(sp.get(self.qn("w:line")),
+                         str(self.spec["line_spacing"]["line_twips"]))
+        self.assertEqual(sp.get(self.qn("w:lineRule")), "exact")
+
+    def test_normal_pinned_to_wuhao_for_document_grid(self):
+        # 陷阱#12：Word 的【文档网格字体】＝Normal 样式字号，必须是五号(21)，
+        # 否则行网格 15.6磅/41行 被顶成 21.75磅/29行。正文三号由 FGW正文 承载。
+        wd, _ = self._run(self._MIXED_BODY)
+        root = self._styles(wd)
+        normal = [s for s in root.findall(self.qn("w:style"))
+                  if s.get(self.qn("w:styleId")) == "Normal"][0]
+        self.assertEqual(normal.find(self.qn("w:rPr") + "/" + self.qn("w:sz")).get(
+            self.qn("w:val")), str(self.spec["document_grid"]["normal_size_hp"]))
+        dd = root.find(self.qn("w:docDefaults") + "/" + self.qn("w:rPrDefault")
+                       + "/" + self.qn("w:rPr") + "/" + self.qn("w:sz"))
+        self.assertEqual(dd.get(self.qn("w:val")),
+                         str(self.spec["document_grid"]["doc_defaults_size_hp"]))
+
+    def test_compliant_paragraph_still_assigned_so_normal_change_cant_shrink_it(self):
+        """反回退：把 Normal 钉成五号会让"原本靠 Normal 拿到三号的合规段落"悄悄变小。
+
+        所以指派覆盖**全部有角色的段落**，不只违规段落——否则就出现"改了却没提示"的
+        盲区。这里造一个各项都合规、字号来自 Normal 的正文段：它没有 fix，但必须被
+        指派 FGW正文（三号）而不是跟着 Normal 掉到五号。"""
+        import zipfile
+        styles = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<w:styles xmlns:w="%s">'
+            '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
+            '<w:name w:val="Normal"/><w:pPr>'
+            '<w:spacing w:line="560" w:lineRule="exact" w:before="0" w:after="0"/>'
+            '<w:ind w:firstLineChars="200"/></w:pPr>'
+            '<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" '
+            'w:eastAsia="仿宋"/><w:sz w:val="32"/><w:szCs w:val="32"/></w:rPr>'
+            '</w:style></w:styles>' % self.W)
+        doc = helpers.document_xml(
+            '<w:p><w:r><w:t xml:space="preserve">完全合规的正文段落。</w:t></w:r></w:p>',
+            pg_mar=(1984, 1814, 1616, 1616, 850, 992))
+        src = os.path.join(self.tmp, "compliant.docx")
+        with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", _CT_LO)
+            z.writestr("_rels/.rels", helpers.ROOT_RELS)
+            z.writestr("word/_rels/document.xml.rels", _DRELS_LO)
+            z.writestr("word/document.xml", doc)
+            z.writestr("word/styles.xml", styles)
+            z.writestr("word/numbering.xml",
+                       '<w:numbering xmlns:w="%s"/>' % self.W)
+        wd = run(self._script("05_new_workdir.py"), os.path.join(self.tmp, "wb2"))["workdir"]
+        run(self._script("10_prepare_input.py"), src, wd)
+        run(self._script("20_extract_structure.py"), wd)
+        checked = run(self._script("30_check_format.py"), wd)
+        self.assertEqual(checked["by_op"].get("format", 0), 0, "该段本应完全合规")
+        run(self._script("40_apply_fixes.py"), wd)
+        p = list(self._doc(wd).iter(self.qn("w:p")))[0]
+        pstyle = p.find(self.qn("w:pPr") + "/" + self.qn("w:pStyle"))
+        self.assertIsNotNone(pstyle, "合规段落也必须被指派 canonical 样式")
+        self.assertEqual(pstyle.get(self.qn("w:val")), "FGWCanonBody")
+
+    def test_document_grid_and_compat_written(self):
+        # 网格 15.6磅/41行 靠 sectPr 的 docGrid ＋ settings 的 compat 块共同生效，
+        # 缺 compat（尤其 useFELayout/compatibilityMode=15）Word 会退回旧版式。
+        wd, applied = self._run(self._MIXED_BODY)
+        from lxml import etree
+        grid = self.spec["document_grid"]
+        sect = self._doc(wd).find(".//" + self.qn("w:sectPr") + "/" + self.qn("w:docGrid"))
+        self.assertEqual(sect.get(self.qn("w:type")), grid["grid_type"])
+        self.assertEqual(sect.get(self.qn("w:linePitch")), str(grid["line_pitch_twips"]))
+        st = etree.parse(os.path.join(wd, "out_pkg", "word", "settings.xml")).getroot()
+        self.assertEqual(st.find(self.qn("w:defaultTabStop")).get(self.qn("w:val")),
+                         str(grid["default_tab_stop_twips"]))
+        compat = st.find(self.qn("w:compat"))
+        self.assertIsNotNone(compat.find(self.qn("w:useFELayout")))
+        modes = {c.get(self.qn("w:name")): c.get(self.qn("w:val"))
+                 for c in compat.findall(self.qn("w:compatSetting"))}
+        self.assertEqual(modes.get("compatibilityMode"),
+                         grid["compat_settings"]["compatibilityMode"])
+
+    def test_table_defaults_applied(self):
+        wd, _ = self._run(self._MIXED_BODY)
+        td = self.spec["table_defaults"]
+        tbl = self._doc(wd).find(".//" + self.qn("w:tbl"))
+        self.assertEqual(tbl.find(self.qn("w:tblPr") + "/" + self.qn("w:tblInd")).get(
+            self.qn("w:w")), str(td["tbl_ind_twips"]))
+        mar = tbl.find(self.qn("w:tblPr") + "/" + self.qn("w:tblCellMar"))
+        self.assertEqual(mar.find(self.qn("w:left")).get(self.qn("w:w")),
+                         str(td["cell_margin_twips"]["left"]))
+        self.assertEqual(
+            tbl.find(".//" + self.qn("w:tc") + "/" + self.qn("w:tcPr") + "/"
+                     + self.qn("w:vAlign")).get(self.qn("w:val")), td["cell_valign"])
+
+    def test_injection_is_idempotent(self):
+        # 重跑收敛：同 styleId 整体替换，不会越注入越多。
+        wd, applied = self._run(self._MIXED_BODY)
+        n1 = len(self._styles(wd).findall(self.qn("w:style")))
+        run(self._script("40_apply_fixes.py"), wd)
+        self.assertEqual(len(self._styles(wd).findall(self.qn("w:style"))), n1)
+
+    def test_full_collapse_invariant_passes_on_real_output(self):
+        # 45 的全坍缩不变量：真实产物上，canonical 属性必须全部由样式层供给。
+        wd, _ = self._run(self._MIXED_BODY)
+        validated = run(self._script("45_validate_output.py"), wd)
+        self.assertTrue(validated["ok"], validated.get("errors"))
+        self.assertNotIn("canonical_leaks", validated)
+
+    def test_full_collapse_invariant_catches_a_direct_leak(self):
+        # 人为把一个直接缩进塞回 canonical 段落 → 必须硬失败（退2），不能放行。
+        import zipfile
+        sys_path = os.path.join(helpers.SCRIPTS, "lib")
+        if sys_path not in sys.path:
+            sys.path.insert(0, sys_path)
+        from docxcommon import rezip_docx
+        wd, _ = self._run(self._MIXED_BODY)
+        doc_path = os.path.join(wd, "out_pkg", "word", "document.xml")
+        with open(doc_path, encoding="utf-8") as f:
+            s = f.read().replace(
+                '<w:pStyle w:val="FGWCanonBody"/>',
+                '<w:pStyle w:val="FGWCanonBody"/><w:ind w:hanging="420"/>', 1)
+        with open(doc_path, "w", encoding="utf-8") as f:
+            f.write(s)
+        rezip_docx(os.path.join(wd, "out_pkg"), os.path.join(wd, "formatted.docx"))
+        proc = subprocess.run(
+            [sys.executable, self._script("45_validate_output.py"), wd],
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        report = json.loads(proc.stdout.strip().splitlines()[-1])
+        self.assertTrue(any("坍缩" in e for e in report["errors"]), report["errors"])
+
+    def test_style_inherited_numbering_survives_assignment(self):
+        """改指 canonical 样式会把**原样式携带的 numPr** 一起弄丢——编号"一、"消失
+        等于改了原文。指派时必须把有效编号钉成段落的直接 numPr 保号。"""
+        import zipfile
+        styles = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<w:styles xmlns:w="%s">'
+            '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
+            '<w:name w:val="Normal"/></w:style>'
+            '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/>'
+            '<w:pPr><w:outlineLvl w:val="0"/>'
+            # 编号挂在【样式】上，段落自身没有 numPr
+            '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>'
+            '</w:pPr></w:style></w:styles>' % self.W)
+        doc = helpers.document_xml(
+            '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr>'
+            '<w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="32"/></w:rPr>'
+            '<w:t xml:space="preserve">绪论</w:t></w:r></w:p>'
+            '<w:p><w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="32"/></w:rPr>'
+            '<w:t xml:space="preserve">正文。</w:t></w:r></w:p>')
+        src = os.path.join(self.tmp, "stylenum.docx")
+        with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", _CT_LO)
+            z.writestr("_rels/.rels", helpers.ROOT_RELS)
+            z.writestr("word/_rels/document.xml.rels", _DRELS_LO)
+            z.writestr("word/document.xml", doc)
+            z.writestr("word/styles.xml", styles)
+            z.writestr("word/numbering.xml", _NUM_LO)
+        wd = run(self._script("05_new_workdir.py"), os.path.join(self.tmp, "wb3"))["workdir"]
+        run(self._script("10_prepare_input.py"), src, wd)
+        run(self._script("20_extract_structure.py"), wd)
+        run(self._script("30_check_format.py"), wd)
+        run(self._script("40_apply_fixes.py"), wd)
+        p = list(self._doc(wd).iter(self.qn("w:p")))[0]
+        self.assertEqual(p.find(self.qn("w:pPr") + "/" + self.qn("w:pStyle")).get(
+            self.qn("w:val")), "FGWCanonH1")
+        numid = p.find(self.qn("w:pPr") + "/" + self.qn("w:numPr") + "/" + self.qn("w:numId"))
+        self.assertIsNotNone(numid, "指派样式后编号丢了（自动编号消失＝改了原文）")
 
 
 if __name__ == "__main__":

@@ -21,6 +21,9 @@ this guards against is real Microsoft Word opening the file and prompting
      take). Verified with the unified cascade + provenance, so a real leak fails
      hard; a style-inherited hanging (known-unfixed, Word-gated) is a non-fatal
      note only.
+  6. 全坍缩不变量 (方案C 阶段3) —— 被指派 canonical 样式的段落，该样式承载的每个
+     属性都必须由【样式层】供给；仍由 direct/numbering 供给且值≠canonical 即泄漏，
+     硬失败。这是没有语料、没有 Word 时的确定性安全网（供给层是纯 XML 事实）。
 
 Writes <workdir>/validate_report.json and prints a single-line JSON summary.
 Exits non-zero (2) if any check fails, so the caller stops before finalizing.
@@ -34,10 +37,25 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
 
 from lxml import etree
 from docxcommon import (qn, iter_body_paragraphs, StyleResolver,
-                        load_numbering_levels, get_style_id, get_pPr, get_mark_rpr)
+                        load_numbering_levels, get_style_id, get_pPr, get_mark_rpr,
+                        read_ppr)
 from cascade import resolve_ppr_with_provenance
+import canonstyles
+from checks import load_default_spec
 
 REQUIRED_PARTS = ("[Content_Types].xml", "word/document.xml")
+
+# canonical 样式承载的每一类属性对应哪些 pPr 键（用于全坍缩不变量逐键比对）。
+_GOVERNED_KEYS = {
+    "ind": ("first_line_chars", "first_line", "left_chars", "left",
+            "start_chars", "start", "right_chars", "right",
+            "end_chars", "end", "hanging_chars", "hanging"),
+    "line": ("line", "line_rule"),
+    "space_before_after": ("space_before", "space_after",
+                           "space_before_lines", "space_after_lines"),
+    "jc": ("jc",),
+    "outline": ("outline",),
+}
 
 
 def _count_body_paragraphs(zf, name="word/document.xml"):
@@ -93,6 +111,68 @@ def _check_numbering_clamp(zf, indent_fix_indices):
             rec = {"para_index": idx, "key": key, "value": v, "owner": owner.get(key)}
             (leaks if owner.get(key) == "numbering" else notes).append(rec)
     return leaks, notes
+
+
+def _canonical_expectations(spec):
+    """{styleId: (governs, canonical pPr dict)} —— 期望值直接从 canonical 样式定义
+    解析（`canonstyles` 是唯一真源），不在这里重写一遍 spec 换算。"""
+    out = {}
+    for d in canonstyles.canonical_style_defs(spec):
+        el = etree.fromstring(
+            ('<w:wrap xmlns:w="%s">%s</w:wrap>'
+             % ("http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                d["xml"])).encode("utf-8"))[0]
+        out[d["id"]] = (d["governs"], read_ppr(el.find(qn("w:pPr"))))
+    return out
+
+
+def _check_canonical_collapse(zf, spec):
+    """方案C 阶段3 **全坍缩不变量**：凡是被指派了 canonical 样式的段落，该样式承载的
+    每一个属性都必须由**样式层**供给。
+
+    这是"无语料安全网"——沙箱里没有 Word 可渲染（handoff §1），但"值由哪一层供给"
+    是纯 XML 事实，可以确定性断言。apply 之后在**产物**上重解析四层 cascade
+    （docDefaults→样式→编号层→直接）并取 provenance：某个 canonical 属性若仍由
+    `direct` 或 `numbering` 供给，说明"清直接覆盖"或"甲法克隆钳"漏了，Word 里就会
+    看到规范外的缩进/行距——当场硬失败，别交付。
+
+    唯一放行的情况：供给值**恰好等于 canonical 值**。甲法克隆钳会在编号层显式写
+    `left=0`（中和级别缩进正是它的手段），这与 canonical 的 left=0 一致，不算泄漏。
+
+    返回 leaks 列表；空列表＝全部坍缩到样式层。"""
+    names = set(zf.namelist())
+    if "word/document.xml" not in names or not spec:
+        return []
+    expectations = _canonical_expectations(spec)
+    doc_root = _read_root(zf, "word/document.xml")
+    styles_root = _read_root(zf, "word/styles.xml") if "word/styles.xml" in names else None
+    numbering_root = (_read_root(zf, "word/numbering.xml")
+                      if "word/numbering.xml" in names else None)
+    resolver = StyleResolver(styles_root)
+    levels = load_numbering_levels(numbering_root)
+
+    leaks = []
+    for idx, p in iter_body_paragraphs(doc_root):
+        sid = get_style_id(p)
+        exp = expectations.get(sid)
+        if exp is None:
+            continue          # 未指派 canonical 样式的段落不在本不变量的射程内
+        governs, canon = exp
+        eff, owner = resolve_ppr_with_provenance(
+            resolver, sid, get_pPr(p), get_mark_rpr(p), levels)
+        for flag, keys in _GOVERNED_KEYS.items():
+            if not governs.get(flag):
+                continue
+            for key in keys:
+                layer = owner.get(key)
+                if layer not in ("direct", "numbering"):
+                    continue
+                if eff.get(key) == canon.get(key):
+                    continue  # 值与 canonical 一致（如克隆钳写的 left=0）
+                leaks.append({"para_index": idx, "style": sid, "key": key,
+                              "value": eff.get(key), "owner": layer,
+                              "canonical": canon.get(key)})
+    return leaks
 
 
 def validate(formatted_path, reference_path=None, indent_fix_indices=()):
@@ -172,6 +252,24 @@ def validate(formatted_path, reference_path=None, indent_fix_indices=()):
                     info["style_hanging_notes"] = notes
             except (etree.XMLSyntaxError, KeyError) as e:
                 info["clamp_invariant_skipped"] = str(e)
+
+        # 6. 全坍缩不变量（方案C 阶段3）：指派了 canonical 样式的段落，其样式承载的
+        #    属性必须由样式层供给；仍由 direct/numbering 供给且值不等于 canonical
+        #    ＝没钳干净，Word 里会泄漏出规范外的格式 → 硬失败。
+        try:
+            spec = load_default_spec()
+        except (OSError, ValueError):
+            spec = None
+        if spec:
+            try:
+                canon_leaks = _check_canonical_collapse(zf, spec)
+                if canon_leaks:
+                    errors.append(
+                        "canonical 属性未坍缩到样式层：%d 处仍由直接/编号层供给"
+                        % len(canon_leaks))
+                    info["canonical_leaks"] = canon_leaks[:50]
+            except (etree.XMLSyntaxError, KeyError) as e:
+                info["canonical_invariant_skipped"] = str(e)
 
     ok = not errors
     return {"status": "ok" if ok else "error", "ok": ok,

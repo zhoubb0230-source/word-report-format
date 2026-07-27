@@ -97,13 +97,16 @@ def build_styles(spec):
               'w:cs="Times New Roman"/><w:sz w:val="21"/><w:szCs w:val="21"/>'
               '<w:lang w:val="en-US" w:eastAsia="zh-CN" w:bidi="ar-SA"/>'
               '</w:rPr></w:rPrDefault><w:pPrDefault/></w:docDefaults>')
-    # Normal ＝ 正文本身（规范文档如此）：仿宋 三号、行距固定值 28磅、首行缩进 2 字符。
+    # Normal ＝ 五号（关键）：Word 的【文档网格字体】就是 Normal 样式的字号；只有 Normal=五号
+    # (10.5pt，行高≈14.5pt < 15.6pt) 时，Word 才尊重行网格 312→15.6磅/41行；Normal=三号
+    # (行高≈21.75pt>15.6pt) 会被顶高到 21.75磅/29行（用户实测：改文档网格字体=五号会连带把
+    # 正文改成五号，需再把正文单独设回三号——即"Normal=五号 + 正文用独立三号样式"）。
+    # 因此正文不走 Normal，改用独立的 CanonBody(三号)。
     styles.append('<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
                   '<w:name w:val="Normal"/><w:qFormat/>'
-                  '<w:pPr><w:spacing w:line="%d" w:lineRule="exact"/>'
-                  '<w:ind w:firstLineChars="200"/></w:pPr>'
-                  '<w:rPr><w:sz w:val="32"/><w:szCs w:val="32"/></w:rPr></w:style>'
-                  % line_twips)
+                  '<w:rPr><w:rFonts w:ascii="Times New Roman" w:eastAsia="仿宋" '
+                  'w:hAnsi="Times New Roman" w:cs="Times New Roman"/>'
+                  '<w:sz w:val="21"/><w:szCs w:val="21"/></w:rPr></w:style>')
 
     # 题目
     t = spec["title"]
@@ -174,9 +177,11 @@ def build_styles(spec):
                '<w:sz w:val="%d"/><w:szCs w:val="%d"/>'
                % (toc["size_hp"], toc["size_hp"]))
     RIGHT_TAB = 13203
+    # 目录一律【无首行缩进】——三级都显式把 firstLineChars 归 0（TOC 基于 Normal，而 Normal
+    # 有首行缩进2字符，不显式清零会被继承，这是 v6 二级目录多出首行缩进的原因）。
     toc_defs = {
         "1": (1280, '<w:ind w:firstLineChars="0" w:firstLine="0"/>'),
-        "2": (1600, '<w:ind w:leftChars="200" w:left="200"/>'),
+        "2": (1600, '<w:ind w:leftChars="200" w:left="200" w:firstLineChars="0" w:firstLine="0"/>'),
         "3": (1920, '<w:ind w:leftChars="400" w:left="400" w:firstLineChars="0" w:firstLine="0"/>'),
     }
     for lvl in ("1", "2", "3"):

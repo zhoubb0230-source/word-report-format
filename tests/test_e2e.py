@@ -566,6 +566,9 @@ class TestCollapseInvariant(unittest.TestCase):
         self.assertEqual(notes[0]["owner"], "style")
 
 
+W_NS_ = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+
 @unittest.skipUnless(HAVE_LXML, "lxml not installed")
 class TestCanonicalStyleInjection(unittest.TestCase):
     """方案C 阶段2 主体：全角色 canonical 样式**注入 + 指派 + 清直接覆盖**，
@@ -610,7 +613,7 @@ class TestCanonicalStyleInjection(unittest.TestCase):
         + helpers.para("项目编号：KJ-2024-001", east_asia="宋体", size_hp=30)
         + helpers.para("一、绪论", east_asia="宋体", size_hp=32, outline=0)
         + helpers.para("这是正文内容含数字123。", east_asia="宋体", size_hp=32)
-        + helpers.para("图1 系统架构", east_asia="宋体", size_hp=32)
+        + helpers.para("图1 系统架构", east_asia="宋体", size_hp=32, style="图标题")
         + '<w:tbl><w:tblPr/><w:tr><w:tc><w:tcPr/>'
         + helpers.para("单元格", east_asia="宋体", size_hp=32) + '</w:tc></w:tr></w:tbl>')
 
@@ -620,7 +623,20 @@ class TestCanonicalStyleInjection(unittest.TestCase):
                for p in self._doc(wd).iter(self.qn("w:p"))]
         got = [g.get(self.qn("w:val")) if g is not None else None for g in got]
         self.assertEqual(got, ["FGWCanonTitle", "FGWCanonCoverField", "FGWCanonH1",
-                               "FGWCanonBody", "FGWCanonCaption", "FGWCanonTableBody"])
+                               "FGWCanonBody", "FGWCanonCaptionFig",
+                               "FGWCanonTableBody"])
+
+    def test_pattern_caption_is_not_assigned_a_style(self):
+        """安全阀（陷阱#5）：仅凭"图+数字"形状认出、没有题注样式撑腰的图表标题**不**
+        指派 canonical 样式——否则下一轮它就凭样式变成"已确认"，绕过安全阀被自动改
+        编号，而它可能只是一句以"图3 显示了…"开头的正文。"""
+        body = (helpers.para("一、绪论", east_asia="宋体", size_hp=32, outline=0)
+                + helpers.para("图3 显示了系统架构。", east_asia="宋体", size_hp=32))
+        wd, _ = self._run(body)
+        paras = list(self._doc(wd).iter(self.qn("w:p")))
+        pstyle = paras[1].find(self.qn("w:pPr") + "/" + self.qn("w:pStyle"))
+        self.assertIsNone(pstyle)
+        self.assertIsNone(paras[1].find(self.qn("w:pPr") + "/" + self.qn("w:numPr")))
 
     def test_direct_overrides_are_cleared_not_rewritten(self):
         # 严格-spec §6：canonical 值由样式承载，段落上不再留同一属性的直接覆盖
@@ -778,6 +794,161 @@ class TestCanonicalStyleInjection(unittest.TestCase):
         self.assertEqual(proc.returncode, 2, proc.stdout)
         report = json.loads(proc.stdout.strip().splitlines()[-1])
         self.assertTrue(any("坍缩" in e for e in report["errors"]), report["errors"])
+
+    # 一段"半粗半细"的三级标题：前半 run 直接加粗 + 挂了一个设了字体/加粗的**字符样式**，
+    # 后半 run 显式取消加粗。这是用户阶段2 验收发现的真实形态——字符样式压过段落样式，
+    # 于是 canonical 标题样式看起来"只应用到了后半部分"。
+    _SPLIT_BOLD_STYLES = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:styles xmlns:w="%s">'
+        '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
+        '<w:name w:val="Normal"/></w:style>'
+        '<w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/>'
+        '<w:pPr><w:outlineLvl w:val="2"/></w:pPr></w:style>'
+        '<w:style w:type="character" w:styleId="StrongCS"><w:name w:val="Strong"/>'
+        '<w:rPr><w:rFonts w:eastAsia="黑体"/><w:b/></w:rPr></w:style>'
+        '<w:style w:type="character" w:styleId="LinkCS"><w:name w:val="Hyperlink"/>'
+        '<w:rPr><w:color w:val="0563C1"/><w:u w:val="single"/></w:rPr></w:style>'
+        '</w:styles>' % W_NS_)
+
+    def _build_split_bold(self, name="split.docx"):
+        import zipfile
+        h3 = ('<w:p><w:pPr><w:pStyle w:val="Heading3"/></w:pPr>'
+              '<w:r><w:rPr><w:rStyle w:val="StrongCS"/><w:rFonts w:eastAsia="宋体"/>'
+              '<w:b/><w:sz w:val="32"/></w:rPr>'
+              '<w:t xml:space="preserve">1. 数据来源</w:t></w:r>'
+              '<w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:b w:val="0"/>'
+              '<w:sz w:val="32"/></w:rPr>'
+              '<w:t xml:space="preserve">与口径说明</w:t></w:r></w:p>')
+        # 只设颜色/下划线的字符样式（超链接）必须**留着**——样式没管的作者格式不动
+        body_p = ('<w:p><w:r><w:rPr><w:rStyle w:val="LinkCS"/><w:rFonts w:eastAsia="宋体"/>'
+                  '<w:sz w:val="32"/></w:rPr>'
+                  '<w:t xml:space="preserve">正文里的一个链接。</w:t></w:r></w:p>')
+        src = os.path.join(self.tmp, name)
+        with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", _CT_LO)
+            z.writestr("_rels/.rels", helpers.ROOT_RELS)
+            z.writestr("word/_rels/document.xml.rels", _DRELS_LO)
+            z.writestr("word/document.xml", helpers.document_xml(h3 + body_p))
+            z.writestr("word/styles.xml", self._SPLIT_BOLD_STYLES)
+            z.writestr("word/numbering.xml", '<w:numbering xmlns:w="%s"/>' % self.W)
+        return src
+
+    def _run_src(self, src, wbname):
+        wd = run(self._script("05_new_workdir.py"),
+                 os.path.join(self.tmp, wbname))["workdir"]
+        run(self._script("10_prepare_input.py"), src, wd)
+        run(self._script("20_extract_structure.py"), wd)
+        run(self._script("30_check_format.py"), wd)
+        run(self._script("40_apply_fixes.py"), wd)
+        return wd
+
+    def test_split_run_heading_becomes_uniformly_bold(self):
+        """标题加粗由样式承载，run 上的直接加粗/取消加粗/抢戏字符样式全部清掉。
+
+        反回退：别只清 `w:b`——真正让后半段不粗的是 `w:b w:val="0"`（显式取消），
+        还有那个设了字体+加粗的**字符样式**（压过段落样式）。三者都得清，标题才统一。"""
+        wd = self._run_src(self._build_split_bold(), "wbsb")
+        h3 = list(self._doc(wd).iter(self.qn("w:p")))[0]
+        for r in h3.iter(self.qn("w:r")):
+            if not any((t.text or "").strip() for t in r.findall(self.qn("w:t"))):
+                continue          # 批注引用 run 不算正文
+            rpr = r.find(self.qn("w:rPr"))
+            if rpr is None:
+                continue
+            self.assertIsNone(rpr.find(self.qn("w:b")), "run 上仍有直接加粗设置")
+            self.assertIsNone(rpr.find(self.qn("w:bCs")))
+            self.assertIsNone(rpr.find(self.qn("w:sz")))
+            rs = rpr.find(self.qn("w:rStyle"))
+            self.assertNotEqual(rs.get(self.qn("w:val")) if rs is not None else None,
+                                "StrongCS", "抢戏的字符样式引用没摘掉")
+        style = [s for s in self._styles(wd).findall(self.qn("w:style"))
+                 if s.get(self.qn("w:styleId")) == "FGWCanonH3"][0]
+        self.assertIsNotNone(style.find(self.qn("w:rPr") + "/" + self.qn("w:b")))
+        self.assertIsNotNone(style.find(self.qn("w:rPr") + "/" + self.qn("w:bCs")))
+
+    def test_benign_char_style_is_kept(self):
+        # 只设颜色/下划线的字符样式（超链接）不抢 canonical 样式的属性，必须保留——
+        # 别把"清直接覆盖"扩大成"把 run 上的东西一律抹掉"。
+        wd = self._run_src(self._build_split_bold("split2.docx"), "wbsb2")
+        body_p = list(self._doc(wd).iter(self.qn("w:p")))[1]
+        styles = [rs.get(self.qn("w:val"))
+                  for rs in body_p.iter(self.qn("w:rStyle"))]
+        self.assertIn("LinkCS", styles)
+
+    def _build_captions(self, name="cap.docx"):
+        import zipfile
+        caps = (
+            '<w:p><w:pPr><w:pStyle w:val="图标题"/></w:pPr>'
+            '<w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="32"/></w:rPr>'
+            '<w:t xml:space="preserve">图1 系统总体架构</w:t></w:r></w:p>'
+            '<w:p><w:pPr><w:pStyle w:val="表标题"/></w:pPr>'
+            '<w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="32"/></w:rPr>'
+            '<w:t xml:space="preserve">表1 主要指标</w:t></w:r></w:p>')
+        src = os.path.join(self.tmp, name)
+        with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", _CT_LO)
+            z.writestr("_rels/.rels", helpers.ROOT_RELS)
+            z.writestr("word/_rels/document.xml.rels", _DRELS_LO)
+            z.writestr("word/document.xml", helpers.document_xml(caps))
+            z.writestr("word/styles.xml", self._SPLIT_BOLD_STYLES)
+            z.writestr("word/numbering.xml", '<w:numbering xmlns:w="%s"/>' % self.W)
+        return src
+
+    def test_captions_use_word_autonumbering_with_tab(self):
+        """图/表标题改用 Word 自动编号：静态"图N/表N"从文字里删掉、段落挂到注入的
+        图%1/表%1 序列上、编号后是**制表符**（suff=tab）。
+
+        别退回静态编号：插入/删除一张图之后所有后续编号都要重排，而 Word 自己维护
+        序列——这是用户阶段2 验收明确否掉静态编号的理由。"""
+        from lxml import etree
+        wd = self._run_src(self._build_captions(), "wbcap")
+        paras = list(self._doc(wd).iter(self.qn("w:p")))
+        texts = ["".join(t.text or "" for t in p.iter(self.qn("w:t")))
+                 for p in paras]
+        self.assertEqual(texts[0], "系统总体架构", "静态“图1”没删掉，会和自动编号叠加")
+        self.assertEqual(texts[1], "主要指标")
+
+        num_root = etree.parse(os.path.join(wd, "out_pkg", "word",
+                                            "numbering.xml")).getroot()
+        abs_by_id = {a.get(self.qn("w:abstractNumId")): a
+                     for a in num_root.findall(self.qn("w:abstractNum"))}
+        num2abs = {n.get(self.qn("w:numId")):
+                   n.find(self.qn("w:abstractNumId")).get(self.qn("w:val"))
+                   for n in num_root.findall(self.qn("w:num"))}
+        got = {}
+        for p, kind in zip(paras, ("图", "表")):
+            nid = p.find(self.qn("w:pPr") + "/" + self.qn("w:numPr") + "/"
+                         + self.qn("w:numId"))
+            self.assertIsNotNone(nid, "图表标题没挂上自动编号")
+            lvl = abs_by_id[num2abs[nid.get(self.qn("w:val"))]].find(self.qn("w:lvl"))
+            got[kind] = (lvl.find(self.qn("w:lvlText")).get(self.qn("w:val")),
+                         lvl.find(self.qn("w:numFmt")).get(self.qn("w:val")),
+                         lvl.find(self.qn("w:suff")).get(self.qn("w:val")))
+        self.assertEqual(got["图"], ("图%1", "decimal", "tab"))
+        self.assertEqual(got["表"], ("表%1", "decimal", "tab"))
+        # 编号级别缩进必须中和：编号层压过样式层，不中和会盖掉样式的"无缩进"
+        for kind in ("图", "表"):
+            pass
+        for a in abs_by_id.values():
+            ind = a.find(self.qn("w:lvl") + "/" + self.qn("w:pPr") + "/"
+                         + self.qn("w:ind"))
+            self.assertEqual(ind.get(self.qn("w:left")), "0")
+            self.assertIsNone(ind.get(self.qn("w:hanging")))
+
+    def test_caption_numbering_injection_is_idempotent(self):
+        # 靠 abstractNum 的 w:name 标记认领已注入的定义，重跑不会越注入越多。
+        from lxml import etree
+        wd = self._run_src(self._build_captions("cap2.docx"), "wbcap2")
+
+        def n_abs():
+            root = etree.parse(os.path.join(wd, "out_pkg", "word",
+                                            "numbering.xml")).getroot()
+            return len(root.findall(self.qn("w:abstractNum")))
+        first = n_abs()
+        self.assertEqual(first, 2)
+        run(self._script("40_apply_fixes.py"), wd)
+        self.assertEqual(n_abs(), first)
 
     def test_style_inherited_numbering_survives_assignment(self):
         """改指 canonical 样式会把**原样式携带的 numPr** 一起弄丢——编号"一、"消失

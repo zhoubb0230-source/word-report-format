@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
 from lxml import etree
 from docxcommon import (qn, iter_body_paragraphs, StyleResolver,
                         load_numbering_levels, get_style_id, get_pPr, get_mark_rpr,
-                        read_ppr)
+                        read_ppr, char_styles_overriding)
 from cascade import resolve_ppr_with_provenance
 import canonstyles
 from checks import load_default_spec
@@ -126,6 +126,42 @@ def _canonical_expectations(spec):
     return out
 
 
+# run 级别：样式承载 fonts/size/bold 时，run 上不许再有同名直接覆盖或抢戏的字符样式。
+_RUN_GOVERNED_TAGS = {"fonts": ("w:rFonts",), "size": ("w:sz", "w:szCs"),
+                      "bold": ("w:b", "w:bCs")}
+
+
+def _run_level_leaks(idx, p, style_id, governs, overriding_char_styles):
+    """canonical 样式承载的**字体/字号/加粗**必须由样式供给，run 上不得再有直接覆盖。
+
+    这一条是"同一个三级标题前半部分加粗、后半部分不加粗"的机器化断言：那种半粗半细
+    正是几个 run 各带一份直接 rPr（或一个设了字体/加粗的字符样式）造成的，段落级 pPr
+    检查看不见它。只看**有可见文字**的 run——批注引用、域字符那些 run 不承载正文格式；
+    字符样式也只算 `overriding_char_styles` 里那些（真设了字体/字号/加粗的），超链接色、
+    批注引用之类不参与，否则会把一堆合法文档误判成泄漏、挡住交付。"""
+    leaks = []
+    for r in p.iter(qn("w:r")):
+        if not any((t.text or "").strip() for t in r.findall(qn("w:t"))):
+            continue
+        rpr = r.find(qn("w:rPr"))
+        if rpr is None:
+            continue
+        rs = rpr.find(qn("w:rStyle"))
+        if rs is not None and rs.get(qn("w:val")) in overriding_char_styles:
+            leaks.append({"para_index": idx, "style": style_id, "key": "rStyle",
+                          "value": rs.get(qn("w:val")), "owner": "char_style",
+                          "canonical": None})
+        for flag, tags in _RUN_GOVERNED_TAGS.items():
+            if not governs.get(flag):
+                continue
+            for tag in tags:
+                if rpr.find(qn(tag)) is not None:
+                    leaks.append({"para_index": idx, "style": style_id,
+                                  "key": tag.split(":")[1], "value": "direct",
+                                  "owner": "direct", "canonical": None})
+    return leaks
+
+
 def _check_canonical_collapse(zf, spec):
     """方案C 阶段3 **全坍缩不变量**：凡是被指派了 canonical 样式的段落，该样式承载的
     每一个属性都必须由**样式层**供给。
@@ -150,6 +186,7 @@ def _check_canonical_collapse(zf, spec):
                       if "word/numbering.xml" in names else None)
     resolver = StyleResolver(styles_root)
     levels = load_numbering_levels(numbering_root)
+    overriding_char_styles = char_styles_overriding(styles_root)
 
     leaks = []
     for idx, p in iter_body_paragraphs(doc_root):
@@ -158,6 +195,7 @@ def _check_canonical_collapse(zf, spec):
         if exp is None:
             continue          # 未指派 canonical 样式的段落不在本不变量的射程内
         governs, canon = exp
+        leaks.extend(_run_level_leaks(idx, p, sid, governs, overriding_char_styles))
         eff, owner = resolve_ppr_with_provenance(
             resolver, sid, get_pPr(p), get_mark_rpr(p), levels)
         for flag, keys in _GOVERNED_KEYS.items():

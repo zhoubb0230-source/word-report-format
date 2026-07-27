@@ -31,7 +31,8 @@ from lxml import etree
 from docxcommon import (qn, parse_xml, unzip_docx, rezip_docx,
                         iter_body_paragraphs, in_textbox,
                         StyleResolver, load_numbering_levels,
-                        get_style_id, get_pPr, get_mark_rpr)
+                        get_style_id, get_pPr, get_mark_rpr,
+                        char_styles_overriding)
 from commentwriter import CommentWriter
 from headings import ANY_LABEL_RE, CAPTION_STYLE_HINTS
 from checks import load_default_spec, paragraph_role
@@ -132,14 +133,26 @@ def _set_size(rpr, half_pt):
     szcs.set(qn("w:val"), str(half_pt))
 
 
-def _apply_run_props(p, east_asia, ascii_, size_hp):
-    """Apply font/size to every content run + the paragraph-mark rPr."""
+def _set_bold(rpr, on=True):
+    """加粗开关。`w:b` 管中日韩与拉丁正文、`w:bCs` 管复杂文种——两个都写，否则同一段里
+    的西文/数字可能不跟着加粗。"""
+    for tag in ("w:b", "w:bCs"):
+        el = _get_or_make(rpr, tag)
+        el.set(qn("w:val"), "1" if on else "0")
+
+
+def _apply_run_props(p, east_asia, ascii_, size_hp, bold=None):
+    """Apply font/size/bold to every content run + the paragraph-mark rPr."""
+    if east_asia is None and ascii_ is None and size_hp is None and bold is None:
+        return   # 无事可做：别顺手给每个 run 建一个空 <w:rPr/> 壳
     for r in _iter_runs(p):
         rpr = _run_rpr(r)
         if east_asia is not None or ascii_ is not None:
             _set_fonts(rpr, east_asia, ascii_)
         if size_hp is not None:
             _set_size(rpr, size_hp)
+        if bold is not None:
+            _set_bold(rpr, bold)
     # paragraph mark run properties (pPr/rPr)
     pPr = get_pPr(p)
     mark = _get_or_make(pPr, "w:rPr",
@@ -148,6 +161,8 @@ def _apply_run_props(p, east_asia, ascii_, size_hp):
         _set_fonts(mark, east_asia, ascii_)
     if size_hp is not None:
         _set_size(mark, size_hp)
+    if bold is not None:
+        _set_bold(mark, bold)
 
 
 def _set_line_exact(pPr, line_twips, line_rule="exact"):
@@ -1061,12 +1076,17 @@ def _inject_canonical_styles(pkg_dir, spec):
     return n
 
 
-def _clear_run_props(p, clear_ea, clear_latin, clear_size):
-    """清掉段落各 run 与段落标记 rPr 上、被 canonical 样式承载的字体/字号直接覆盖。
+def _clear_run_props(p, clear_ea, clear_latin, clear_size, clear_bold=False,
+                     overriding_char_styles=frozenset()):
+    """清掉段落各 run 与段落标记 rPr 上、被 canonical 样式承载的字体/字号/加粗直接覆盖。
 
     严格-spec（§6 用户裁决）：canonical 值必须由注入的命名样式承载，"渲染对但用直接
-    属性表达"不算合规。只清样式确实承载的键——加粗/颜色/上标之类样式没管的直接属性
-    一律保留，指派样式不该顺手抹掉作者的行内强调。"""
+    属性表达"不算合规。只清样式确实承载的键——颜色/下划线/上标之类样式没管的直接属性
+    一律保留，指派样式不该顺手抹掉作者的行内强调。
+
+    同时摘掉**会抢戏的字符样式引用**（`w:rStyle`）：只摘那些确实设了字体/字号/加粗的
+    字符样式，其余（超链接色、批注引用等）原样留着。字符样式是共享对象，绝不能就地改
+    它的定义——那会溢到引用它的所有其它段落（#17 那类事故），所以摘引用而不是改样式。"""
     # 只处理**已存在**的 rPr（别用 _run_rpr 顺手建空壳），清空后连壳一起删掉。
     owners = [(r, r.find(qn("w:rPr"))) for r in _iter_runs(p)]
     pPr = get_pPr(p)
@@ -1074,6 +1094,9 @@ def _clear_run_props(p, clear_ea, clear_latin, clear_size):
     for owner, rpr in owners:
         if rpr is None:
             continue
+        rs = rpr.find(qn("w:rStyle"))
+        if rs is not None and rs.get(qn("w:val")) in overriding_char_styles:
+            rpr.remove(rs)
         rf = rpr.find(qn("w:rFonts"))
         if rf is not None:
             attrs = []
@@ -1087,11 +1110,16 @@ def _clear_run_props(p, clear_ea, clear_latin, clear_size):
                     del rf.attrib[qn(a)]
             if not rf.attrib:
                 rpr.remove(rf)
+        tags = []
         if clear_size:
-            for tag in ("w:sz", "w:szCs"):
-                el = rpr.find(qn(tag))
-                if el is not None:
-                    rpr.remove(el)
+            tags += ["w:sz", "w:szCs"]
+        if clear_bold:
+            # 连"显式取消加粗"(w:b val=0) 一起清掉——正是它让标题后半段不粗。
+            tags += ["w:b", "w:bCs"]
+        for tag in tags:
+            el = rpr.find(qn(tag))
+            if el is not None:
+                rpr.remove(el)
         if len(rpr) == 0 and not rpr.attrib:
             owner.remove(rpr)
 
@@ -1122,6 +1150,18 @@ def _clear_ppr_governed(pPr, gov):
             pPr.remove(ol)
 
 
+def _assignable(rec):
+    """该段的角色是否**可信到可以承载 canonical 样式**（陷阱#5 安全阀）。
+
+    仅凭"图/表+数字"形状认出、没有题注样式撑腰的图表标题（`caption.source == "pattern"`）
+    不指派：给它套上"图标题"样式，下一轮它就凭样式变成"已确认"，从而绕过安全阀被自动
+    改编号——而它很可能只是一句以"图3 显示了…"开头的正文。这类段落仍走直接属性路径拿到
+    格式修复，只是不进样式体系。pattern 标题（heading）已在 `paragraph_role` 里降级成
+    正文角色，不必在这里再判一次。"""
+    cap = rec.get("caption")
+    return not (cap and cap.get("source") == "pattern")
+
+
 def _set_pstyle(p, style_id):
     """给段落指派样式（w:pStyle 必须是 pPr 的第一个子元素）。"""
     pPr = get_pPr(p)
@@ -1132,7 +1172,8 @@ def _set_pstyle(p, style_id):
     pPr.insert(0, el)
 
 
-def _assign_canonical_style(p, style_id, gov, num_ref=(None, None)):
+def _assign_canonical_style(p, style_id, gov, num_ref=(None, None),
+                            overriding_char_styles=frozenset()):
     """给段落指派 canonical 样式，并清掉该样式承载的直接覆盖。
 
     ``num_ref`` 是**指派前**解析出的有效 (numId, ilvl)。自动编号常常挂在原样式的
@@ -1141,7 +1182,8 @@ def _assign_canonical_style(p, style_id, gov, num_ref=(None, None)):
     _set_pstyle(p, style_id)
     _clear_ppr_governed(get_pPr(p), gov)
     _clear_run_props(p, gov.get("fonts", False), gov.get("western", False),
-                     gov.get("size", False))
+                     gov.get("size", False), gov.get("bold", False),
+                     overriding_char_styles)
     nid, ilvl = num_ref
     if nid:
         _set_para_numid(p, nid, ilvl or 0)
@@ -1151,6 +1193,7 @@ def _assign_canonical_style(p, style_id, gov, num_ref=(None, None)):
 # 写成直接属性（样式已经供给了同一个值）。
 _FIX_KEY_GOVERNOR = {
     "set_east_asia": "fonts", "set_ascii": "western", "set_size_hp": "size",
+    "set_bold": "bold",
     "set_line_exact": "line", "set_line_rule": "line",
     "clear_space_before_after": "space_before_after",
     "set_first_line_chars": "ind", "set_left_chars": "ind",
@@ -1246,6 +1289,93 @@ _TCPR_ORDER = ("cnfStyle", "tcW", "gridSpan", "hMerge", "vMerge", "tcBorders", "
                "noWrap", "tcMar", "textDirection", "tcFitText", "vAlign", "hideMark")
 
 
+# ---------------------------------------------------------------------------
+# 图/表标题：Word 自动编号（取代静态"图N/表N"）
+# ---------------------------------------------------------------------------
+# 静态编号后要连同紧跟的分隔空白一起删掉——编号改由 Word 生成，分隔符由编号定义的
+# suff=tab 提供，残留的空格会变成"图1<制表符> 说明"里多出来的那个空格。
+STRIP_CAPTION_LABEL = re.compile(r"^\s*(?:图|表)\s*[0-9]+(?:[-\.–][0-9]+)?[ \t　]*")
+STRIP_CAPTION_LABEL_RESIDUE = re.compile(r"^\s*(?:图|表)[ \t　]*")
+
+
+def _ensure_caption_numbering(pkg_dir, spec, cache):
+    """确保 numbering.xml 里有"图%1 / 表%1"两条 canonical 编号定义，返回
+    {kind: numId}。
+
+    幂等靠 `<w:name>` 标签认领已注入的定义——否则每跑一次就多两条编号定义。级别缩进
+    已中和（编号层压过样式层，不中和会把 canonical 样式的缩进盖掉，陷阱 #11）。"""
+    if cache:
+        return cache
+    defs = canonstyles.caption_numbering_defs(spec)
+    if not defs:
+        return {}
+    path = _ensure_part(pkg_dir, "numbering.xml", "numbering",
+                        '<w:numbering xmlns:w="%s"/>' % W_NS)
+    tree = parse_xml(path)
+    root = tree.getroot()
+
+    # 已注入过的：abstractNum 的 w:name 命中标记
+    by_marker = {}
+    for anum in root.findall(qn("w:abstractNum")):
+        nm = anum.find(qn("w:name"))
+        val = nm.get(qn("w:val")) if nm is not None else None
+        if val:
+            by_marker[val] = anum.get(qn("w:abstractNumId"))
+    abs2num = {}
+    for num in root.findall(qn("w:num")):
+        a = num.find(qn("w:abstractNumId"))
+        if a is not None:
+            abs2num.setdefault(a.get(qn("w:val")), num.get(qn("w:numId")))
+
+    out, changed = {}, False
+    new_abs, new_nums = [], []
+    last_abstract = None
+    for anum in root.findall(qn("w:abstractNum")):
+        last_abstract = anum
+    for d in defs:
+        aid = by_marker.get(d["marker"])
+        if aid is not None and aid in abs2num:
+            out[d["kind"]] = abs2num[aid]
+            continue
+        aid = str(_next_int_id(root, "w:abstractNum", "w:abstractNumId", taken=new_abs))
+        new_abs.append(aid)
+        anum = _parse_fragment(
+            '<w:abstractNum w:abstractNumId="%s"><w:multiLevelType w:val="singleLevel"/>'
+            '<w:name w:val="%s"/>%s</w:abstractNum>' % (aid, d["marker"], d["lvl_xml"]))
+        # schema 要求所有 abstractNum 排在所有 num 之前
+        if last_abstract is not None:
+            last_abstract.addnext(anum)
+        else:
+            root.insert(0, anum)
+        last_abstract = anum
+        nid = str(_next_int_id(root, "w:num", "w:numId", taken=new_nums))
+        new_nums.append(nid)
+        num_el = etree.SubElement(root, qn("w:num"))
+        num_el.set(qn("w:numId"), nid)
+        a_el = etree.SubElement(num_el, qn("w:abstractNumId"))
+        a_el.set(qn("w:val"), aid)
+        out[d["kind"]] = nid
+        changed = True
+    if changed:
+        tree.write(path, xml_declaration=True, encoding="UTF-8", standalone=True)
+    cache.update(out)
+    return out
+
+
+def _apply_autonumber_caption(p, num_id):
+    """把图/表标题交给 Word 自动编号：段落挂上编号序列，并删掉文字里的静态"图N/表N"。
+
+    删静态编号是必须的——不删就会出现"图1<制表符>图1 系统架构"（Word 生成的编号叠在
+    原文字上）。这属于既有的图表重编号内容编辑范畴：渲染出来的编号仍在，只是改由 Word
+    维护，插入/删除图表后不会再失序。"""
+    _set_para_numid(p, num_id, 0)
+    if _replace_leading(p, STRIP_CAPTION_LABEL, "",
+                        residue_re=STRIP_CAPTION_LABEL_RESIDUE):
+        return True
+    # 文字里本就没有静态编号（漏编号，或原本就是自动编号）——挂上序列即可
+    return True
+
+
 def _set_update_fields(pkg_dir):
     """Set settings.xml <w:updateFields w:val="true"/> so Word refreshes the TOC
     (renumbered headings + new page numbers) when the document is opened.
@@ -1337,26 +1467,31 @@ def main():
     # 安全阀（陷阱#5）在 `checks.paragraph_role` 里：pattern 标题不算 heading 角色。
     governs = ({d["id"]: d["governs"] for d in canonstyles.canonical_style_defs(spec)}
                if spec else {})
+    # 设了字体/字号/加粗的**字符样式**：它们压过段落样式，指派时要把 run 上的引用摘掉，
+    # 否则同一段里带这种字符样式的 run 不跟随 canonical 样式（半粗半细的根因）。
+    overriding_char_styles = char_styles_overriding(styles_root)
     assigned = {}
     structure_path = os.path.join(workdir, "structure.json")
     if spec and os.path.exists(structure_path):
         try:
-            records = json.load(open(structure_path, encoding="utf-8"))["records"]
+            with open(structure_path, encoding="utf-8") as f:
+                records = json.load(f)["records"]
         except (OSError, ValueError, KeyError):
             records = []
         for rec in records:
             sid = STYLE_ID_BY_ROLE.get(paragraph_role(rec, spec) or "")
             p = para_by_idx.get(rec.get("i"))
-            if sid is None or p is None:
+            if sid is None or p is None or not _assignable(rec):
                 continue
             gov = governs.get(sid, {})
             # 指派前解析编号（改指 canonical 样式会丢掉原样式携带的 numPr）
             num_ref = _para_num_ref(p, resolver, numbering_levels)
-            _assign_canonical_style(p, sid, gov, num_ref)
+            _assign_canonical_style(p, sid, gov, num_ref, overriding_char_styles)
             assigned[rec["i"]] = sid
             if gov.get("ind") and num_ref[0]:
                 clamp_targets.append(p)
     applied["styles_assigned"] = len(assigned)
+    caption_nums = {}          # kind -> numId（懒注入，见 _ensure_caption_numbering）
 
     cw = CommentWriter(out_pkg, author="XAgent")
     problems = []
@@ -1391,7 +1526,8 @@ def main():
                 p,
                 None if _governed(gov, "set_east_asia") else fix.get("set_east_asia"),
                 None if _governed(gov, "set_ascii") else fix.get("set_ascii"),
-                None if _governed(gov, "set_size_hp") else fix.get("set_size_hp"))
+                None if _governed(gov, "set_size_hp") else fix.get("set_size_hp"),
+                None if _governed(gov, "set_bold") else fix.get("set_bold"))
             pPr = get_pPr(p)
             if (fix.get("set_line_exact") is not None
                     and not _governed(gov, "set_line_exact")):
@@ -1419,6 +1555,16 @@ def main():
         elif op == "renumber_caption":
             ok = _apply_renumber_caption(p, fix)
             applied["renumber_caption"] += 1 if ok else 0
+        elif op == "autonumber_caption":
+            caption_nums = _ensure_caption_numbering(out_pkg, spec, caption_nums)
+            num_id = caption_nums.get(fix.get("kind"))
+            if num_id is None:
+                ok = False
+            else:
+                ok = _apply_autonumber_caption(p, num_id)
+                applied["autonumber_caption"] = applied.get("autonumber_caption", 0) + 1
+                # 已改挂我们自己的（缩进已中和的）编号定义，无需再克隆钳
+                clamp_targets = [t for t in clamp_targets if t is not p]
         elif op == "renumber_heading":
             ok = _apply_renumber_heading(p, fix)
             applied["renumber_heading"] += 1 if ok else 0

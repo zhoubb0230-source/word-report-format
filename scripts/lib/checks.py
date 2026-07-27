@@ -20,6 +20,12 @@ format fix (auto-fixable, one per paragraph, combines all its violations):
 renumber fix (auto-fixable text change on the leading ordinal):
   {"para_index": i, "op": "renumber_caption", "kind": "figure"|"table",
    "new_num": "2", "rule_id":..., "rule_text":..., "comment": true}
+  (只用于【章-序分组编号】如"图2-1"——平铺编号改走下面的自动编号)
+
+autonumber fix (把图/表标题交给 Word 自动编号：删掉文字里的静态"图N/表N"、
+把段落挂到注入的图/表编号序列上):
+  {"para_index": i, "op": "autonumber_caption", "kind": "figure"|"table",
+   "rule_id":..., "rule_text":..., "comment": true}
   {"para_index": i, "op": "renumber_heading", "level": 1,
    "new_token": "二、", "rule_id":..., "rule_text":..., "comment": true}
 
@@ -33,7 +39,14 @@ import json
 import os
 import re
 
+from canonstyles import CAPTION_ROLE_BY_KIND, STYLE_ID_BY_ROLE
+
 CN_DIGITS = "零一二三四五六七八九"
+
+# 注入的图/表标题样式 id —— 判"该图表标题是否已是 canonical 自动编号形态"要用到
+# （见 `_caption_already_autonumbered`）。canonstyles 是纯 stdlib，判定层引它不引入依赖。
+_CANON_CAPTION_STYLE_IDS = frozenset(
+    STYLE_ID_BY_ROLE[r] for r in CAPTION_ROLE_BY_KIND.values())
 
 # Canonical location of the authoritative spec, resolved once relative to this
 # file (scripts/lib/checks.py -> ../../spec/format_spec.json). Every pipeline
@@ -176,6 +189,7 @@ def _new_sets():
     apply stage and the summary never trip over a key that only some check
     branches happened to include."""
     return {"set_east_asia": None, "set_ascii": None, "set_size_hp": None,
+            "set_bold": None,
             "set_line_exact": None, "set_line_rule": None,
             "clear_space_before_after": False,
             "set_first_line_chars": None,
@@ -189,7 +203,7 @@ def paragraph_role(rec, spec):
 
     返回值即 `canonstyles.ROLE_STYLES` 的角色名：
         None（空行 / AI 豁免的封面 other 行：不判、也不指派样式）
-        'toc' | 'caption' | 'table_body'
+        'toc' | 'caption_figure' | 'caption_table' | 'table_body'
         'title' | 'cover_classification' | 'cover_field'
         'heading1'..'heading4' | 'body'
 
@@ -202,8 +216,11 @@ def paragraph_role(rec, spec):
     region = rec.get("region", "body")
     if region == "toc":
         return "toc"
-    if rec.get("caption"):
-        return "caption"
+    cap = rec.get("caption")
+    if cap:
+        # 图/表分成两个角色：静态"图N/表N"前缀改成自动编号后会从文字里删掉，此后种类
+        # 只能靠样式名回读，所以图标题与表标题必须是两个不同的样式（见 canonstyles）。
+        return "caption_table" if cap.get("kind") == "table" else "caption_figure"
     if rec.get("in_table"):
         return "table_body"
     if region == "cover":
@@ -233,7 +250,7 @@ def check_paragraph(rec, spec):
     # Caption paragraphs (图.../表...): center them and remove all indent
     # (spec.caption_format). Font/size are left alone (the spec states no
     # caption font rule). Numbering is handled separately by continuity().
-    if role == "caption":
+    if role in ("caption_figure", "caption_table"):
         return _check_caption_format(rec, spec)
 
     # Table-cell content has its OWN font/size rule (仿宋 14磅), distinct from
@@ -332,6 +349,12 @@ def check_paragraph(rec, spec):
         h = spec["headings"][str(lvl)]
         _check_font_size(eff, h, sets, violations,
                          label="%d级标题" % lvl, western=western, has_western=has_western)
+        # 加粗：`eff.bold` 只有在**整段每个文字 run 都加粗**时才为 True，所以"前半加粗、
+        # 后半不加粗"（同一标题被历史编辑切成多段 run）也会被判不合规并批注。真正的
+        # 统一由样式承载 + 清直接加粗完成（apply 层），这里负责给出提示。
+        if h.get("bold") and eff.get("bold") is not True:
+            sets["set_bold"] = True
+            violations.append("%d级标题应加粗" % lvl)
         # 一~四级标题行距固定值28磅（与正文一致，取 spec.line_spacing）。
         ls = spec["line_spacing"]
         _check_line_spacing(eff, ls["line_twips"], ls["line_rule"],
@@ -765,6 +788,13 @@ def continuity(records, spec):
                 expected = "%s%s%d" % (prefix, sep, group_counter[prefix])
                 if raw != expected:
                     fixes.append(_caption_fix(r, kind, expected, raw))
+        elif spec.get("captions", {}).get("auto_number"):
+            # 平铺编号 → 交给 **Word 自动编号**（注入的 图%1/表%1 定义，编号后带制表符）。
+            # 静态编号在插入/删除图表后会整体失序，用户阶段2 验收明确否掉了它。
+            for r in confirmed:
+                if _caption_already_autonumbered(r):
+                    continue          # 已是 canonical 形态：幂等，不动也不批注
+                fixes.append(_caption_autonumber_fix(r, kind))
         else:
             n = 0
             for r in confirmed:
@@ -778,6 +808,35 @@ def continuity(records, spec):
                 elif raw != expected:
                     fixes.append(_caption_fix(r, kind, expected, raw))
     return fixes
+
+
+def _caption_already_autonumbered(r):
+    """该图表标题是否**已经**是 canonical 自动编号形态——编号由 Word 生成（`auto_num`）、
+    文字里没有静态编号（`num_raw is None`）、且承载在注入的图/表标题样式上。
+
+    第三个条件不能省：只看前两条的话，文档自带的一套**外来**编号定义（英文 "Figure 1"、
+    带悬挂缩进的等）会被当成合规而放过；带上样式判断，则只有我们上一轮处理过的产物才算
+    合规——于是重跑收敛（幂等），而首次处理的文档一律转成规范编号并留批注。"""
+    if not (r.get("auto_num") and r["caption"].get("num_raw") is None):
+        return False
+    return r.get("style_id") in _CANON_CAPTION_STYLE_IDS
+
+
+def _caption_autonumber_fix(r, kind):
+    kname = "图" if kind == "figure" else "表"
+    raw = r["caption"].get("num_raw")
+    if raw is not None:
+        detail = "原静态编号“%s%s”已删除，改由 Word 按顺序生成" % (kname, raw)
+    elif r.get("auto_num"):
+        detail = "原自动编号已改用规范的编号定义"
+    else:
+        detail = "原缺少编号，已加入自动编号序列"
+    return {
+        "para_index": r["i"], "op": "autonumber_caption", "kind": kind,
+        "rule_id": "caption.%s.autonumber" % kind,
+        "rule_text": "%s标题应使用 Word 自动编号（编号后接制表符）——%s" % (kname, detail),
+        "comment": True,
+    }
 
 
 def _caption_fix(r, kind, new_num, old_num, insert=False):

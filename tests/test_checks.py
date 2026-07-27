@@ -22,7 +22,8 @@ SPEC = checks.load_spec(helpers.SPEC_PATH)
 def eff(**kw):
     """Effective-format dict defaulting to a COMPLIANT body paragraph
     (仿宋 / 三号 / 固定行距28磅 / 首行缩进2字符); override what a test needs."""
-    d = dict(east_asia="仿宋", ascii=None, size_hp=32, line=560, line_rule="exact",
+    d = dict(east_asia="仿宋", ascii=None, size_hp=32, bold=True,
+             line=560, line_rule="exact",
              first_line_chars=200, first_line=None, left_chars=None, left=None,
              start_chars=None, start=None, right_chars=None, right=None,
              end_chars=None, end=None, hanging_chars=None, hanging=None,
@@ -216,24 +217,43 @@ class TestUnnumberedSection(unittest.TestCase):
 
 
 class TestCaptionGrouping(unittest.TestCase):
-    """图/表编号：平铺 vs 章-序分组，各自计数。"""
+    """图/表编号：平铺走 Word 自动编号；章-序分组仍走静态重编号。"""
 
-    def _cap(self, i, num_raw):
+    def _cap(self, i, num_raw, **kw):
         return rec(i=i, caption={"kind": "figure", "num_raw": num_raw,
-                                 "has_content": True, "source": "style"})
+                                 "has_content": True, "source": "style"}, **kw)
 
-    def test_flat_renumber(self):
+    def test_flat_captions_go_to_word_autonumbering(self):
+        # 静态编号插/删图后会整体失序，用户阶段2 验收否掉了它：平铺编号一律改成
+        # Word 自动编号（注入 图%1 定义、编号后带制表符），文字里的"图N"删掉。
         recs = [self._cap(0, "1"), self._cap(1, "3")]
         fixes = checks.continuity(recs, SPEC)
         by_idx = {f["para_index"]: f for f in fixes}
-        self.assertNotIn(0, by_idx)
-        self.assertEqual(by_idx[1]["new_num"], "2")
+        self.assertEqual({f["op"] for f in fixes}, {"autonumber_caption"})
+        self.assertEqual(by_idx[0]["kind"], "figure")
+        # 连"编号看着是对的"那条也要转（静态编号本身就不合规）
+        self.assertIn(0, by_idx)
+
+    def test_already_canonical_autonumbered_caption_is_left_alone(self):
+        # 幂等：上一轮处理过的产物（自动编号 + 文字里无编号 + 注入的图标题样式）
+        # 不再产生 fix，重跑收敛。
+        r = self._cap(0, None, auto_num=True, style_id="FGWCanonCaptionFig")
+        self.assertEqual(checks.continuity([r], SPEC), [])
+
+    def test_foreign_autonumbering_still_converted(self):
+        # 文档自带的一套外来编号定义（未承载在我们注入的题注样式上）仍要转成规范编号，
+        # 否则"Figure 1"这类会被当成合规放过。
+        r = self._cap(0, None, auto_num=True, style_id="SomeOtherCaption")
+        fixes = checks.continuity([r], SPEC)
+        self.assertEqual([f["op"] for f in fixes], ["autonumber_caption"])
 
     def test_chapter_based_renumber(self):
+        # 章-序分组（图1-1）平铺自动编号表达不了，仍走静态重编号——别顺手也改掉。
         recs = [self._cap(0, "1-1"), self._cap(1, "1-3")]
         fixes = checks.continuity(recs, SPEC)
         by_idx = {f["para_index"]: f for f in fixes}
         self.assertNotIn(0, by_idx)
+        self.assertEqual(by_idx[1]["op"], "renumber_caption")
         self.assertEqual(by_idx[1]["new_num"], "1-2")
 
 
@@ -479,6 +499,40 @@ class TestNewFormatRules2026(unittest.TestCase):
     def test_body_compliant_with_zero_spacing_no_fix(self):
         r = rec(text="正文一段。",
                 eff_=eff(space_before=None, space_after=None))
+        self.assertIsNone(checks.check_paragraph(r, SPEC))
+
+    def test_headings_must_be_bold(self):
+        # 2026-07 新增规范：一~四级标题加粗。
+        r = rec(is_heading=True, level=2, level_source="outline", num_raw="（一）",
+                text="（一）研究方法",
+                eff_=eff(east_asia="楷体", size_hp=32, line=560, line_rule="exact",
+                         first_line_chars=200, bold=False))
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertTrue(fix["set_bold"])
+        self.assertIn("加粗", fix["rule_text"])
+
+    def test_bold_heading_compliant_no_bold_fix(self):
+        r = rec(is_heading=True, level=2, level_source="outline", num_raw="（一）",
+                text="（一）研究方法",
+                eff_=eff(east_asia="楷体", size_hp=32, line=560, line_rule="exact",
+                         first_line_chars=200, bold=True))
+        self.assertIsNone(checks.check_paragraph(r, SPEC))
+
+    def test_half_bold_heading_is_flagged(self):
+        # "前半加粗、后半不加粗"：eff.bold 走【全体一致】语义（20 抽取时只要有一个
+        # 文字 run 不粗就是 False），所以这种半粗半细会被判不合规而不是被多数票放过。
+        r = rec(is_heading=True, level=3, level_source="outline", num_raw="1.",
+                text="1. 数据来源与口径说明",
+                eff_=eff(east_asia="仿宋", size_hp=32, line=560, line_rule="exact",
+                         first_line_chars=200, bold=False))
+        self.assertTrue(checks.check_paragraph(r, SPEC)["set_bold"])
+
+    def test_body_bold_is_not_touched(self):
+        # 规范没规定正文加粗 → 正文样式不承载 bold，作者的行内加粗保持原样。
+        r = rec(text="正文内容。",
+                eff_=eff(east_asia="仿宋", size_hp=32, line=560, line_rule="exact",
+                         first_line_chars=200, space_before=0, space_after=0,
+                         bold=True))
         self.assertIsNone(checks.check_paragraph(r, SPEC))
 
     def test_direct_hanging_forces_first_line_rewrite(self):

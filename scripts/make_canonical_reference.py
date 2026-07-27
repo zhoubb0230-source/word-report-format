@@ -10,7 +10,7 @@
     # 默认写到 cwd 的 canonical_reference.docx
 
 验收清单（在 Word 里逐条看）：
-  1. 每个角色的字体/字号/居中/行距是否与规范一致（每段前有【角色·规范】标签）。
+  1. 每个角色的字体/字号/居中/行距是否与规范一致（每段前有【角色·规范】标签）；一~四级标题**加粗**。
   2. **首行缩进显示为"2 字符"而非厘米**——选中正文/标题段，看"段落→缩进→首行缩进 2 字符"，
      不是 0.74cm/0.85cm 之类。这是严格-spec §2.2 的关键判据（canonical 只写字符单位、无绝对伴随值）。
   3. **自动编号标题**（一~四级都自动编号："一、/（一）/1./（1）"）：首行是 2 字符缩进、不是 -0.74cm
@@ -19,7 +19,8 @@
      半角编号、右点线位置(8664)全部照规范文档 XML；点线应在标题与页码之间、页码右对齐不换行。
      （一级目录只有左制表位、无页码点线，与规范文档一致。）
   5. 封面各要素：方正黑体_GBK、题目居中、题目下要素两端对齐+首行缩进2字符。
-  6. **图/表标题自动编号**："图1/表1"应为一个整体（不能拆选"图""1"），编号后是空格不是制表位。
+  6. **图/表标题自动编号**："图1/表1"应为一个整体（不能拆选"图""1"），编号后是**制表符**；
+     文字里不再有静态的"图1/表1"，编号全部由 Word 生成（插删图表后自动重排）。
   7. **文档网格**：只指定行网格（行距 15.6 磅），与规范文档一致——封面要素仍设 2 倍行距。
   8. **表格默认单元格边距**：上0/左0.19cm/下0/右0.19cm。
 
@@ -61,34 +62,25 @@ def build_styles(spec):
             '<w:styles xmlns:w="%s">%s</w:styles>' % (W, "".join(parts)))
 
 
-def _lvl(ilvl, num_fmt, lvl_text, suff=None):
-    """一个编号级别：缩进【已中和】（left=0、无 hanging）——甲法克隆钳后的目标形态；
-    段落自身写 firstLineChars=200（字符单位）负责首行缩进。suff 控编号后的分隔符
-    （默认 tab；图表标题用 space＝编号后无制表位）。"""
-    suff_el = ('<w:suff w:val="%s"/>' % suff) if suff else ""
-    return ('<w:lvl w:ilvl="%d"><w:start w:val="1"/>%s'
-            '<w:numFmt w:val="%s"/><w:lvlText w:val="%s"/><w:lvlJc w:val="left"/>'
-            '<w:pPr><w:ind w:left="0" w:leftChars="0"/></w:pPr></w:lvl>'
-            % (ilvl, suff_el, num_fmt, lvl_text))
-
-
-def build_numbering():
+def build_numbering(spec):
     """三条 canonical 编号定义（级别缩进全部中和，甲法目标形态）：
-      * abstractNum 0 / numId 1 —— 多级标题：一、/（一）/1./（1），suff=tab（编号后制表符）。
-      * abstractNum 1 / numId 2 —— 图标题：图%%1，decimal，suff=tab（编号后制表符）。
+      * abstractNum 0 / numId 1 —— 多级标题：一、/(一)/1./(1)，suff=tab（编号后制表符）。
+      * abstractNum 1 / numId 2 —— 图标题：图%%1，decimal，suff=tab。
       * abstractNum 2 / numId 3 —— 表标题：表%%1，decimal，suff=tab。
-    图/表标题自动编号后"图1"是一个整体（不能拆选），序号后有制表符。"""
+
+    图/表两条**直接取自 `canonstyles.caption_numbering_defs`**——`40_apply_fixes.py` 往
+    真实文档里注入的是同一份字符串，参考件与流水线不会各写一套（漂移是这个项目最容易
+    犯的错）。自动编号后"图1"是一个整体（不能拆选），编号后是制表符。"""
     # 编号用【半角括号 (一)】而非全角（一）——规范文档如此；全角括号更宽，会越过目录左
     # 制表位、把点线挤到编号与标题之间（用户 v4 实测的乱象根因）。
+    lvl = canonstyles.numbering_level_xml
     headings = "".join([
-        _lvl(0, "chineseCounting", "%1、"),
-        _lvl(1, "chineseCounting", "(%2)"),
-        _lvl(2, "decimal", "%3."),
-        _lvl(3, "decimal", "(%4)"),
+        lvl("chineseCounting", "%1、", "tab", 0),
+        lvl("chineseCounting", "(%2)", "tab", 1),
+        lvl("decimal", "%3.", "tab", 2),
+        lvl("decimal", "(%4)", "tab", 3),
     ])
-    # 图/表标题：序号后要【制表符】（用户 Word 验收订正——用默认 suff=tab，不写 space）
-    figure = _lvl(0, "decimal", "图%1")
-    table = _lvl(0, "decimal", "表%1")
+    caps = {d["kind"]: d["lvl_xml"] for d in canonstyles.caption_numbering_defs(spec)}
     return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<w:numbering xmlns:w="%s">'
             '<w:abstractNum w:abstractNumId="0">%s</w:abstractNum>'
@@ -97,7 +89,8 @@ def build_numbering():
             '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>'
             '<w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num>'
             '<w:num w:numId="3"><w:abstractNumId w:val="2"/></w:num>'
-            '</w:numbering>' % (W, headings, figure, table))
+            '</w:numbering>'
+            % (W, headings, caps.get("figure", ""), caps.get("table", "")))
 
 
 def _p(style_id, text, extra_ppr=""):
@@ -217,9 +210,9 @@ def build_document(spec):
     body.append(_p(STYLE_ID_BY_ROLE["body"], "四级标题下的正文示例段落。"))
     body.append(_label("【图标题·自动编号·%s】“图1”应为一个整体（不能拆选“图”“1”）、编号后无制表位"
                        % src("caption_format")))
-    body.append(_p(STYLE_ID_BY_ROLE["caption"], "系统总体架构示意图", extra_ppr=numpr(0, 2)))
+    body.append(_p(STYLE_ID_BY_ROLE["caption_figure"], "系统总体架构示意图", extra_ppr=numpr(0, 2)))
     body.append(_label("【表标题·自动编号】“表1”自动生成、编号后无制表位（下方表格）"))
-    body.append(_p(STYLE_ID_BY_ROLE["caption"], "主要指标对照表", extra_ppr=numpr(0, 3)))
+    body.append(_p(STYLE_ID_BY_ROLE["caption_table"], "主要指标对照表", extra_ppr=numpr(0, 3)))
     body.append(_label("【表格内容·%s】四号、行距 28 磅、无缩进；默认单元格边距 上0/左0.19cm/下0/右0.19cm"
                        % src("table_body")))
     # 表级默认单元格边距（spec.table_defaults）。tblCellMar 须在 tblBorders 之后。
@@ -317,7 +310,7 @@ def build(out_path):
         "_rels/.rels": ROOT_RELS,
         "word/_rels/document.xml.rels": DOC_RELS,
         "word/styles.xml": build_styles(spec),
-        "word/numbering.xml": build_numbering(),
+        "word/numbering.xml": build_numbering(spec),
         "word/settings.xml": build_settings(spec),
         "word/footer1.xml": build_footer(spec),
         "word/document.xml": build_document(spec),

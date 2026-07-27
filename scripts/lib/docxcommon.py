@@ -518,3 +518,43 @@ def run_effective_rpr(run, baseline):
     if rpr is not None:
         _merge(eff, read_rpr(rpr))
     return eff
+
+
+def char_styles_overriding(styles_root):
+    """styleId 集合：那些**字符样式**（`w:type="character"`）设置了 canonical 段落样式
+    要管的属性（字体 / 字号 / 加粗），含经 basedOn 继承来的。
+
+    为什么需要：字符样式挂在 run 上，在 cascade 里**压过段落样式**。一段标题若有几个
+    run 带这种字符样式，指派 canonical 标题样式后那几个 run 依然我行我素——用户看到的
+    就是"同一个三级标题前半部分加粗、后半部分不加粗，样式好像只应用到了后半部分"。
+
+    `40_apply_fixes.py`（指派时摘掉这些 run 上的 `w:rStyle` 引用）与
+    `45_validate_output.py`（坍缩不变量把它算作泄漏）**共用这一份判断**，免得两边对
+    "哪些字符样式算抢戏"各有一套、彼此打架。只设颜色/下划线之类的字符样式（超链接、
+    批注引用）不在集合里，指派不会动它们。"""
+    if styles_root is None:
+        return frozenset()
+    by_id, based = {}, {}
+    for st in styles_root.findall(qn("w:style")):
+        if st.get(qn("w:type")) != "character":
+            continue
+        sid = st.get(qn("w:styleId"))
+        if not sid:
+            continue
+        by_id[sid] = st
+        b = st.find(qn("w:basedOn"))
+        based[sid] = b.get(qn("w:val")) if b is not None else None
+
+    def sets_governed(sid, seen):
+        if sid in seen or sid not in by_id:
+            return False
+        seen.add(sid)
+        rpr = by_id[sid].find(qn("w:rPr"))
+        if rpr is not None:
+            for tag in ("w:rFonts", "w:sz", "w:szCs", "w:b", "w:bCs"):
+                if rpr.find(qn(tag)) is not None:
+                    return True
+        parent = based.get(sid)
+        return sets_governed(parent, seen) if parent else False
+
+    return frozenset(sid for sid in by_id if sets_governed(sid, set()))

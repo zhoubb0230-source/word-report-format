@@ -47,9 +47,15 @@ from structure import tag_regions
 
 
 def dominant_run_props(p, baseline):
-    """Return (east_asia, ascii, size_hp) most used across text runs."""
+    """Return (east_asia, ascii, size_hp, bold) across the paragraph's text runs.
+
+    字体/字号取**用量最多**的那个（少数几个字的例外不该改变整段判定）；**加粗则相反，
+    取"全体一致"语义**——只有每个文字 run 都加粗才返回 True，否则 False（没有文字 run
+    时 None）。理由：加粗的违规形态正是"同一个标题前半加粗、后半不加粗"（历史编辑把
+    一段切成多个 run），按多数投票会把它判成合规而放过。"""
     ea_count, as_count, sz_count = {}, {}, {}
     total = 0
+    bold_all, saw_text = True, False
     for run, txt in iter_text_runs(p):
         eff = run_effective_rpr(run, baseline)
         n = len(txt)
@@ -60,13 +66,17 @@ def dominant_run_props(p, baseline):
             as_count[eff["ascii"]] = as_count.get(eff["ascii"], 0) + n
         if eff.get("size_hp"):
             sz_count[eff["size_hp"]] = sz_count.get(eff["size_hp"], 0) + n
+        if txt.strip():
+            saw_text = True
+            if eff.get("bold") is not True:
+                bold_all = False
 
     def top(d, fallback):
         return max(d.items(), key=lambda kv: kv[1])[0] if d else fallback
     ea = top(ea_count, baseline.get("east_asia"))
     asc = top(as_count, baseline.get("ascii"))
     sz = top(sz_count, baseline.get("size_hp"))
-    return ea, asc, sz
+    return ea, asc, sz, (bold_all if saw_text else None)
 
 
 def has_toc_field(p):
@@ -317,7 +327,7 @@ def main():
         # (甲法) in 40 then neutralizes the hanging surfaced here.
         ppr, rpr = resolver.resolve_cascade(sid, ppr_el, mark_rpr, numbering_levels)
         text = para_text(p)
-        ea, asc, sz = dominant_run_props(p, rpr)
+        ea, asc, sz, bold = dominant_run_props(p, rpr)
 
         num_id = ppr.get("num_id")
         auto_num = bool(num_id and num_id != "0")
@@ -397,7 +407,7 @@ def main():
             # font (computed from the FULL text, before the 60-char truncation).
             "has_western": bool(re.search(r"[A-Za-z0-9]", text)),
             "eff": {
-                "east_asia": ea, "ascii": asc, "size_hp": sz,
+                "east_asia": ea, "ascii": asc, "size_hp": sz, "bold": bold,
                 "line": ppr.get("line"), "line_rule": ppr.get("line_rule"),
                 "space_before": ppr.get("space_before"),
                 "space_after": ppr.get("space_after"),

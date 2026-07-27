@@ -25,6 +25,10 @@ W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 # ⚠️ 正文样式名必须是 "FGW正文" 而**不能**是 "正文"（陷阱 #12）：Word 把【文档网格
 # 字体】链接到名为"正文"(=Normal) 的样式，正文内容样式若也叫"正文"会抢占该链接、
 # 把网格字体拽成三号，行网格 15.6磅/41行 就退回 21.75磅/29行。
+# 图/表标题**分成两个样式**（名字里各只含"图"或"表"）：图表标题一旦改用 Word 自动编号，
+# 文字里的静态"图N/表N"前缀就被删掉了，此后**只能靠样式名判断这是图标题还是表标题**
+# （`headings.caption_kind_from_style` 对同时含图与表的"图表标题"返回 None＝认不出）。
+# 合成一个样式会让二次运行认不出种类、把图表标题降级成正文。
 ROLE_STYLES = (
     ("title",                "FGWCanonTitle",      "封面题目"),
     ("cover_classification", "FGWCanonCoverClass", "封面密级编号"),
@@ -34,10 +38,14 @@ ROLE_STYLES = (
     ("heading3",             "FGWCanonH3",         "标题 3"),
     ("heading4",             "FGWCanonH4",         "标题 4"),
     ("body",                 "FGWCanonBody",       "FGW正文"),
-    ("caption",              "FGWCanonCaption",    "图表标题"),
+    ("caption_figure",       "FGWCanonCaptionFig", "图标题"),
+    ("caption_table",        "FGWCanonCaptionTbl", "表标题"),
     ("table_body",           "FGWCanonTableBody",  "表格内容"),
     ("toc_title",            "FGWCanonTocTitle",   "目录标题"),
 )
+
+# 角色名 -> 图表种类，供编号入列时选对序列。
+CAPTION_ROLE_BY_KIND = {"figure": "caption_figure", "table": "caption_table"}
 
 STYLE_ID_BY_ROLE = {role: sid for role, sid, _n in ROLE_STYLES}
 CANONICAL_STYLE_IDS = frozenset(sid for _r, sid, _n in ROLE_STYLES)
@@ -65,12 +73,15 @@ def char_twips(chars, size_hp):
     return int(round(chars / 100.0 * size_hp * 10))
 
 
-def _rpr(ea, size_hp, western_font=None):
+def _rpr(ea, size_hp, western_font=None, bold=False):
     """run 属性：eastAsia = 中文字体；ascii/hAnsi/cs = 西文字体。套西文的角色给
-    Times，否则回退成中文字体本身（数字也走该字体）。"""
+    Times，否则回退成中文字体本身（数字也走该字体）。``bold`` 写 `w:b`+`w:bCs`
+    （中日韩与西文各一套开关，只写 `w:b` 时西文部分可能不加粗）。"""
     latin = western_font or ea
     parts = ['<w:rFonts w:ascii="%s" w:hAnsi="%s" w:eastAsia="%s" w:cs="%s"/>'
              % (_esc(latin), _esc(latin), _esc(ea), _esc(latin))]
+    if bold:
+        parts.append('<w:b/><w:bCs/>')
     if size_hp is not None:
         parts.append('<w:sz w:val="%d"/><w:szCs w:val="%d"/>' % (size_hp, size_hp))
     return "".join(parts)
@@ -115,15 +126,15 @@ def _style_xml(sid, name, ppr_inner, rpr_inner, based_on=None):
 # ---------------------------------------------------------------------------
 # 角色 -> canonical 样式
 # ---------------------------------------------------------------------------
-def _governs(fonts=False, western=False, size=False, line=False,
+def _governs(fonts=False, western=False, size=False, bold=False, line=False,
              space_before_after=False, jc=False, ind=False, outline=False):
     """该样式**承载**（因而段落上要清掉的）属性集合。
 
     这是"清直接覆盖"与 45 步全坍缩不变量的共同依据：样式承载什么，段落就不许再
     用直接属性表达同一属性；样式**没**承载的属性（如密级行的对齐方式——规范对它
     没有规定）保持原样不动，避免样式指派顺手抹掉模板版式。"""
-    return {"fonts": fonts, "western": western, "size": size, "line": line,
-            "space_before_after": space_before_after, "jc": jc,
+    return {"fonts": fonts, "western": western, "size": size, "bold": bold,
+            "line": line, "space_before_after": space_before_after, "jc": jc,
             "ind": ind, "outline": outline}
 
 
@@ -171,15 +182,15 @@ def canonical_style_defs(spec):
         _governs(fonts=True, western=bool(latin(cf)), size=True,
                  line=bool(cf.get("line_twips")), jc=True, ind=True))
 
-    # 一~四级标题：黑体/楷体/仿宋/仿宋 三号、行距固定28磅、首行缩进2字符、大纲级别
+    # 一~四级标题：黑体/楷体/仿宋/仿宋 三号加粗、行距固定28磅、首行缩进2字符、大纲级别
     for lvl in ("1", "2", "3", "4"):
         h = spec["headings"][lvl]
         add("heading" + lvl,
             '<w:outlineLvl w:val="%d"/>' % (int(lvl) - 1)
             + _spacing(line_twips, line_rule) + _ind(first_line_chars=h["first_line_chars"]),
-            _rpr(h["east_asia"], h["size_hp"], western),
-            _governs(fonts=True, western=True, size=True, line=line_twips is not None,
-                     ind=True, outline=True))
+            _rpr(h["east_asia"], h["size_hp"], western, bold=bool(h.get("bold"))),
+            _governs(fonts=True, western=True, size=True, bold=bool(h.get("bold")),
+                     line=line_twips is not None, ind=True, outline=True))
 
     # 正文
     b = spec["body"]
@@ -190,14 +201,16 @@ def canonical_style_defs(spec):
         _governs(fonts=True, western=True, size=True, line=line_twips is not None,
                  space_before_after=bool(b.get("no_space_before_after")), ind=True))
 
-    # 图/表标题
+    # 图标题 / 表标题（同一套格式，两个样式名——种类要靠样式名回读，见 ROLE_STYLES）
     cap = spec["caption_format"]
-    add("caption",
-        _spacing(cap.get("line_twips"), cap.get("line_rule"))
-        + '<w:jc w:val="%s"/>' % cap.get("jc", "center") + _ind(no_indent=True),
-        _rpr(cap["east_asia"], cap["size_hp"], western),
-        _governs(fonts=True, western=True, size=True,
-                 line=bool(cap.get("line_twips")), jc=True, ind=bool(cap.get("no_indent"))))
+    for role in ("caption_figure", "caption_table"):
+        add(role,
+            _spacing(cap.get("line_twips"), cap.get("line_rule"))
+            + '<w:jc w:val="%s"/>' % cap.get("jc", "center") + _ind(no_indent=True),
+            _rpr(cap["east_asia"], cap["size_hp"], western),
+            _governs(fonts=True, western=True, size=True,
+                     line=bool(cap.get("line_twips")), jc=True,
+                     ind=bool(cap.get("no_indent"))))
 
     # 表格内容
     tb = spec["table_body"]
@@ -351,6 +364,52 @@ def settings_children_xml(spec):
     if grid.get("theme_font_lang_east_asia"):
         out.append(("themeFontLang", '<w:themeFontLang w:val="en-US" w:eastAsia="%s"/>'
                     % _esc(grid["theme_font_lang_east_asia"])))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 图/表标题的自动编号
+# ---------------------------------------------------------------------------
+# 注入的编号定义靠 `<w:name>` 打标签认领，二次运行才能找回同一条定义而不是越注入越多。
+CAPTION_NUM_MARKER = {"figure": "FGWCaptionFigure", "table": "FGWCaptionTable"}
+
+
+def numbering_level_xml(num_fmt, lvl_text, suff=None, ilvl=0):
+    """一个编号级别，**缩进已中和**（left=0、无 hanging）。
+
+    中和是必须的：编号层在 cascade 里压过样式层，级别自带的 hanging 会把 canonical
+    样式的缩进盖掉（陷阱 #11）。`suff` 控编号与文字之间的分隔符——图/表标题要
+    `tab`（编号后一个制表符），Word 的默认值也是 tab，这里显式写出来免得依赖默认。"""
+    suff_el = ('<w:suff w:val="%s"/>' % _esc(suff)) if suff else ""
+    return ('<w:lvl w:ilvl="%d"><w:start w:val="1"/>%s'
+            '<w:numFmt w:val="%s"/><w:lvlText w:val="%s"/><w:lvlJc w:val="left"/>'
+            '<w:pPr><w:ind w:left="0" w:leftChars="0"/></w:pPr></w:lvl>'
+            % (ilvl, suff_el, _esc(num_fmt), _esc(lvl_text)))
+
+
+def caption_numbering_defs(spec):
+    """图/表标题各一条 canonical 自动编号定义。
+
+    返回 [{"kind","marker","lvl_text","lvl_xml"}]（figure 在前）。**静态编号不可取**：
+    插入/删除一张图之后所有后续编号都要重排，而 Word 自动编号自己维护序列；用户阶段2
+    验收明确指出"图/表标题采用了静态编号，这一点不正确"。
+
+    `spec.captions` 为真源：前缀取 `figure_prefixes[0]`/`table_prefixes[0]`，编号格式
+    取 `num_fmt`，编号后分隔符取 `suffix`。"""
+    caps = spec.get("captions") or {}
+    if not caps.get("auto_number"):
+        return []
+    num_fmt = caps.get("num_fmt", "decimal")
+    suff = caps.get("suffix", "tab")
+    out = []
+    for kind, key in (("figure", "figure_prefixes"), ("table", "table_prefixes")):
+        prefixes = caps.get(key) or []
+        if not prefixes:
+            continue
+        lvl_text = "%s%%1" % prefixes[0]
+        out.append({"kind": kind, "marker": CAPTION_NUM_MARKER[kind],
+                    "lvl_text": lvl_text,
+                    "lvl_xml": numbering_level_xml(num_fmt, lvl_text, suff)})
     return out
 
 

@@ -83,8 +83,9 @@
     "SimHei"
    ],
    "size_hp": 32,
+   "bold": true,
    "first_line_chars": 200,
-   "source": "一级标题 黑体 三号 首行缩进2字符；西文 Times New Roman"
+   "source": "一级标题 黑体 三号 **加粗** 首行缩进2字符；西文 Times New Roman（加粗由注入的标题样式承载，段落上的直接加粗/取消加粗一律清掉，避免同一标题半粗半细）"
   },
   "2": {
    "east_asia": "楷体",
@@ -94,8 +95,9 @@
     "楷体_GB2312"
    ],
    "size_hp": 32,
+   "bold": true,
    "first_line_chars": 200,
-   "source": "二级标题 楷体 三号 首行缩进2字符；西文 Times New Roman"
+   "source": "二级标题 楷体 三号 **加粗** 首行缩进2字符；西文 Times New Roman（加粗由注入的标题样式承载，段落上的直接加粗/取消加粗一律清掉，避免同一标题半粗半细）"
   },
   "3": {
    "east_asia": "仿宋",
@@ -105,8 +107,9 @@
     "仿宋_GB2312"
    ],
    "size_hp": 32,
+   "bold": true,
    "first_line_chars": 200,
-   "source": "三级标题 仿宋 三号 首行缩进2字符；西文 Times New Roman"
+   "source": "三级标题 仿宋 三号 **加粗** 首行缩进2字符；西文 Times New Roman（加粗由注入的标题样式承载，段落上的直接加粗/取消加粗一律清掉，避免同一标题半粗半细）"
   },
   "4": {
    "east_asia": "仿宋",
@@ -116,8 +119,9 @@
     "仿宋_GB2312"
    ],
    "size_hp": 32,
+   "bold": true,
    "first_line_chars": 200,
-   "source": "四级标题 仿宋 三号 首行缩进2字符；西文 Times New Roman"
+   "source": "四级标题 仿宋 三号 **加粗** 首行缩进2字符；西文 Times New Roman（加粗由注入的标题样式承载，段落上的直接加粗/取消加粗一律清掉，避免同一标题半粗半细）"
   }
  },
  "body": {
@@ -260,7 +264,10 @@
    "表"
   ],
   "require_content": true,
-  "source": "图表按顺序编号并标注内容",
+  "auto_number": true,
+  "num_fmt": "decimal",
+  "suffix": "tab",
+  "source": "图表按顺序编号并标注内容；编号用 Word【自动编号】（注入 图%1 / 表%1 两条十进制编号定义，编号后接制表符 suff=tab），不写静态编号——静态编号插入/删除图表后会失序。文字里原有的静态“图N/表N”前缀会被删掉，改由 Word 生成；例外：章-序分组编号（如“图2-1”）无法用平铺自动编号表达，仍走静态编号",
   "renumber": true
  },
  "comment_author": "XAgent"

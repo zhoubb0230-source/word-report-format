@@ -101,9 +101,11 @@ def _p(style_id, text, extra_ppr=""):
 
 def _label(text):
     """一行说明标签，用 Normal 小字，帮用户对照该段应符合的规范。"""
-    return ('<w:p><w:pPr><w:rPr><w:sz w:val="18"/><w:color w:val="808080"/></w:rPr></w:pPr>'
-            '<w:r><w:rPr><w:sz w:val="18"/><w:color w:val="808080"/></w:rPr>'
-            '<w:t xml:space="preserve">%s</w:t></w:r></w:p>' % _esc(text))
+    # rPr 的子元素顺序照 CT_RPr 的 sequence：color(在 spacing 前) 排在 sz 之前。
+    # 顺序写反文件仍良构，但 Word 会提示"发现无法读取的内容"。
+    rpr = '<w:rPr><w:color w:val="808080"/><w:sz w:val="18"/></w:rPr>'
+    return ('<w:p><w:pPr>%s</w:pPr><w:r>%s'
+            '<w:t xml:space="preserve">%s</w:t></w:r></w:p>' % (rpr, rpr, _esc(text)))
 
 
 def build_document(spec):

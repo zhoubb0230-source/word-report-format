@@ -477,8 +477,16 @@ class TestLibreOfficeHeadingIndentPipeline(unittest.TestCase):
                 if a.get(qn("w:abstractNumId")) == "0"][0]
         ind0 = abs0.find(qn("w:lvl") + "/" + qn("w:pPr") + "/" + qn("w:ind"))
         self.assertEqual(ind0.get(qn("w:hanging")), "420")
-        # 只新增了一条 abstractNum（克隆一次）：共 2 条
-        self.assertEqual(len(num_root.findall(qn("w:abstractNum"))), 2)
+        # 原 abstractNum 0 只被克隆【一次】：两个标题共享一条 abstractNum，就该合成
+        # 一组、共用一个新 numId——分开克隆会把一个多级列表劈成几条独立列表，二/三/
+        # 四级标题的编号从中间重新计数（用户实测的"标题编号顺序出错"）。
+        # 另外两条是图/表标题的编号定义（无条件注入，靠 w:name 认领）。
+        names = [a.find(qn("w:name")).get(qn("w:val")) if a.find(qn("w:name")) is not None
+                 else None for a in num_root.findall(qn("w:abstractNum"))]
+        self.assertEqual(sorted(n for n in names if n),
+                         ["FGWCaptionFigure", "FGWCaptionTable"])
+        self.assertEqual(len([n for n in names if n is None]), 2,
+                         "原 abstractNum + 一份克隆 = 2 条（克隆多于一份即分组错了）")
 
 
 @unittest.skipUnless(HAVE_LXML, "lxml not installed")
@@ -916,11 +924,19 @@ class TestCanonicalStyleInjection(unittest.TestCase):
         num2abs = {n.get(self.qn("w:numId")):
                    n.find(self.qn("w:abstractNumId")).get(self.qn("w:val"))
                    for n in num_root.findall(self.qn("w:num"))}
+        # 编号挂在【样式】上，不是段落上——用户才能在 Word 里给新插入的图表标题
+        # 套上"图标题"样式就直接生成编号（只挂段落的话新段落没编号）。
+        styles = {s.get(self.qn("w:styleId")): s
+                  for s in self._styles(wd).findall(self.qn("w:style"))}
         got = {}
-        for p, kind in zip(paras, ("图", "表")):
-            nid = p.find(self.qn("w:pPr") + "/" + self.qn("w:numPr") + "/"
-                         + self.qn("w:numId"))
-            self.assertIsNotNone(nid, "图表标题没挂上自动编号")
+        for p, kind, sid in zip(paras, ("图", "表"),
+                                ("FGWCanonCaptionFig", "FGWCanonCaptionTbl")):
+            self.assertIsNone(
+                p.find(self.qn("w:pPr") + "/" + self.qn("w:numPr")),
+                "段落上不该留直接 numPr（会压过样式携带的编号）")
+            nid = styles[sid].find(self.qn("w:pPr") + "/" + self.qn("w:numPr")
+                                   + "/" + self.qn("w:numId"))
+            self.assertIsNotNone(nid, "题注样式没带自动编号")
             lvl = abs_by_id[num2abs[nid.get(self.qn("w:val"))]].find(self.qn("w:lvl"))
             got[kind] = (lvl.find(self.qn("w:lvlText")).get(self.qn("w:val")),
                          lvl.find(self.qn("w:numFmt")).get(self.qn("w:val")),
@@ -928,13 +944,22 @@ class TestCanonicalStyleInjection(unittest.TestCase):
         self.assertEqual(got["图"], ("图%1", "decimal", "tab"))
         self.assertEqual(got["表"], ("表%1", "decimal", "tab"))
         # 编号级别缩进必须中和：编号层压过样式层，不中和会盖掉样式的"无缩进"
-        for kind in ("图", "表"):
-            pass
         for a in abs_by_id.values():
             ind = a.find(self.qn("w:lvl") + "/" + self.qn("w:pPr") + "/"
                          + self.qn("w:ind"))
             self.assertEqual(ind.get(self.qn("w:left")), "0")
             self.assertIsNone(ind.get(self.qn("w:hanging")))
+
+    def test_caption_style_numbering_survives_for_newly_inserted_captions(self):
+        # 用户实测："插入新图后我添加标题，应用图标题的样式，没有生成编号"。
+        # 编号写进样式后，一个**只套了样式、没有任何直接 numPr** 的新段落也会有编号。
+        wd = self._run_src(self._build_captions("cap3.docx"), "wbcap3")
+        styles = {s.get(self.qn("w:styleId")): s
+                  for s in self._styles(wd).findall(self.qn("w:style"))}
+        for sid in ("FGWCanonCaptionFig", "FGWCanonCaptionTbl"):
+            numpr = styles[sid].find(self.qn("w:pPr") + "/" + self.qn("w:numPr"))
+            self.assertIsNotNone(numpr, "%s 样式必须自带编号" % sid)
+            self.assertEqual(numpr.find(self.qn("w:ilvl")).get(self.qn("w:val")), "0")
 
     def test_caption_numbering_injection_is_idempotent(self):
         # 靠 abstractNum 的 w:name 标记认领已注入的定义，重跑不会越注入越多。
@@ -949,6 +974,136 @@ class TestCanonicalStyleInjection(unittest.TestCase):
         self.assertEqual(first, 2)
         run(self._script("40_apply_fixes.py"), wd)
         self.assertEqual(n_abs(), first)
+
+    def test_output_has_no_element_order_violations(self):
+        """产物不得违反 OOXML 的 xsd:sequence——乱序的良构 XML 会让真实 Word 提示
+        "发现无法读取的内容，是否恢复此文档的内容"（用户实测踩过：`w:suff` 写在
+        `w:numFmt` 前、`w:jc` 写在 `w:ind` 前、`w:outlineLvl` 写在 `w:spacing` 前、
+        往只有 `w:sz` 的 Normal 里 append `w:rFonts`）。"""
+        from lxml import etree
+        sys.path.insert(0, os.path.join(helpers.SCRIPTS, "lib"))
+        from docxcommon import order_violations
+        wd, _ = self._run(self._MIXED_BODY)
+        for part in ("document.xml", "styles.xml", "numbering.xml", "settings.xml"):
+            path = os.path.join(wd, "out_pkg", "word", part)
+            if not os.path.exists(path):
+                continue
+            self.assertEqual(order_violations(etree.parse(path).getroot()), [],
+                             "%s 元素顺序违反 schema" % part)
+
+    def test_shared_abstractnum_across_numids_stays_one_list(self):
+        """两个 `w:num` 指向同一 `abstractNum`（Word 里极常见）时，克隆钳必须把它们
+        **合成一组、只克隆一次**——共享 abstractNum 就是共享计数器，分开克隆会把一个
+        多级列表劈成几条独立列表，二/三/四级标题编号从中间重新计数（用户实测的
+        "标题编号顺序出错"）。"""
+        import zipfile
+        from lxml import etree
+        lvls = "".join(
+            '<w:lvl w:ilvl="%d"><w:start w:val="1"/><w:numFmt w:val="decimal"/>'
+            '<w:lvlText w:val="%%%d."/><w:lvlJc w:val="left"/>'
+            '<w:pPr><w:ind w:left="420" w:hanging="420"/></w:pPr></w:lvl>' % (i, i + 1)
+            for i in range(3))
+        numbering = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                     '<w:numbering xmlns:w="%s"><w:abstractNum w:abstractNumId="0">%s'
+                     '</w:abstractNum>'
+                     '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>'
+                     '<w:num w:numId="2"><w:abstractNumId w:val="0"/></w:num>'
+                     '</w:numbering>' % (self.W, lvls))
+        styles = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                  '<w:styles xmlns:w="%s">'
+                  '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
+                  '<w:name w:val="Normal"/></w:style>'
+                  + "".join('<w:style w:type="paragraph" w:styleId="Heading%d">'
+                            '<w:name w:val="heading %d"/><w:pPr>'
+                            '<w:outlineLvl w:val="%d"/></w:pPr></w:style>'
+                            % (i, i, i - 1) for i in (1, 2, 3))
+                  + '</w:styles>') % self.W
+
+        def para(style, text, ilvl, numid):
+            return ('<w:p><w:pPr><w:pStyle w:val="%s"/><w:numPr>'
+                    '<w:ilvl w:val="%d"/><w:numId w:val="%d"/></w:numPr></w:pPr>'
+                    '<w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="32"/></w:rPr>'
+                    '<w:t xml:space="preserve">%s</w:t></w:r></w:p>'
+                    % (style, ilvl, numid, text))
+        # 一级用 numId=1，二/三级用 numId=2 —— 同一 abstractNum
+        doc = helpers.document_xml(
+            para("Heading1", "绪论", 0, 1) + para("Heading2", "研究方法", 1, 2)
+            + para("Heading3", "数据来源", 2, 2))
+        src = os.path.join(self.tmp, "shared.docx")
+        with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", _CT_LO)
+            z.writestr("_rels/.rels", helpers.ROOT_RELS)
+            z.writestr("word/_rels/document.xml.rels", _DRELS_LO)
+            z.writestr("word/document.xml", doc)
+            z.writestr("word/styles.xml", styles)
+            z.writestr("word/numbering.xml", numbering)
+        wd = self._run_src(src, "wbshared")
+
+        paras = list(self._doc(wd).iter(self.qn("w:p")))
+        nids = [p.find(self.qn("w:pPr") + "/" + self.qn("w:numPr") + "/"
+                       + self.qn("w:numId")).get(self.qn("w:val")) for p in paras]
+        self.assertEqual(len(set(nids)), 1,
+                         "共享 abstractNum 的标题被拆到了不同 numId（计数器会分裂）")
+        ilvls = [p.find(self.qn("w:pPr") + "/" + self.qn("w:numPr") + "/"
+                        + self.qn("w:ilvl")).get(self.qn("w:val")) for p in paras]
+        self.assertEqual(ilvls, ["0", "1", "2"], "级别没保持原样")
+        num_root = etree.parse(os.path.join(wd, "out_pkg", "word",
+                                            "numbering.xml")).getroot()
+        unnamed = [a for a in num_root.findall(self.qn("w:abstractNum"))
+                   if a.find(self.qn("w:name")) is None]
+        self.assertEqual(len(unnamed), 2, "原 abstractNum 应只被克隆一次")
+
+    def test_caption_number_not_bold_when_text_is_not(self):
+        """自动编号的渲染取自**段落标记的 rPr**：原表标题整体加粗时，若不清掉段落标记
+        上的加粗，就会出现"编号粗、标题文字不粗"（用户实测）。段落标记不是作者内容，
+        指派 canonical 样式时一律清掉它的加粗，编号才跟随样式。"""
+        import zipfile
+        cap = ('<w:p><w:pPr><w:pStyle w:val="表标题"/><w:rPr><w:b/></w:rPr></w:pPr>'
+               '<w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:b/><w:sz w:val="32"/></w:rPr>'
+               '<w:t xml:space="preserve">表1 主要指标</w:t></w:r></w:p>')
+        src = os.path.join(self.tmp, "boldcap.docx")
+        with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", _CT_LO)
+            z.writestr("_rels/.rels", helpers.ROOT_RELS)
+            z.writestr("word/_rels/document.xml.rels", _DRELS_LO)
+            z.writestr("word/document.xml", helpers.document_xml(cap))
+            z.writestr("word/styles.xml", self._SPLIT_BOLD_STYLES)
+            z.writestr("word/numbering.xml", '<w:numbering xmlns:w="%s"/>' % self.W)
+        wd = self._run_src(src, "wbboldcap")
+        p = list(self._doc(wd).iter(self.qn("w:p")))[0]
+        mark = p.find(self.qn("w:pPr") + "/" + self.qn("w:rPr"))
+        if mark is not None:
+            self.assertIsNone(mark.find(self.qn("w:b")), "段落标记仍加粗→编号会粗")
+
+    def test_heading_and_caption_ends_are_stripped(self):
+        # 首尾空格会顶偏居中/缩进，图表标题还会把自动编号顶开；行内空格保留。
+        body = (helpers.para("  一、绪论  ", east_asia="宋体", size_hp=32, outline=0)
+                + helpers.para("  图1 系统架构  ", east_asia="宋体", size_hp=32,
+                               style="图标题"))
+        wd, _ = self._run(body)
+        texts = ["".join(t.text or "" for t in p.iter(self.qn("w:t")))
+                 for p in self._doc(wd).iter(self.qn("w:p"))]
+        self.assertEqual(texts[0], "一、绪论")
+        self.assertEqual(texts[1], "系统架构")
+
+    def test_blank_lines_outside_cover_get_body_style(self):
+        """新增规范：封面外的空行统一套正文样式（仿宋三号）。
+
+        不这么做的话空行跟随 Normal——而 Normal 已被钉成五号（文档网格的前提），
+        空行会莫名变矮、与正文行距不一致。封面空行属版式留白，不在规则内。"""
+        body = (helpers.para("先进项目2024年度自评价报告", east_asia="宋体",
+                             size_hp=44, jc="center")
+                + '<w:p/>'                       # 封面空行：不动
+                + helpers.para("一、绪论", east_asia="宋体", size_hp=32, outline=0)
+                + '<w:p/>'                       # 正文区空行：套正文样式
+                + helpers.para("正文内容。", east_asia="宋体", size_hp=32))
+        wd, _ = self._run(body)
+        paras = list(self._doc(wd).iter(self.qn("w:p")))
+        cover_blank = paras[1].find(self.qn("w:pPr") + "/" + self.qn("w:pStyle"))
+        self.assertIsNone(cover_blank, "封面空行不该被指派样式")
+        body_blank = paras[3].find(self.qn("w:pPr") + "/" + self.qn("w:pStyle"))
+        self.assertIsNotNone(body_blank, "正文区空行应套正文样式")
+        self.assertEqual(body_blank.get(self.qn("w:val")), "FGWCanonBody")
 
     def test_style_inherited_numbering_survives_assignment(self):
         """改指 canonical 样式会把**原样式携带的 numPr** 一起弄丢——编号"一、"消失

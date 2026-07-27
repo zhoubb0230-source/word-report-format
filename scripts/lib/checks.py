@@ -355,6 +355,7 @@ def check_paragraph(rec, spec):
         if h.get("bold") and eff.get("bold") is not True:
             sets["set_bold"] = True
             violations.append("%d级标题应加粗" % lvl)
+        _check_strip_ends(rec, sets, violations, "%d级标题" % lvl)
         # 一~四级标题行距固定值28磅（与正文一致，取 spec.line_spacing）。
         ls = spec["line_spacing"]
         _check_line_spacing(eff, ls["line_twips"], ls["line_rule"],
@@ -420,7 +421,20 @@ def _check_caption_format(rec, spec):
         violations.append("图表标题应居中")
     if cf.get("no_indent"):
         _check_no_indent(eff, sets, violations, "图表标题")
+    _check_strip_ends(rec, sets, violations, "图表标题")
     return _mk_format(rec["i"], sets, violations)
+
+
+def _check_strip_ends(rec, sets, violations, label):
+    """标题类段落的首尾空格要删掉（图/表标题、一~四级标题；封面题目另有分支）。
+
+    首尾空格会参与居中/缩进计算，让"居中"看着偏、"首行缩进2字符"实际变成 2字符+空格；
+    图表标题还会把自动生成的编号顶开。**行内空格保留**（`_strip_para_ws` 只削两端），
+    像"20  年  月"这类填写位不受影响。"""
+    text = rec.get("text") or ""
+    if text != text.strip():
+        sets["strip_text"] = "both"
+        violations.append("%s首尾多余空格应删除" % label)
 
 
 def _check_toc(rec, spec):

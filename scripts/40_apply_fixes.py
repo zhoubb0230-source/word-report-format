@@ -32,7 +32,8 @@ from docxcommon import (qn, parse_xml, unzip_docx, rezip_docx,
                         iter_body_paragraphs, in_textbox,
                         StyleResolver, load_numbering_levels,
                         get_style_id, get_pPr, get_mark_rpr,
-                        char_styles_overriding)
+                        char_styles_overriding, ELEMENT_ORDER, ordered_insert,
+                        local_name)
 from commentwriter import CommentWriter
 from headings import ANY_LABEL_RE, CAPTION_STYLE_HINTS
 from checks import load_default_spec, paragraph_role
@@ -72,10 +73,20 @@ STRIP_CAPTION_RESIDUE = re.compile(r"^\s*(?:图|表)")
 # pPr / rPr helpers (create-or-get, keep OOXML child order roughly valid)
 # ---------------------------------------------------------------------------
 def _get_or_make(parent, tag, before_tags=()):
+    """取子元素，没有就**按 schema 顺序**建一个。
+
+    WordprocessingML 的复杂类型几乎都是 `xsd:sequence`——子元素顺序错了，文件仍是
+    良构 XML、zip 也完好，但**真实 Word 会拒绝打开**（"发现无法读取的内容，是否恢复
+    此文档的内容"）。所以这里优先查 `docxcommon.ELEMENT_ORDER` 决定插入位置，而不是
+    一律 append；只有该容器没登记顺序时才退回旧的 before_tags/append 行为。
+    调用方因此不必再自己记 pPr/rPr 的子元素顺序。"""
     el = parent.find(qn(tag))
     if el is not None:
         return el
     el = etree.Element(qn(tag))
+    order = ELEMENT_ORDER.get("w:" + local_name(parent))
+    if order:
+        return ordered_insert(parent, el, order)
     # insert before the first of before_tags that exists, else append
     anchor = None
     for bt in before_tags:
@@ -793,9 +804,16 @@ def _clamp_numbering_indent(pkg_dir, targets, resolver, numbering_levels):
     """方案C 甲法：钳住编号层。
 
     ``targets`` 是"自动编号且缩进违规"的段落元素列表。对每个段落解析其有效
-    numId/ilvl；把共享同一 numId 的目标段落归为一组，**克隆**该组的 abstractNum
-    （生成新 abstractNumId + 新 numId），在克隆里把这些段落用到的级别缩进中和
-    （去 hanging、left 归 0），再把每个目标段落的 numPr 改指克隆的 numId。
+    numId/ilvl；把落在**同一 abstractNum** 上的目标段落归为一组，**克隆**该 abstractNum
+    （生成新 abstractNumId + 一个新 numId），在克隆里把这些段落用到的级别缩进中和
+    （去 hanging、left 归 0），再把该组每个目标段落的 numPr 改指克隆的 numId。
+
+    **按 abstractNum 分组、不是按 numId**（2026-07 修）：Word 文档里多个 `w:num` 指向
+    同一条 `abstractNum` 极其常见（重复套用列表格式就会生成），而**它们共享同一个计数
+    器**。早先按 numId 分组会为每个 numId 各克隆一份 abstractNum，等于把原本连号的一个
+    多级列表**劈成几条互不相干的列表**——一级标题还对，二/三/四级从中间重新计数，用户
+    实测到的"二级/三级/四级标题编号顺序出错"就是这么来的。按 abstractNum 归组、整组只
+    克隆一次、共用一个新 numId，计数器才保持共享。
 
     为什么克隆而不原地改：一条 abstractNum 常被同级多段共享，原地改会溢到非目标
     段（bug #17"改一个标题行距、同级全变"）。只有拿到过缩进修复的段落才被改指
@@ -818,13 +836,13 @@ def _clamp_numbering_indent(pkg_dir, targets, resolver, numbering_levels):
     for anum in root.findall(qn("w:abstractNum")):
         abs_by_id[anum.get(qn("w:abstractNumId"))] = anum
 
-    # group targets by source numId; keep each paragraph's ilvl
-    groups = {}   # src_numId -> {"ilvls": set, "paras": [(p, ilvl)]}
+    # group targets by source **abstractNum**（共享计数器的单位），keep each ilvl
+    groups = {}   # src_abstractNumId -> {"ilvls": set, "paras": [(p, ilvl)]}
     for p in targets:
         nid, il = _para_num_ref(p, resolver, numbering_levels)
         if nid is None or nid not in num2abs:
             continue
-        g = groups.setdefault(nid, {"ilvls": set(), "paras": []})
+        g = groups.setdefault(num2abs[nid], {"ilvls": set(), "paras": []})
         g["ilvls"].add(il)
         g["paras"].append((p, il))
 
@@ -839,8 +857,7 @@ def _clamp_numbering_indent(pkg_dir, targets, resolver, numbering_levels):
 
     new_abs_ids, new_num_ids = [], []
     changed = 0
-    for src_numId, g in groups.items():
-        src_aid = num2abs[src_numId]
+    for src_aid, g in groups.items():
         src_anum = abs_by_id.get(src_aid)
         if src_anum is None:
             continue
@@ -934,27 +951,6 @@ def _parse_fragment(xml):
     return etree.fromstring(wrapped.encode("utf-8"))[0]
 
 
-def _local(el):
-    return etree.QName(el).localname
-
-
-def _ordered_insert(parent, el, order):
-    """按 ``order`` 给出的 schema 顺序把 el 插进 parent（未知子元素不参与比较）。"""
-    try:
-        idx = order.index(_local(el))
-    except ValueError:
-        parent.append(el)
-        return
-    for child in parent:
-        try:
-            if order.index(_local(child)) > idx:
-                child.addprevious(el)
-                return
-        except ValueError:
-            continue
-    parent.append(el)
-
-
 def _ensure_part(pkg_dir, fname, kind, empty_root):
     """确保 word/<fname> 存在，并已注册进 [Content_Types].xml 与 document.xml.rels。
 
@@ -999,12 +995,18 @@ def _ensure_part(pkg_dir, fname, kind, empty_root):
 
 
 def _merge_children(dst, src):
-    """把 src 的子元素并进 dst：同名子元素**整体替换**，没有的追加。"""
+    """把 src 的子元素并进 dst：同名子元素**整体替换**，没有的**按 schema 顺序**插入。
+
+    新子元素不能简单 append：文档自己的 `Normal` 可能只写了 `<w:sz>`，把 `<w:rFonts>`
+    追加到它后面就违反 CT_RPr 的 sequence，Word 会拒绝打开（rFonts 必须排在 sz 前）。"""
+    order = ELEMENT_ORDER.get("w:" + local_name(dst))
     for child in list(src):
         old = dst.find(child.tag)
         if old is not None:
             old.addprevious(child)
             dst.remove(old)
+        elif order:
+            ordered_insert(dst, child, order)
         else:
             dst.append(child)
 
@@ -1046,7 +1048,7 @@ def _patch_normal_and_defaults(styles_root, spec):
                         canon_normal.find(qn("w:rPr")))
 
 
-def _inject_canonical_styles(pkg_dir, spec):
+def _inject_canonical_styles(pkg_dir, spec, caption_num_ids=None):
     """注入全角色 canonical 命名样式（方案C §4：把 `_patch_toc_styles` 推广到每个角色）。
 
     同 styleId 的旧样式**整体替换**，因而幂等——对已处理过的文档重跑收敛到同一结果。
@@ -1054,7 +1056,8 @@ def _inject_canonical_styles(pkg_dir, spec):
     共享样式：原地改会溢到未被指派的段落，就是 bug #17 那类事故）。
 
     样式定义本身来自 `scripts/lib/canonstyles.py`，与阶段0 经用户 Word 验收的参考件
-    是**同一份字符串**。返回注入的样式数。"""
+    是**同一份字符串**。``caption_num_ids`` 把图/表标题的自动编号写进样式本身（套上
+    样式即生成编号），故必须先注入编号定义、再注入样式。返回注入的样式数。"""
     path = _ensure_part(pkg_dir, "styles.xml", "styles",
                         '<w:styles xmlns:w="%s"/>' % W_NS)
     tree = parse_xml(path)
@@ -1063,7 +1066,7 @@ def _inject_canonical_styles(pkg_dir, spec):
 
     by_id = {st.get(qn("w:styleId")): st for st in root.findall(qn("w:style"))}
     n = 0
-    for d in canonstyles.canonical_style_defs(spec):
+    for d in canonstyles.canonical_style_defs(spec, caption_num_ids):
         el = _parse_fragment(d["xml"])
         old = by_id.get(d["id"])
         if old is not None:
@@ -1088,12 +1091,19 @@ def _clear_run_props(p, clear_ea, clear_latin, clear_size, clear_bold=False,
     字符样式，其余（超链接色、批注引用等）原样留着。字符样式是共享对象，绝不能就地改
     它的定义——那会溢到引用它的所有其它段落（#17 那类事故），所以摘引用而不是改样式。"""
     # 只处理**已存在**的 rPr（别用 _run_rpr 顺手建空壳），清空后连壳一起删掉。
-    owners = [(r, r.find(qn("w:rPr"))) for r in _iter_runs(p)]
+    owners = [(r, r.find(qn("w:rPr")), False) for r in _iter_runs(p)]
     pPr = get_pPr(p)
-    owners.append((pPr, pPr.find(qn("w:rPr"))))
-    for owner, rpr in owners:
+    owners.append((pPr, pPr.find(qn("w:rPr")), True))
+    for owner, rpr, is_mark in owners:
         if rpr is None:
             continue
+        if is_mark:
+            # **段落标记的 rPr 决定自动编号怎么渲染**。用户实测：原本"表1"是加粗的，
+            # 改成自动编号后编号仍然加粗、而标题文字不粗——因为加粗留在了段落标记上。
+            # 段落标记不是作者内容（它只是那个 ¶ 和自动编号的载体），所以这里一律把
+            # 加粗清掉，让编号跟随段落样式：标题样式加粗→编号也粗，图表标题不加粗→
+            # 编号也不粗，两边始终一致。
+            clear_bold = True
         rs = rpr.find(qn("w:rStyle"))
         if rs is not None and rs.get(qn("w:val")) in overriding_char_styles:
             rpr.remove(rs)
@@ -1148,6 +1158,24 @@ def _clear_ppr_governed(pPr, gov):
     if gov.get("outline"):
         for ol in pPr.findall(qn("w:outlineLvl")):
             pPr.remove(ol)
+
+
+def _blank_style(rec):
+    """空行的 canonical 样式：**封面以外的空行统一套正文样式**（仿宋三号）。
+
+    空行没有可判的格式（`paragraph_role` 对空行返回 None，也不该为它挂批注），但它
+    仍然占版面高度：不指派样式的话它跟随 `Normal`，而 `Normal` 已被钉成五号（文档
+    网格的前提，陷阱 #12），空行会莫名其妙变矮、和正文行距不一致。用户因此要求
+    "封面外的空行统一应用正文样式"。
+
+    三处例外：① **封面**空行属版式留白，用户明确划在规则之外；② **目录区**空行可能
+    在 TOC 域跨度内，动它有破坏域的风险；③ 表格里的空行跟随单元格内容的表格样式，
+    与同格文字保持一致更合理。"""
+    if not rec.get("is_blank"):
+        return None
+    if rec.get("region") == "cover" or rec.get("is_toc"):
+        return None
+    return STYLE_ID_BY_ROLE["table_body" if rec.get("in_table") else "body"]
 
 
 def _assignable(rec):
@@ -1229,7 +1257,7 @@ def _apply_document_grid(pkg_dir, spec):
             old.addprevious(el)
             root.remove(old)
         else:
-            _ordered_insert(root, el, _SETTINGS_ORDER)
+            ordered_insert(root, el, _SETTINGS_ORDER)
     tree.write(path, xml_declaration=True, encoding="UTF-8", standalone=True)
     return len(children)
 
@@ -1266,27 +1294,21 @@ def _apply_table_defaults(doc_root, spec):
         if ind_xml:
             for old in tblPr.findall(qn("w:tblInd")):
                 tblPr.remove(old)
-            _ordered_insert(tblPr, _parse_fragment(ind_xml), _TBLPR_ORDER)
+            ordered_insert(tblPr, _parse_fragment(ind_xml), ELEMENT_ORDER["w:tblPr"])
         if mar_xml:
             for old in tblPr.findall(qn("w:tblCellMar")):
                 tblPr.remove(old)
-            _ordered_insert(tblPr, _parse_fragment(mar_xml), _TBLPR_ORDER)
+            ordered_insert(tblPr, _parse_fragment(mar_xml), ELEMENT_ORDER["w:tblPr"])
         if valign_xml:
             for tc in tbl.iter(qn("w:tc")):
                 tcPr = _get_or_make(tc, "w:tcPr", before_tags=("w:p", "w:tbl"))
                 for old in tcPr.findall(qn("w:vAlign")):
                     tcPr.remove(old)
-                _ordered_insert(tcPr, _parse_fragment(valign_xml), _TCPR_ORDER)
+                ordered_insert(tcPr, _parse_fragment(valign_xml), ELEMENT_ORDER["w:tcPr"])
         n += 1
     return n
 
 
-_TBLPR_ORDER = ("tblStyle", "tblpPr", "tblOverlap", "bidiVisual", "tblStyleRowBandSize",
-                "tblStyleColBandSize", "tblW", "tblJc", "tblCellSpacing", "tblInd",
-                "tblBorders", "shd", "tblLayout", "tblCellMar", "tblLook", "tblCaption",
-                "tblDescription")
-_TCPR_ORDER = ("cnfStyle", "tcW", "gridSpan", "hMerge", "vMerge", "tcBorders", "shd",
-               "noWrap", "tcMar", "textDirection", "tcFitText", "vAlign", "hideMark")
 
 
 # ---------------------------------------------------------------------------
@@ -1362,17 +1384,22 @@ def _ensure_caption_numbering(pkg_dir, spec, cache):
     return out
 
 
-def _apply_autonumber_caption(p, num_id):
-    """把图/表标题交给 Word 自动编号：段落挂上编号序列，并删掉文字里的静态"图N/表N"。
+def _apply_autonumber_caption(p):
+    """把图/表标题交给 Word 自动编号：删掉文字里的静态"图N/表N"，并**清掉段落上的直接
+    编号覆盖**，让 canonical 题注样式携带的编号生效。
 
-    删静态编号是必须的——不删就会出现"图1<制表符>图1 系统架构"（Word 生成的编号叠在
+    编号挂在**样式**上而不是段落上（`_inject_canonical_styles` 写进样式的 `numPr`）：
+    这样用户在 Word 里插入新图、给标题套上"图标题"样式就直接有编号。段落若残留旧的
+    直接 `numPr`，会**压过**样式的编号（直接层优先），所以这里要删掉。
+
+    删静态编号也是必须的——不删就会出现"图1<制表符>图1 系统架构"（Word 生成的编号叠在
     原文字上）。这属于既有的图表重编号内容编辑范畴：渲染出来的编号仍在，只是改由 Word
     维护，插入/删除图表后不会再失序。"""
-    _set_para_numid(p, num_id, 0)
-    if _replace_leading(p, STRIP_CAPTION_LABEL, "",
-                        residue_re=STRIP_CAPTION_LABEL_RESIDUE):
-        return True
-    # 文字里本就没有静态编号（漏编号，或原本就是自动编号）——挂上序列即可
+    pPr = get_pPr(p)
+    for npr in pPr.findall(qn("w:numPr")):
+        pPr.remove(npr)
+    _replace_leading(p, STRIP_CAPTION_LABEL, "",
+                     residue_re=STRIP_CAPTION_LABEL_RESIDUE)
     return True
 
 
@@ -1434,8 +1461,14 @@ def main():
     # ---- 方案C 阶段2：先注入 canonical 样式 + 文档网格，再指派 ----------------
     # 注入必须在算 char_unit_hp 之前：docDefaults 被钉成五号后，"N 字符"的尺子才是
     # 21 半点，目录制表位/左缩进伴随值都按它换算（陷阱 #12）。
+    caption_nums = {}
     if spec:
-        applied["canonical_styles"] = _inject_canonical_styles(out_pkg, spec)
+        # 图/表标题的自动编号定义必须**先**注入：它的 numId 要写进 canonical 题注样式，
+        # 这样用户在 Word 里新插一张图、给标题套上"图标题"样式就直接生成编号（只挂在
+        # 段落上的话新段落没有编号——用户实测反馈）。
+        caption_nums = _ensure_caption_numbering(out_pkg, spec, {})
+        applied["caption_numbering"] = len(caption_nums)
+        applied["canonical_styles"] = _inject_canonical_styles(out_pkg, spec, caption_nums)
         applied["grid_settings"] = _apply_document_grid(out_pkg, spec)
         applied["doc_grid_sections"] = _apply_doc_grid_to_sections(root, spec)
         applied["tables_normalized"] = _apply_table_defaults(root, spec)
@@ -1467,6 +1500,8 @@ def main():
     # 安全阀（陷阱#5）在 `checks.paragraph_role` 里：pattern 标题不算 heading 角色。
     governs = ({d["id"]: d["governs"] for d in canonstyles.canonical_style_defs(spec)}
                if spec else {})
+    canon_caption_style_ids = frozenset(
+        STYLE_ID_BY_ROLE[r] for r in canonstyles.CAPTION_ROLE_BY_KIND.values())
     # 设了字体/字号/加粗的**字符样式**：它们压过段落样式，指派时要把 run 上的引用摘掉，
     # 否则同一段里带这种字符样式的 run 不跟随 canonical 样式（半粗半细的根因）。
     overriding_char_styles = char_styles_overriding(styles_root)
@@ -1479,19 +1514,21 @@ def main():
         except (OSError, ValueError, KeyError):
             records = []
         for rec in records:
-            sid = STYLE_ID_BY_ROLE.get(paragraph_role(rec, spec) or "")
+            sid = STYLE_ID_BY_ROLE.get(paragraph_role(rec, spec) or "") or _blank_style(rec)
             p = para_by_idx.get(rec.get("i"))
             if sid is None or p is None or not _assignable(rec):
                 continue
             gov = governs.get(sid, {})
-            # 指派前解析编号（改指 canonical 样式会丢掉原样式携带的 numPr）
-            num_ref = _para_num_ref(p, resolver, numbering_levels)
+            # 指派前解析编号（改指 canonical 样式会丢掉原样式携带的 numPr，"一、"会消失）。
+            # 图/表标题除外：它们的编号由 canonical 题注样式承载，钉住旧编号反而会压过
+            # 样式的编号（直接层优先），所以不保号——旧编号本来就要被换掉。
+            num_ref = ((None, None) if sid in canon_caption_style_ids
+                       else _para_num_ref(p, resolver, numbering_levels))
             _assign_canonical_style(p, sid, gov, num_ref, overriding_char_styles)
             assigned[rec["i"]] = sid
             if gov.get("ind") and num_ref[0]:
                 clamp_targets.append(p)
     applied["styles_assigned"] = len(assigned)
-    caption_nums = {}          # kind -> numId（懒注入，见 _ensure_caption_numbering）
 
     cw = CommentWriter(out_pkg, author="XAgent")
     problems = []
@@ -1556,14 +1593,12 @@ def main():
             ok = _apply_renumber_caption(p, fix)
             applied["renumber_caption"] += 1 if ok else 0
         elif op == "autonumber_caption":
-            caption_nums = _ensure_caption_numbering(out_pkg, spec, caption_nums)
-            num_id = caption_nums.get(fix.get("kind"))
-            if num_id is None:
+            if not caption_nums.get(fix.get("kind")):
                 ok = False
             else:
-                ok = _apply_autonumber_caption(p, num_id)
+                ok = _apply_autonumber_caption(p)
                 applied["autonumber_caption"] = applied.get("autonumber_caption", 0) + 1
-                # 已改挂我们自己的（缩进已中和的）编号定义，无需再克隆钳
+                # 编号来自 canonical 题注样式（缩进已中和），无需再克隆钳
                 clamp_targets = [t for t in clamp_targets if t is not p]
         elif op == "renumber_heading":
             ok = _apply_renumber_heading(p, fix)

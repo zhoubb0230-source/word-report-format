@@ -558,3 +558,118 @@ def char_styles_overriding(styles_root):
         return sets_governed(parent, seen) if parent else False
 
     return frozenset(sid for sid in by_id if sets_governed(sid, set()))
+
+
+# ---------------------------------------------------------------------------
+# OOXML 元素顺序（schema sequence）
+# ---------------------------------------------------------------------------
+# WordprocessingML 的复杂类型几乎都是 **xsd:sequence**：子元素顺序错了，文件仍然是
+# 良构 XML、zip 也完好，但**真实 Word 会拒绝打开**并提示"发现无法读取的内容，是否
+# 恢复此文档的内容"。这类事故光靠"XML 良构"检查发现不了（曾把 <w:suff> 写在
+# <w:numFmt> 之前就踩了一次）。
+#
+# 这份顺序表因此有两个用途：
+#  * `40_apply_fixes.py` 插入子元素时按它找位置（`_get_or_make` 自动查表）；
+#  * `45_validate_output.py` 在产物上逐个容器复查一遍，顺序错了当场硬失败。
+# 只列我们会写到的容器；未列出的容器不参与检查，未知子元素在比较时被跳过。
+ELEMENT_ORDER = {
+    "w:pPr": (
+        "pStyle", "keepNext", "keepLines", "pageBreakBefore", "framePr",
+        "widowControl", "numPr", "suppressLineNumbers", "pBdr", "shd", "tabs",
+        "suppressAutoHyphens", "kinsoku", "wordWrap", "overflowPunct",
+        "topLinePunct", "autoSpaceDE", "autoSpaceDN", "bidi", "adjustRightInd",
+        "snapToGrid", "spacing", "ind", "contextualSpacing", "mirrorIndents",
+        "suppressOverlap", "jc", "textDirection", "textAlignment",
+        "textboxTightWrap", "outlineLvl", "divId", "cnfStyle", "rPr", "sectPr",
+        "pPrChange",
+    ),
+    "w:rPr": (
+        "rStyle", "rFonts", "b", "bCs", "i", "iCs", "caps", "smallCaps",
+        "strike", "dstrike", "outline", "shadow", "emboss", "imprint",
+        "noProof", "snapToGrid", "vanish", "webHidden", "color", "spacing",
+        "w", "kern", "position", "sz", "szCs", "highlight", "u", "effect",
+        "bdr", "shd", "fitText", "vertAlign", "rtl", "cs", "em", "lang",
+        "eastAsianLayout", "specVanish", "oMath", "rPrChange",
+    ),
+    "w:numPr": ("ilvl", "numId", "numberingChange", "ins"),
+    "w:lvl": (
+        "start", "numFmt", "lvlRestart", "pStyle", "isLgl", "suff", "lvlText",
+        "lvlPicBulletId", "legacy", "lvlJc", "pPr", "rPr",
+    ),
+    "w:abstractNum": (
+        "nsid", "multiLevelType", "tmpl", "name", "styleLink", "numStyleLink",
+        "lvl",
+    ),
+    "w:num": ("abstractNumId", "lvlOverride"),
+    "w:style": (
+        "name", "aliases", "basedOn", "next", "link", "autoRedefine", "hidden",
+        "uiPriority", "semiHidden", "unhideWhenUsed", "qFormat", "locked",
+        "personal", "personalCompose", "personalReply", "rsid", "pPr", "rPr",
+        "tblPr", "trPr", "tcPr", "tblStylePr",
+    ),
+    "w:tblPr": (
+        "tblStyle", "tblpPr", "tblOverlap", "bidiVisual", "tblStyleRowBandSize",
+        "tblStyleColBandSize", "tblW", "tblJc", "tblCellSpacing", "tblInd",
+        "tblBorders", "shd", "tblLayout", "tblCellMar", "tblLook", "tblCaption",
+        "tblDescription", "tblPrChange",
+    ),
+    "w:tcPr": (
+        "cnfStyle", "tcW", "gridSpan", "hMerge", "vMerge", "tcBorders", "shd",
+        "noWrap", "tcMar", "textDirection", "tcFitText", "vAlign", "hideMark",
+        "headers", "cellIns", "cellDel", "cellMerge", "tcPrChange",
+    ),
+    "w:sectPr": (
+        "headerReference", "footerReference", "footnotePr", "endnotePr", "type",
+        "pgSz", "pgMar", "paperSrc", "pgBorders", "lnNumType", "pgNumType",
+        "cols", "formProt", "vAlign", "noEndnote", "titlePg", "textDirection",
+        "bidi", "rtlGutter", "docGrid", "printerSettings", "sectPrChange",
+    ),
+}
+
+
+def local_name(el):
+    return etree.QName(el).localname
+
+
+def ordered_insert(parent, el, order):
+    """按 schema 顺序把 el 插进 parent；未知子元素不参与比较（跳过）。"""
+    try:
+        idx = order.index(local_name(el))
+    except ValueError:
+        parent.append(el)
+        return el
+    for child in parent:
+        try:
+            if order.index(local_name(child)) > idx:
+                child.addprevious(el)
+                return el
+        except ValueError:
+            continue
+    parent.append(el)
+    return el
+
+
+def order_violations(root):
+    """产物自检：返回 [(容器路径, 乱序的子元素名, 前一个子元素名)]。
+
+    只查 `ELEMENT_ORDER` 里列出的容器，未知子元素跳过——这样表不全时只会漏报，
+    不会把 Word 本来打得开的文档误判成坏文件。"""
+    bad = []
+    for parent in root.iter():
+        order = ELEMENT_ORDER.get("w:" + local_name(parent))
+        if not order:
+            continue
+        prev_name, prev_idx = None, -1
+        for child in parent:
+            if not isinstance(child.tag, str):
+                continue
+            name = local_name(child)
+            try:
+                idx = order.index(name)
+            except ValueError:
+                continue
+            if idx < prev_idx:
+                bad.append((local_name(parent), name, prev_name))
+            else:
+                prev_name, prev_idx = name, idx
+    return bad

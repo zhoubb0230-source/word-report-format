@@ -21,6 +21,8 @@ this guards against is real Microsoft Word opening the file and prompting
      take). Verified with the unified cascade + provenance, so a real leak fails
      hard; a style-inherited hanging (known-unfixed, Word-gated) is a non-fatal
      note only.
+  5b. 元素顺序 —— OOXML 的复杂类型基本都是 xsd:sequence，子元素乱序时文件仍然
+     良构（第 3 项查不出），但真实 Word 拒绝打开并提示"发现无法读取的内容"。
   6. 全坍缩不变量 (方案C 阶段3) —— 被指派 canonical 样式的段落，该样式承载的每个
      属性都必须由【样式层】供给；仍由 direct/numbering 供给且值≠canonical 即泄漏，
      硬失败。这是没有语料、没有 Word 时的确定性安全网（供给层是纯 XML 事实）。
@@ -38,7 +40,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
 from lxml import etree
 from docxcommon import (qn, iter_body_paragraphs, StyleResolver,
                         load_numbering_levels, get_style_id, get_pPr, get_mark_rpr,
-                        read_ppr, char_styles_overriding)
+                        read_ppr, char_styles_overriding, order_violations)
 from cascade import resolve_ppr_with_provenance
 import canonstyles
 from checks import load_default_spec
@@ -111,6 +113,27 @@ def _check_numbering_clamp(zf, indent_fix_indices):
             rec = {"para_index": idx, "key": key, "value": v, "owner": owner.get(key)}
             (leaks if owner.get(key) == "numbering" else notes).append(rec)
     return leaks, notes
+
+
+def _check_element_order(zf):
+    """OOXML **元素顺序**自检——这是"Word 提示发现无法读取的内容"的头号成因。
+
+    WordprocessingML 的复杂类型几乎都是 `xsd:sequence`：把 `<w:suff>` 写在
+    `<w:numFmt>` 前面、把 `<w:numPr>` 插到 `<w:tabs>` 后面，文件仍是**良构 XML**、
+    zip 也完好、上面第 3 项检查照样通过——但真实 Word 会拒绝打开。良构 ≠ 合法，
+    所以这一项单独查。返回 [(part, 容器, 乱序子元素, 它前面的子元素)]。
+
+    只查 `docxcommon.ELEMENT_ORDER` 登记的容器、跳过未登记的子元素：顺序表不全时
+    只会漏报，不会把 Word 本来打得开的文档误判成坏文件。"""
+    out = []
+    for part in ("word/document.xml", "word/styles.xml", "word/numbering.xml",
+                 "word/settings.xml"):
+        if part not in set(zf.namelist()):
+            continue
+        for parent, child, prev in order_violations(_read_root(zf, part)):
+            out.append({"part": part, "container": parent,
+                        "element": child, "after": prev})
+    return out
 
 
 def _canonical_expectations(spec):
@@ -290,6 +313,17 @@ def validate(formatted_path, reference_path=None, indent_fix_indices=()):
                     info["style_hanging_notes"] = notes
             except (etree.XMLSyntaxError, KeyError) as e:
                 info["clamp_invariant_skipped"] = str(e)
+
+        # 5b. 元素顺序（OOXML sequence）：良构但乱序的 XML 会让 Word 提示"发现无法
+        #     读取的内容"。这是第 3 项"良构"检查覆盖不到的一类损坏，单列一项。
+        try:
+            order_bad = _check_element_order(zf)
+            if order_bad:
+                errors.append("元素顺序违反 OOXML sequence：%d 处（Word 会提示"
+                              "内容无法读取）" % len(order_bad))
+                info["element_order_violations"] = order_bad[:50]
+        except (etree.XMLSyntaxError, KeyError) as e:
+            info["element_order_skipped"] = str(e)
 
         # 6. 全坍缩不变量（方案C 阶段3）：指派了 canonical 样式的段落，其样式承载的
         #    属性必须由样式层供给；仍由 direct/numbering 供给且值不等于 canonical

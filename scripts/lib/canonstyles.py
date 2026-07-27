@@ -116,6 +116,15 @@ def _spacing(line_twips=None, line_rule=None, zero_before_after=False):
     return ('<w:spacing %s/>' % " ".join(a)) if a else ""
 
 
+def _ppr(spacing="", ind="", jc="", outline=""):
+    """按 **CT_PPrBase 的 sequence** 拼 pPr：… spacing → ind → jc → … → outlineLvl。
+
+    别按"想到哪写到哪"的顺序拼——WordprocessingML 是 xsd:sequence，顺序错了文件仍是
+    良构 XML，但真实 Word 会拒绝打开（"发现无法读取的内容"）。这个函数就是为了让调用
+    方无法写错顺序：参数名对应元素，拼装顺序在这里定死一次。"""
+    return spacing + ind + jc + outline
+
+
 def _style_xml(sid, name, ppr_inner, rpr_inner, based_on=None):
     based = '<w:basedOn w:val="%s"/>' % _esc(based_on) if based_on else ''
     return ('<w:style w:type="paragraph" w:styleId="%s"><w:name w:val="%s"/>%s'
@@ -138,11 +147,16 @@ def _governs(fonts=False, western=False, size=False, bold=False, line=False,
             "ind": ind, "outline": outline}
 
 
-def canonical_style_defs(spec):
+def canonical_style_defs(spec, caption_num_ids=None):
     """按 spec 造全角色 canonical 样式定义。
 
     返回 [{"role","id","name","xml","governs"}]，顺序稳定（ROLE_STYLES 的顺序）。
-    ``xml`` 是一个完整 `<w:style>` 元素的字符串，参考件与 40 共用同一份。"""
+    ``xml`` 是一个完整 `<w:style>` 元素的字符串，参考件与 40 共用同一份。
+
+    ``caption_num_ids`` = {"figure": numId, "table": numId}：把图/表标题的自动编号
+    **写进样式本身**（`w:numPr`），而不是只挂在段落上。这样用户在 Word 里插入一张新图、
+    给标题**套上"图标题"样式**就直接生成编号——只挂段落的话新段落不会有编号（用户实测
+    反馈）。numId 是每个文档各自分配的，所以由调用方在注入编号定义后传进来。"""
     western = spec.get("western_font", "Times New Roman")
     ls = spec.get("line_spacing", {})
     line_twips = ls.get("line_twips")
@@ -163,7 +177,7 @@ def canonical_style_defs(spec):
     # 封面题目：方正小标宋_GBK 小一、居中、无缩进
     t = spec["title"]
     add("title",
-        '<w:jc w:val="%s"/>' % t.get("jc", "center") + _ind(no_indent=True),
+        _ppr(ind=_ind(no_indent=True), jc='<w:jc w:val="%s"/>' % t.get("jc", "center")),
         _rpr(t["east_asia"], t["size_hp"], latin(t)),
         _governs(fonts=True, western=bool(latin(t)), size=True, jc=True, ind=True))
 
@@ -176,8 +190,8 @@ def canonical_style_defs(spec):
     # 封面题目下要素：2倍行距、两端对齐、首行缩进2字符
     cf = spec["cover_field"]
     add("cover_field",
-        _spacing(cf.get("line_twips"), cf.get("line_rule"))
-        + '<w:jc w:val="both"/>' + _ind(first_line_chars=200),
+        _ppr(spacing=_spacing(cf.get("line_twips"), cf.get("line_rule")),
+             ind=_ind(first_line_chars=200), jc='<w:jc w:val="both"/>'),
         _rpr(cf["east_asia"], cf["size_hp"], latin(cf)),
         _governs(fonts=True, western=bool(latin(cf)), size=True,
                  line=bool(cf.get("line_twips")), jc=True, ind=True))
@@ -186,8 +200,9 @@ def canonical_style_defs(spec):
     for lvl in ("1", "2", "3", "4"):
         h = spec["headings"][lvl]
         add("heading" + lvl,
-            '<w:outlineLvl w:val="%d"/>' % (int(lvl) - 1)
-            + _spacing(line_twips, line_rule) + _ind(first_line_chars=h["first_line_chars"]),
+            _ppr(spacing=_spacing(line_twips, line_rule),
+                 ind=_ind(first_line_chars=h["first_line_chars"]),
+                 outline='<w:outlineLvl w:val="%d"/>' % (int(lvl) - 1)),
             _rpr(h["east_asia"], h["size_hp"], western, bold=bool(h.get("bold"))),
             _governs(fonts=True, western=True, size=True, bold=bool(h.get("bold")),
                      line=line_twips is not None, ind=True, outline=True))
@@ -195,18 +210,25 @@ def canonical_style_defs(spec):
     # 正文
     b = spec["body"]
     add("body",
-        _spacing(line_twips, line_rule, zero_before_after=b.get("no_space_before_after"))
-        + _ind(first_line_chars=b["first_line_chars"]),
+        _ppr(spacing=_spacing(line_twips, line_rule,
+                              zero_before_after=b.get("no_space_before_after")),
+             ind=_ind(first_line_chars=b["first_line_chars"])),
         _rpr(b["east_asia"], b["size_hp"], western),
         _governs(fonts=True, western=True, size=True, line=line_twips is not None,
                  space_before_after=bool(b.get("no_space_before_after")), ind=True))
 
     # 图标题 / 表标题（同一套格式，两个样式名——种类要靠样式名回读，见 ROLE_STYLES）
     cap = spec["caption_format"]
-    for role in ("caption_figure", "caption_table"):
+    nums = caption_num_ids or {}
+    for role, kind in (("caption_figure", "figure"), ("caption_table", "table")):
+        # 自动编号写进样式：套上样式即生成编号（numPr 在 CT_PPrBase 里排在 spacing 前）
+        num_id = nums.get(kind)
+        numpr = ('<w:numPr><w:ilvl w:val="0"/><w:numId w:val="%s"/></w:numPr>'
+                 % _esc(num_id)) if num_id is not None else ""
         add(role,
-            _spacing(cap.get("line_twips"), cap.get("line_rule"))
-            + '<w:jc w:val="%s"/>' % cap.get("jc", "center") + _ind(no_indent=True),
+            numpr + _ppr(spacing=_spacing(cap.get("line_twips"), cap.get("line_rule")),
+                         ind=_ind(no_indent=True),
+                         jc='<w:jc w:val="%s"/>' % cap.get("jc", "center")),
             _rpr(cap["east_asia"], cap["size_hp"], western),
             _governs(fonts=True, western=True, size=True,
                      line=bool(cap.get("line_twips")), jc=True,
@@ -215,7 +237,8 @@ def canonical_style_defs(spec):
     # 表格内容
     tb = spec["table_body"]
     add("table_body",
-        _spacing(tb.get("line_twips"), tb.get("line_rule")) + _ind(no_indent=True),
+        _ppr(spacing=_spacing(tb.get("line_twips"), tb.get("line_rule")),
+             ind=_ind(no_indent=True)),
         _rpr(tb["east_asia"], tb["size_hp"], western),
         _governs(fonts=True, western=True, size=True,
                  line=bool(tb.get("line_twips")), ind=bool(tb.get("no_indent"))))
@@ -223,7 +246,8 @@ def canonical_style_defs(spec):
     # "目录"二字：用正文字体字号但居中、无缩进（它不是标题、不进 TOC）。
     # 参考件用得到；流水线里这行按目录区处理（见 checks.paragraph_role）。
     add("toc_title",
-        _spacing(line_twips, line_rule) + '<w:jc w:val="center"/>' + _ind(no_indent=True),
+        _ppr(spacing=_spacing(line_twips, line_rule), ind=_ind(no_indent=True),
+             jc='<w:jc w:val="center"/>'),
         _rpr(b["east_asia"], b["size_hp"], western),
         _governs(fonts=True, western=True, size=True, line=line_twips is not None,
                  jc=True, ind=True))
@@ -379,12 +403,16 @@ def numbering_level_xml(num_fmt, lvl_text, suff=None, ilvl=0):
 
     中和是必须的：编号层在 cascade 里压过样式层，级别自带的 hanging 会把 canonical
     样式的缩进盖掉（陷阱 #11）。`suff` 控编号与文字之间的分隔符——图/表标题要
-    `tab`（编号后一个制表符），Word 的默认值也是 tab，这里显式写出来免得依赖默认。"""
+    `tab`（编号后一个制表符），Word 的默认值也是 tab，这里显式写出来免得依赖默认。
+
+    **子元素顺序必须照 CT_Lvl 的 sequence**：start → numFmt → lvlRestart → pStyle →
+    isLgl → **suff** → lvlText → … 。把 `suff` 写到 `numFmt` 前面文件依然良构、45 的
+    XML 检查也过，但**真实 Word 直接拒绝打开**（"发现无法读取的内容"）——踩过一次。"""
     suff_el = ('<w:suff w:val="%s"/>' % _esc(suff)) if suff else ""
-    return ('<w:lvl w:ilvl="%d"><w:start w:val="1"/>%s'
-            '<w:numFmt w:val="%s"/><w:lvlText w:val="%s"/><w:lvlJc w:val="left"/>'
+    return ('<w:lvl w:ilvl="%d"><w:start w:val="1"/><w:numFmt w:val="%s"/>%s'
+            '<w:lvlText w:val="%s"/><w:lvlJc w:val="left"/>'
             '<w:pPr><w:ind w:left="0" w:leftChars="0"/></w:pPr></w:lvl>'
-            % (ilvl, suff_el, _esc(num_fmt), _esc(lvl_text)))
+            % (ilvl, _esc(num_fmt), suff_el, _esc(lvl_text)))
 
 
 def caption_numbering_defs(spec):

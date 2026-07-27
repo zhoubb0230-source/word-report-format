@@ -113,7 +113,10 @@ CAPTION_STYLE_HINTS = ("题注", "caption", "图表标题", "表格标题",
 # heading, never the decision of whether a paragraph is a heading, so a bare
 # "5 " in ordinary body text can't turn that paragraph into a heading.
 ANY_LABEL_RE = re.compile(
-    r"^(?:"
+    # 允许**行首空白**：模板里常见"　　一、绪论"这种带缩进空格的标题。不吃掉它的话
+    # 序号识别不出来（num_raw=None），连续性检查会当成"漏编号"再补一个，渲染出
+    # "一、一、绪论"（用户实测）。图/表标题的 RE_CAPTION 早就是 `^\s*` 起头，这里对齐。
+    r"^[ \t　]*(?:"
     r"(?:\d+[.．])+\d+[.．]?[ \t　]*"
     r"|(?:[%s]+|\d{1,4})[、.．](?!\d)"
     r"|[（(]\s*(?:[%s]+|\d{1,3})\s*[）)]"

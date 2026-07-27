@@ -271,6 +271,13 @@ class TestHeadingInference(unittest.TestCase):
         self.assertEqual(level, 1)      # 标题 1 wins over "1." looking like level 3
         self.assertEqual(source, "style")
 
+    def test_leading_spaces_before_ordinal_still_parse(self):
+        # 模板里常见"　　一、绪论"。行首空白若不吃掉，num_raw 取不到 → 连续性检查
+        # 当成"漏编号"再补一个 → 渲染成"一、一、绪论"（用户实测）。
+        self.assertEqual(headings.parse_leading_label("　　一、绪论"), "　　一、")
+        self.assertEqual(headings.parse_leading_label("  （一）研究方法"), "  （一）")
+        self.assertIsNone(headings.parse_leading_label("  正文没有序号"))
+
     def test_bare_pattern_is_unconfirmed(self):
         level, source = headings.infer_heading_level(None, None, "1. 概述", None)
         self.assertEqual(level, 3)

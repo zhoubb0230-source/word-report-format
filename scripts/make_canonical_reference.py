@@ -172,33 +172,31 @@ def build_styles(spec):
         _spacing(line_twips) + '<w:jc w:val="center"/>' + _ind(no_indent=True),
         _rpr(b_toc["east_asia"], b_toc["size_hp"], western)))
 
-    # 目录 1/2/3（标准 toc 样式名）——【照抄规范文档 styles.xml 的精确值】：
-    #   制表位写在【样式】里；左制表位 4/5/6 字符按【三号 320 twips/字符】= 1280/1600/1920
-    #   （不是五号 210！这是之前算错、编号越过制表位的根因）；页码右制表位带点线 = 13203
-    #   （41.26 字符×320）；左缩进 leftChars 0/200/400；单倍行距(line 240 auto)；仿宋 小三。
+    # 目录 1/2/3（标准 toc 样式名）——【照抄规范文档 styles.xml，Normal=五号 语境】：
+    #   左制表位 4/5/6 字符按【五号 210 twips/字符】= 840/1050/1260（字符单位跟 Normal 走：
+    #   Normal=五号 就用 210；若 Normal=三号 才是 320→1280/1600/1920）；页码右制表位带点线
+    #   = 8665（41.26 字符×210 ≈ 正文宽度右边界）；左缩进 leftChars 0/200/400；仿宋 小三。
+    #   注：不写 firstLineChars——Normal=五号 无首行缩进，无可继承，故目录天然无首行缩进。
     toc = spec["toc"]
     toc_rpr = ('<w:rFonts w:ascii="仿宋" w:hAnsi="仿宋" w:cs="仿宋"/>'
                '<w:sz w:val="%d"/><w:szCs w:val="%d"/>'
                % (toc["size_hp"], toc["size_hp"]))
-    RIGHT_TAB = 13203
-    # 目录一律【无首行缩进】——三级都显式把 firstLineChars 归 0（TOC 基于 Normal，而 Normal
-    # 有首行缩进2字符，不显式清零会被继承，这是 v6 二级目录多出首行缩进的原因）。
+    RIGHT_TAB = 8665
     toc_defs = {
-        "1": (1280, '<w:ind w:firstLineChars="0" w:firstLine="0"/>'),
-        "2": (1600, '<w:ind w:leftChars="200" w:left="200" w:firstLineChars="0" w:firstLine="0"/>'),
-        "3": (1920, '<w:ind w:leftChars="400" w:left="400" w:firstLineChars="0" w:firstLine="0"/>'),
+        "1": (840, ''),
+        "2": (1050, '<w:ind w:leftChars="200" w:left="200"/>'),
+        "3": (1260, '<w:ind w:leftChars="400" w:left="400"/>'),
     }
     for lvl in ("1", "2", "3"):
         left_tab, ind = toc_defs[lvl]
         tabs = ('<w:tabs><w:tab w:val="left" w:pos="%d"/>'
                 '<w:tab w:val="right" w:leader="dot" w:pos="%d"/></w:tabs>'
                 % (left_tab, RIGHT_TAB))
-        ppr = tabs + '<w:spacing w:line="240" w:lineRule="auto"/>' + ind
         styles.append('<w:style w:type="paragraph" w:styleId="TOC%s"><w:name w:val="toc %s"/>'
                       '<w:basedOn w:val="Normal"/><w:next w:val="Normal"/>'
                       '<w:uiPriority w:val="39"/><w:qFormat/>'
                       '<w:pPr>%s</w:pPr><w:rPr>%s</w:rPr></w:style>'
-                      % (lvl, lvl, ppr, toc_rpr))
+                      % (lvl, lvl, tabs + ind, toc_rpr))
 
     return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<w:styles xmlns:w="%s">%s%s</w:styles>' % (W, docdef, "".join(styles)))
@@ -434,8 +432,10 @@ SETTINGS = (
     '<w:zoom w:percent="100"/>'
     '<w:bordersDoNotSurroundHeader/><w:bordersDoNotSurroundFooter/>'
     '<w:proofState w:spelling="clean" w:grammar="clean"/>'
-    # defaultTabStop=640：取自用户手动修好目录后的 settings.xml（原 420 目录不对）。
-    '<w:defaultTabStop w:val="640"/>'
+    # defaultTabStop=420＝2字符（五号 210×2）。标题自动编号后的制表符落到默认制表位，
+    # 640(≈3字符五号) 看起来太宽；用户要求 2 字符 → 420。目录不受影响（TOC 样式自带显式
+    # 左/右制表位，不依赖默认制表位）。
+    '<w:defaultTabStop w:val="420"/>'
     '<w:drawingGridHorizontalSpacing w:val="105"/>'   # 0.5 字符（配合 compat 后单位）
     '<w:drawingGridVerticalSpacing w:val="156"/>'     # 0.5 行
     '<w:displayHorizontalDrawingGridEvery w:val="2"/>'

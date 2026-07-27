@@ -77,10 +77,11 @@ def _spacing(line_twips=None, line_rule=None, zero_before_after=False):
     return ('<w:spacing %s/>' % " ".join(a)) if a else ""
 
 
-def _style(sid, name, ppr_inner, rpr_inner):
-    return ('<w:style w:type="paragraph" w:styleId="%s"><w:name w:val="%s"/>'
+def _style(sid, name, ppr_inner, rpr_inner, based_on=None):
+    based = '<w:basedOn w:val="%s"/>' % based_on if based_on else ''
+    return ('<w:style w:type="paragraph" w:styleId="%s"><w:name w:val="%s"/>%s'
             '<w:qFormat/><w:pPr>%s</w:pPr><w:rPr>%s</w:rPr></w:style>'
-            % (sid, _esc(name), ppr_inner, rpr_inner))
+            % (sid, _esc(name), based, ppr_inner, rpr_inner))
 
 
 def build_styles(spec):
@@ -138,13 +139,16 @@ def build_styles(spec):
             + _spacing(line_twips) + _ind(first_line_chars=h["first_line_chars"]),
             _rpr(h["east_asia"], h["size_hp"], western)))
 
-    # 正文
+    # 正文：命名为【FGW正文】、基于 Normal（照规范文档结构）。关键——不能叫"正文"：
+    # Word 把【文档网格字体】链接到名为"正文"(=Normal)的样式，若正文内容样式也叫"正文"
+    # 会抢占该链接、把网格字体拽成三号。规范文档用独立的"FGW正文"承载正文内容，Normal
+    # (五号) 专门驱动文档网格 → 网格 15.6磅/41行；正文内容仍是三号。
     b = spec["body"]
     styles.append(_style(
-        "CanonBody", "正文",
+        "CanonBody", "FGW正文",
         _spacing(line_twips, zero_before_after=b.get("no_space_before_after"))
         + _ind(first_line_chars=b["first_line_chars"]),
-        _rpr(b["east_asia"], b["size_hp"], western)))
+        _rpr(b["east_asia"], b["size_hp"], western), based_on="Normal"))
 
     # 表格内容
     tb = spec["table_body"]

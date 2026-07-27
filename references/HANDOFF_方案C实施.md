@@ -11,6 +11,11 @@
 
 ## 0. 现状（起点）
 
+> **⚠️ 2026-07 更新**：阶段0/1 + 阶段2首块(甲法) + Word 验收**已完成**（分支 `claude/scheme-c-codegen-wf5tw6`，
+> 79 passing）。**做阶段2 主体（全角色样式注入）的新 session 请读 `HANDOFF_阶段2_样式注入.md`**——那里有经用户
+> Word 逐项验收的 canonical 样式**精确参数表**。canonical 样式的可执行权威规格是 `scripts/make_canonical_reference.py`。
+> 本文件保留为方案C 的背景/契约来源。
+
 - 分支：`claude/scheme-c-style-injection-h3apcl`（已推送）。最新提交：
   - `03a68cb` 批次A（字体/字号/行距/间距类新规则）
   - `06e3b4a` #5 目录制表位（写进 `_patch_toc_styles`＝样式层，方案C第一块）

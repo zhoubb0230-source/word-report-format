@@ -33,7 +33,7 @@ from docxcommon import (qn, parse_xml, unzip_docx, rezip_docx,
                         StyleResolver, load_numbering_levels,
                         get_style_id, get_pPr, get_mark_rpr,
                         char_styles_overriding, ELEMENT_ORDER, ordered_insert,
-                        local_name)
+                        local_name, order_for)
 from commentwriter import CommentWriter
 from headings import ANY_LABEL_RE, CAPTION_STYLE_HINTS
 from checks import load_default_spec, paragraph_role
@@ -84,7 +84,7 @@ def _get_or_make(parent, tag, before_tags=()):
     if el is not None:
         return el
     el = etree.Element(qn(tag))
-    order = ELEMENT_ORDER.get("w:" + local_name(parent))
+    order = order_for(parent)
     if order:
         return ordered_insert(parent, el, order)
     # insert before the first of before_tags that exists, else append
@@ -771,18 +771,28 @@ def _neutralize_level_indent(lvl):
     pin left to 0. The paragraph carries its own char-unit first-line indent
     (firstLineChars) directly, so once the level supplies no competing indent
     that char value wins — no absolute companion needed (§2.2)."""
-    ppr = lvl.find(qn("w:pPr"))
-    if ppr is None:
-        ppr = etree.SubElement(lvl, qn("w:pPr"))
-    ind = ppr.find(qn("w:ind"))
-    if ind is None:
-        ind = etree.SubElement(ppr, qn("w:ind"))
+    ppr = _get_or_make(lvl, "w:pPr")
+    ind = _get_or_make(ppr, "w:ind")
     for a in ("w:hanging", "w:hangingChars", "w:firstLine", "w:firstLineChars",
               "w:left", "w:leftChars", "w:start", "w:startChars"):
         if ind.get(qn(a)) is not None:
             del ind.attrib[qn(a)]
     ind.set(qn("w:left"), "0")
     ind.set(qn("w:leftChars"), "0")
+
+
+def _restore_level_restart(lvl):
+    """在克隆的编号级别里去掉 `<w:lvlRestart w:val="0"/>`（＝"永不重新计数"）。
+
+    规范要求标题**逐级重新编号**：二级标题在其所在一级标题下从头数，三级在二级下从头
+    数，四级同理。Word 的默认行为正是如此——某一级出现更高一级时自动归零；而
+    `lvlRestart=0` 会把它关掉，于是二/三/四级变成**全文连续编号**（用户实测："编号变成
+    全局连贯了，应该在各自层级里连贯"）。模板里 `lvlRestart=0` 很常见，克隆时一并去掉，
+    恢复默认的层级归零。
+
+    只在**克隆**里改，原 abstractNum 不动（共享对象不可原地 mutate，陷阱 #11）。"""
+    for el in lvl.findall(qn("w:lvlRestart")):
+        lvl.remove(el)
 
 
 def _set_para_numid(p, new_num_id, ilvl):
@@ -872,6 +882,10 @@ def _clamp_numbering_indent(pkg_dir, targets, resolver, numbering_levels):
         if nsid is not None:
             clone.remove(nsid)
         for lvl in clone.findall(qn("w:lvl")):
+            # 逐级重新编号：**所有**级别都恢复默认的"更高一级出现时归零"，不只被
+            # 中和缩进的那几级——三级要不要归零取决于二级在不在场，只处理用到的
+            # 级别会漏掉中间层。
+            _restore_level_restart(lvl)
             lv = lvl.get(qn("w:ilvl"))
             try:
                 if int(lv) in g["ilvls"]:
@@ -887,7 +901,7 @@ def _clamp_numbering_indent(pkg_dir, targets, resolver, numbering_levels):
         # new <w:num> -> cloned abstractNum
         new_numId = str(_next_int_id(root, "w:num", "w:numId", taken=new_num_ids))
         new_num_ids.append(new_numId)
-        num_el = etree.SubElement(root, qn("w:num"))
+        num_el = ordered_insert(root, etree.Element(qn("w:num")), order_for(root))
         num_el.set(qn("w:numId"), new_numId)
         a_el = etree.SubElement(num_el, qn("w:abstractNumId"))
         a_el.set(qn("w:val"), new_aid)
@@ -910,39 +924,6 @@ REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 _OFFICE_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
 _WML_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml."
 
-# CT_Settings 的子元素顺序（ECMA-376 序列，节选出常见项）。settings.xml 是严格
-# sequence，新插的元素必须落在正确位置，否则 Word 可能报"内容有问题"。
-_SETTINGS_ORDER = (
-    "writeProtection", "view", "zoom", "removePersonalInformation",
-    "removeDateAndTime", "doNotDisplayPageBoundaries", "displayBackgroundShape",
-    "printPostScriptOverText", "printFractionalCharacterWidth", "printFormsData",
-    "embedTrueTypeFonts", "embedSystemFonts", "saveSubsetFonts", "saveFormsData",
-    "mirrorMargins", "alignBordersAndEdges", "bordersDoNotSurroundHeader",
-    "bordersDoNotSurroundFooter", "gutterAtTop", "hideSpellingErrors",
-    "hideGrammaticalErrors", "activeWritingStyle", "proofState", "formsDesign",
-    "attachedTemplate", "linkStyles", "stylePaneFormatFilter", "stylePaneSortMethod",
-    "documentType", "mailMerge", "revisionView", "trackChanges", "doNotTrackMoves",
-    "doNotTrackFormatting", "documentProtection", "autoFormatOverride",
-    "styleLockTheme", "styleLockQFSet", "defaultTabStop", "autoHyphenation",
-    "consecutiveHyphenLimit", "hyphenationZone", "doNotHyphenateCaps", "showEnvelope",
-    "summaryLength", "clickAndTypeStyle", "defaultTableStyle", "evenAndOddHeaders",
-    "bookFoldRevPrinting", "bookFoldPrinting", "bookFoldPrintingSheets",
-    "drawingGridHorizontalSpacing", "drawingGridVerticalSpacing",
-    "displayHorizontalDrawingGridEvery", "displayVerticalDrawingGridEvery",
-    "doNotUseMarginsForDrawingGridOrigin", "drawingGridHorizontalOrigin",
-    "drawingGridVerticalOrigin", "doNotShadeFormData", "noPunctuationKerning",
-    "characterSpacingControl", "printTwoOnOne", "strictFirstAndLastChars",
-    "noLineBreaksAfter", "noLineBreaksBefore", "savePreviewPicture",
-    "doNotValidateAgainstSchema", "saveInvalidXml", "ignoreMixedContent",
-    "alwaysShowPlaceholderText", "doNotDemarcateInvalidXml", "saveXmlDataOnly",
-    "useXSLTWhenSaving", "saveThroughXslt", "showXMLTags", "alwaysMergeEmptyNamespace",
-    "updateFields", "hdrShapeDefaults", "footnotePr", "endnotePr", "compat",
-    "docVars", "rsids", "mathPr", "attachedSchema", "themeFontLang",
-    "clrSchemeMapping", "doNotIncludeSubdocsInStats", "doNotAutoCompressPictures",
-    "forceUpgrade", "captions", "readModeInkLockDown", "smartTagType",
-    "schemaLibrary", "shapeDefaults", "doNotEmbedSmartTags", "decimalSymbol",
-    "listSeparator",
-)
 
 
 def _parse_fragment(xml):
@@ -999,7 +980,7 @@ def _merge_children(dst, src):
 
     新子元素不能简单 append：文档自己的 `Normal` 可能只写了 `<w:sz>`，把 `<w:rFonts>`
     追加到它后面就违反 CT_RPr 的 sequence，Word 会拒绝打开（rFonts 必须排在 sz 前）。"""
-    order = ELEMENT_ORDER.get("w:" + local_name(dst))
+    order = order_for(dst)
     for child in list(src):
         old = dst.find(child.tag)
         if old is not None:
@@ -1065,9 +1046,25 @@ def _inject_canonical_styles(pkg_dir, spec, caption_num_ids=None):
     _patch_normal_and_defaults(root, spec)
 
     by_id = {st.get(qn("w:styleId")): st for st in root.findall(qn("w:style"))}
+    # 文档里已被**别的 styleId** 占用的样式名。Word 要求样式名唯一，重名会让它在打开时
+    # 报"发现无法读取的内容"。名字本身已带 FGW 前缀基本不会撞，这里再兜一道：真撞上就
+    # 给我们的名字加后缀，绝不去改文档自己的样式。
+    taken_names = {}
+    for st in root.findall(qn("w:style")):
+        nm = st.find(qn("w:name"))
+        if nm is not None and nm.get(qn("w:val")):
+            taken_names.setdefault(nm.get(qn("w:val")), set()).add(st.get(qn("w:styleId")))
+
     n = 0
     for d in canonstyles.canonical_style_defs(spec, caption_num_ids):
         el = _parse_fragment(d["xml"])
+        nm = el.find(qn("w:name"))
+        owners = taken_names.get(d["name"], set()) - {d["id"]}
+        if owners and nm is not None:
+            suffix = 2
+            while ("%s%d" % (d["name"], suffix)) in taken_names:
+                suffix += 1
+            nm.set(qn("w:val"), "%s%d" % (d["name"], suffix))
         old = by_id.get(d["id"])
         if old is not None:
             old.addprevious(el)
@@ -1160,6 +1157,34 @@ def _clear_ppr_governed(pPr, gov):
             pPr.remove(ol)
 
 
+# 段落里"没有文字、但有东西"的载体：图片/形状（drawing、VML pict）、嵌入对象、
+# 以及 mc:AlternateContent（里面裹着 drawing 的兼容写法）。
+_EMBEDDED_TAGS = (
+    "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}drawing",
+    "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pict",
+    "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}object",
+    "{http://schemas.openxmlformats.org/markup-compatibility/2006}AlternateContent",
+)
+
+
+def _is_object_only(p):
+    """段落是不是**纯粹的图片/形状/文本框容器**——含嵌入对象、且自身没有可见文字。
+
+    这类段落**一律不指派 canonical 样式**。原因：所有正文类 canonical 样式都带
+    **固定行距 28 磅**（`lineRule=exact`），而固定行距**不会随内容长高**——套到一张
+    图上，图就被裁成一行高，只露出底部一条（用户实测："图片隐于文字下方，只有底部
+    一行的宽度露出来"）。图片段落本来也没有"字体字号行距"可言，放过它才对。
+
+    "自身文字"不算文本框里的（`w:txbxContent` 属于另一个逻辑段落，`_iter_runs` 也
+    跳过它）——所以一个只装了文本框的段落同样算 object-only。反之，正文里插了个小
+    图标、但确实有文字的段落**仍然要**规范化。"""
+    if not any(el.tag in _EMBEDDED_TAGS for el in p.iter()):
+        return False
+    own_text = "".join((t.text or "") for t in p.iter(qn("w:t"))
+                       if not in_textbox(t, stop_at=p))
+    return not own_text.strip()
+
+
 def _blank_style(rec):
     """空行的 canonical 样式：**封面以外的空行统一套正文样式**（仿宋三号）。
 
@@ -1170,7 +1195,7 @@ def _blank_style(rec):
 
     三处例外：① **封面**空行属版式留白，用户明确划在规则之外；② **目录区**空行可能
     在 TOC 域跨度内，动它有破坏域的风险；③ 表格里的空行跟随单元格内容的表格样式，
-    与同格文字保持一致更合理。"""
+    与同格文字保持一致更合理。（图片/文本框段落由 `_is_object_only` 更早滤掉。）"""
     if not rec.get("is_blank"):
         return None
     if rec.get("region") == "cover" or rec.get("is_toc"):
@@ -1257,7 +1282,7 @@ def _apply_document_grid(pkg_dir, spec):
             old.addprevious(el)
             root.remove(old)
         else:
-            ordered_insert(root, el, _SETTINGS_ORDER)
+            ordered_insert(root, el, order_for(root))
     tree.write(path, xml_declaration=True, encoding="UTF-8", standalone=True)
     return len(children)
 
@@ -1271,7 +1296,9 @@ def _apply_doc_grid_to_sections(doc_root, spec):
     for sect in doc_root.iter(qn("w:sectPr")):
         grid = sect.find(qn("w:docGrid"))
         if grid is None:
-            grid = etree.SubElement(sect, qn("w:docGrid"))
+            # sectPr 里 docGrid 后面还可能有 printerSettings/sectPrChange，按序插
+            grid = ordered_insert(sect, etree.Element(qn("w:docGrid")),
+                                  order_for(sect))
         for k, v in attrs.items():
             grid.set(qn("w:" + k), v)
         n += 1
@@ -1294,17 +1321,17 @@ def _apply_table_defaults(doc_root, spec):
         if ind_xml:
             for old in tblPr.findall(qn("w:tblInd")):
                 tblPr.remove(old)
-            ordered_insert(tblPr, _parse_fragment(ind_xml), ELEMENT_ORDER["w:tblPr"])
+            ordered_insert(tblPr, _parse_fragment(ind_xml), order_for(tblPr))
         if mar_xml:
             for old in tblPr.findall(qn("w:tblCellMar")):
                 tblPr.remove(old)
-            ordered_insert(tblPr, _parse_fragment(mar_xml), ELEMENT_ORDER["w:tblPr"])
+            ordered_insert(tblPr, _parse_fragment(mar_xml), order_for(tblPr))
         if valign_xml:
             for tc in tbl.iter(qn("w:tc")):
                 tcPr = _get_or_make(tc, "w:tcPr", before_tags=("w:p", "w:tbl"))
                 for old in tcPr.findall(qn("w:vAlign")):
                     tcPr.remove(old)
-                ordered_insert(tcPr, _parse_fragment(valign_xml), ELEMENT_ORDER["w:tcPr"])
+                ordered_insert(tcPr, _parse_fragment(valign_xml), order_for(tcPr))
         n += 1
     return n
 
@@ -1372,7 +1399,7 @@ def _ensure_caption_numbering(pkg_dir, spec, cache):
         last_abstract = anum
         nid = str(_next_int_id(root, "w:num", "w:numId", taken=new_nums))
         new_nums.append(nid)
-        num_el = etree.SubElement(root, qn("w:num"))
+        num_el = ordered_insert(root, etree.Element(qn("w:num")), order_for(root))
         num_el.set(qn("w:numId"), nid)
         a_el = etree.SubElement(num_el, qn("w:abstractNumId"))
         a_el.set(qn("w:val"), aid)
@@ -1422,8 +1449,8 @@ def _set_update_fields(pkg_dir):
     root = tree.getroot()
     uf = root.find(qn("w:updateFields"))
     if uf is None:
-        uf = etree.Element(qn("w:updateFields"))
-        root.insert(0, uf)
+        uf = ordered_insert(root, etree.Element(qn("w:updateFields")),
+                            order_for(root))
     uf.set(qn("w:val"), "true")
     tree.write(path, xml_declaration=True, encoding="UTF-8", standalone=True)
 
@@ -1514,9 +1541,12 @@ def main():
         except (OSError, ValueError, KeyError):
             records = []
         for rec in records:
-            sid = STYLE_ID_BY_ROLE.get(paragraph_role(rec, spec) or "") or _blank_style(rec)
             p = para_by_idx.get(rec.get("i"))
-            if sid is None or p is None or not _assignable(rec):
+            if p is None or not _assignable(rec) or _is_object_only(p):
+                continue
+            sid = (STYLE_ID_BY_ROLE.get(paragraph_role(rec, spec) or "")
+                   or _blank_style(rec))
+            if sid is None:
                 continue
             gov = governs.get(sid, {})
             # 指派前解析编号（改指 canonical 样式会丢掉原样式携带的 numPr，"一、"会消失）。

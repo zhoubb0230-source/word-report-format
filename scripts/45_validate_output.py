@@ -40,7 +40,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
 from lxml import etree
 from docxcommon import (qn, iter_body_paragraphs, StyleResolver,
                         load_numbering_levels, get_style_id, get_pPr, get_mark_rpr,
-                        read_ppr, char_styles_overriding, order_violations)
+                        read_ppr, char_styles_overriding, order_violations, in_textbox)
 from cascade import resolve_ppr_with_provenance
 import canonstyles
 from checks import load_default_spec
@@ -150,8 +150,12 @@ def _canonical_expectations(spec):
 
 
 # run 级别：样式承载 fonts/size/bold 时，run 上不许再有同名直接覆盖或抢戏的字符样式。
-_RUN_GOVERNED_TAGS = {"fonts": ("w:rFonts",), "size": ("w:sz", "w:szCs"),
-                      "bold": ("w:b", "w:bCs")}
+# **字体看的是 rFonts 的属性、不是元素本身**：中文 Word 到处都是 `<w:rFonts w:hint="eastAsia"/>`，
+# `hint` 只说明歧义字符按中文还是西文取字体，**不覆盖任何字体**，留着它完全正常。按"元素在不
+# 在"判会把成百上千个合法段落报成泄漏（用户实测 295 段），把交付整个挡下来。
+_FONT_ATTRS = ("w:ascii", "w:asciiTheme", "w:hAnsi", "w:hAnsiTheme",
+               "w:eastAsia", "w:eastAsiaTheme", "w:cs", "w:cstheme")
+_RUN_GOVERNED_TAGS = {"size": ("w:sz", "w:szCs"), "bold": ("w:b", "w:bCs")}
 
 
 def _run_level_leaks(idx, p, style_id, governs, overriding_char_styles):
@@ -159,11 +163,18 @@ def _run_level_leaks(idx, p, style_id, governs, overriding_char_styles):
 
     这一条是"同一个三级标题前半部分加粗、后半部分不加粗"的机器化断言：那种半粗半细
     正是几个 run 各带一份直接 rPr（或一个设了字体/加粗的字符样式）造成的，段落级 pPr
-    检查看不见它。只看**有可见文字**的 run——批注引用、域字符那些 run 不承载正文格式；
-    字符样式也只算 `overriding_char_styles` 里那些（真设了字体/字号/加粗的），超链接色、
-    批注引用之类不参与，否则会把一堆合法文档误判成泄漏、挡住交付。"""
+    检查看不见它。
+
+    三处刻意的放行，都是为了不误杀合法文档：
+      * 只看**有可见文字**的 run——批注引用、域字符那些 run 不承载正文格式；
+      * **文本框（`w:txbxContent`）里的 run 跳过**——它们属于另一个逻辑段落，apply 也
+        从不改它们（`_iter_runs` 同样跳过），在这里报泄漏就是自相矛盾；
+      * 字符样式只算 `overriding_char_styles` 里那些（真设了字体/字号/加粗的），超链接
+        色、批注引用之类不参与。"""
     leaks = []
     for r in p.iter(qn("w:r")):
+        if in_textbox(r, stop_at=p):
+            continue
         if not any((t.text or "").strip() for t in r.findall(qn("w:t"))):
             continue
         rpr = r.find(qn("w:rPr"))
@@ -174,6 +185,13 @@ def _run_level_leaks(idx, p, style_id, governs, overriding_char_styles):
             leaks.append({"para_index": idx, "style": style_id, "key": "rStyle",
                           "value": rs.get(qn("w:val")), "owner": "char_style",
                           "canonical": None})
+        if governs.get("fonts"):
+            rf = rpr.find(qn("w:rFonts"))
+            got = [a for a in _FONT_ATTRS if rf is not None and rf.get(qn(a)) is not None]
+            if got:
+                leaks.append({"para_index": idx, "style": style_id, "key": "rFonts",
+                              "value": ",".join(a.split(":")[1] for a in got),
+                              "owner": "direct", "canonical": None})
         for flag, tags in _RUN_GOVERNED_TAGS.items():
             if not governs.get(flag):
                 continue

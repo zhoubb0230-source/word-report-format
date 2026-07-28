@@ -1105,6 +1105,160 @@ class TestCanonicalStyleInjection(unittest.TestCase):
         self.assertIsNotNone(body_blank, "正文区空行应套正文样式")
         self.assertEqual(body_blank.get(self.qn("w:val")), "FGWCanonBody")
 
+    _IMAGE_P = ('<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats'
+                '.org/drawingml/2006/wordprocessingDrawing"><wp:extent cx="5000000" '
+                'cy="3000000"/></wp:inline></w:drawing></w:r></w:p>')
+    _TEXTBOX_P = ('<w:p><w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml">'
+                  '<v:textbox><w:txbxContent><w:p><w:r><w:rPr>'
+                  '<w:rFonts w:eastAsia="黑体"/><w:sz w:val="21"/></w:rPr>'
+                  '<w:t>文本框文字</w:t></w:r></w:p></w:txbxContent></v:textbox>'
+                  '</v:shape></w:pict></w:r></w:p>')
+
+    def test_picture_only_paragraph_keeps_no_style(self):
+        """图片段落**不指派** canonical 样式。
+
+        所有正文类 canonical 样式都带**固定行距 28 磅**（`lineRule=exact`），而固定行距
+        不随内容长高——套到图片段落上，图会被裁成一行高，只露出底部一条（用户实测：
+        "图片隐于文字下方，只有底部一行的宽度露出来"）。图片段落也没有字体字号可言。
+        只装了文本框的段落同理。"""
+        body = (helpers.para("一、绪论", east_asia="宋体", size_hp=32, outline=0)
+                + self._IMAGE_P + self._TEXTBOX_P
+                + helpers.para("正文内容。", east_asia="宋体", size_hp=32))
+        wd, _ = self._run(body)
+        paras = list(self._doc(wd).iter(self.qn("w:p")))
+        img = [p for p in paras if p.find(".//" + self.qn("w:drawing")) is not None][0]
+        self.assertIsNone(img.find(self.qn("w:pPr") + "/" + self.qn("w:pStyle")),
+                          "图片段落被指派了样式→固定行距会把图裁成一行")
+        self.assertIsNone(img.find(self.qn("w:pPr") + "/" + self.qn("w:spacing")))
+        tb = [p for p in paras if p.find(".//" + self.qn("w:pict")) is not None][0]
+        self.assertIsNone(tb.find(self.qn("w:pPr") + "/" + self.qn("w:pStyle")))
+
+    def test_hint_only_rfonts_is_not_a_leak(self):
+        """`<w:rFonts w:hint="eastAsia"/>` 在中文 Word 里遍地都是，它**不覆盖任何字体**
+        （只说明歧义字符按中文还是西文取字体），清理后留着它完全正常。坍缩不变量按
+        "rFonts 元素在不在"判会把成百上千个合法段落报成泄漏（用户实测 295 段），
+        必须按**属性**判。"""
+        import zipfile
+        p = ('<w:p><w:r><w:rPr><w:rFonts w:hint="eastAsia" w:eastAsia="宋体"/>'
+             '<w:sz w:val="32"/></w:rPr><w:t xml:space="preserve">正文内容。</w:t></w:r></w:p>')
+        src = os.path.join(self.tmp, "hint.docx")
+        with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", _CT_LO)
+            z.writestr("_rels/.rels", helpers.ROOT_RELS)
+            z.writestr("word/_rels/document.xml.rels", _DRELS_LO)
+            z.writestr("word/document.xml", helpers.document_xml(
+                helpers.para("一、绪论", east_asia="宋体", size_hp=32, outline=0) + p))
+            z.writestr("word/styles.xml", self._SPLIT_BOLD_STYLES)
+            z.writestr("word/numbering.xml", '<w:numbering xmlns:w="%s"/>' % self.W)
+        wd = self._run_src(src, "wbhint")
+        validated = run(self._script("45_validate_output.py"), wd)
+        self.assertTrue(validated["ok"], validated.get("errors"))
+        # hint 保留下来了（我们没把它当字体覆盖去删）
+        body_p = list(self._doc(wd).iter(self.qn("w:p")))[1]
+        rf = body_p.find(".//" + self.qn("w:rFonts"))
+        self.assertIsNotNone(rf)
+        self.assertEqual(rf.get(self.qn("w:hint")), "eastAsia")
+        self.assertIsNone(rf.get(self.qn("w:eastAsia")), "真正的字体覆盖应已清掉")
+
+    def test_footer_before_header_reference_is_not_a_violation(self):
+        # sectPr 里 header/footer 引用是可重复的 choice，任意交错都合法；
+        # 写成先后关系会把大量真实文档误判成乱序。
+        sys.path.insert(0, os.path.join(helpers.SCRIPTS, "lib"))
+        from docxcommon import order_violations
+        from lxml import etree
+        sect = etree.fromstring(
+            ('<w:sectPr xmlns:w="%s">'
+             '<w:footerReference w:type="default"/><w:headerReference w:type="default"/>'
+             '<w:pgSz w:w="11906" w:h="16838"/></w:sectPr>' % self.W).encode("utf-8"))
+        self.assertEqual(order_violations(sect), [])
+
+    def test_cloned_numbering_restarts_per_level(self):
+        """标题要**逐级重新编号**（二级在其一级下从头数）。模板里常见的
+        `<w:lvlRestart w:val="0"/>` 会关掉这个默认行为，导致二/三/四级变成全文连续
+        编号（用户实测）。克隆时去掉它，恢复层级归零；原 abstractNum 不动。"""
+        import zipfile
+        from lxml import etree
+        lvls = "".join(
+            '<w:lvl w:ilvl="%d"><w:start w:val="1"/><w:numFmt w:val="decimal"/>'
+            '<w:lvlRestart w:val="0"/><w:lvlText w:val="%%%d."/><w:lvlJc w:val="left"/>'
+            '<w:pPr><w:ind w:left="420" w:hanging="420"/></w:pPr></w:lvl>' % (i, i + 1)
+            for i in range(3))
+        numbering = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                     '<w:numbering xmlns:w="%s"><w:abstractNum w:abstractNumId="0">%s'
+                     '</w:abstractNum>'
+                     '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>'
+                     '</w:numbering>' % (self.W, lvls))
+        styles = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                  '<w:styles xmlns:w="%s">'
+                  '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
+                  '<w:name w:val="Normal"/></w:style>'
+                  '<w:style w:type="paragraph" w:styleId="Heading1">'
+                  '<w:name w:val="heading 1"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr>'
+                  '</w:style>'
+                  '<w:style w:type="paragraph" w:styleId="Heading2">'
+                  '<w:name w:val="heading 2"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr>'
+                  '</w:style></w:styles>') % self.W
+        doc = helpers.document_xml(
+            '<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:numPr><w:ilvl w:val="0"/>'
+            '<w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:rPr>'
+            '<w:rFonts w:eastAsia="宋体"/><w:sz w:val="32"/></w:rPr>'
+            '<w:t>绪论</w:t></w:r></w:p>'
+            '<w:p><w:pPr><w:pStyle w:val="Heading2"/><w:numPr><w:ilvl w:val="1"/>'
+            '<w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:rPr>'
+            '<w:rFonts w:eastAsia="宋体"/><w:sz w:val="32"/></w:rPr>'
+            '<w:t>研究方法</w:t></w:r></w:p>')
+        src = os.path.join(self.tmp, "restart.docx")
+        with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", _CT_LO)
+            z.writestr("_rels/.rels", helpers.ROOT_RELS)
+            z.writestr("word/_rels/document.xml.rels", _DRELS_LO)
+            z.writestr("word/document.xml", doc)
+            z.writestr("word/styles.xml", styles)
+            z.writestr("word/numbering.xml", numbering)
+        wd = self._run_src(src, "wbrestart")
+        num_root = etree.parse(os.path.join(wd, "out_pkg", "word",
+                                            "numbering.xml")).getroot()
+        by_id = {a.get(self.qn("w:abstractNumId")): a
+                 for a in num_root.findall(self.qn("w:abstractNum"))}
+        self.assertEqual(len(by_id["0"].findall(".//" + self.qn("w:lvlRestart"))), 3,
+                         "原 abstractNum 被原地改了")
+        clones = [a for aid, a in by_id.items()
+                  if aid != "0" and a.find(self.qn("w:name")) is None]
+        self.assertTrue(clones, "没有生成克隆")
+        for c in clones:
+            self.assertEqual(c.findall(".//" + self.qn("w:lvlRestart")), [],
+                             "克隆里仍有 lvlRestart=0 → 编号会全局连续、不逐级归零")
+
+    def test_injected_style_name_collision_is_avoided(self):
+        """Word 要求样式名唯一，重名会让它提示"发现无法读取的内容"。文档里已存在同名
+        样式时，改我们自己的名字，绝不动文档原有的样式。"""
+        import zipfile
+        styles = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                  '<w:styles xmlns:w="%s">'
+                  '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
+                  '<w:name w:val="Normal"/></w:style>'
+                  '<w:style w:type="paragraph" w:styleId="OldBody">'
+                  '<w:name w:val="FGW正文"/></w:style></w:styles>') % self.W
+        src = os.path.join(self.tmp, "dupname.docx")
+        with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", _CT_LO)
+            z.writestr("_rels/.rels", helpers.ROOT_RELS)
+            z.writestr("word/_rels/document.xml.rels", _DRELS_LO)
+            z.writestr("word/document.xml", helpers.document_xml(
+                helpers.para("正文内容。", east_asia="宋体", size_hp=32)))
+            z.writestr("word/styles.xml", styles)
+            z.writestr("word/numbering.xml", '<w:numbering xmlns:w="%s"/>' % self.W)
+        wd = self._run_src(src, "wbdup")
+        names = {}
+        for st in self._styles(wd).findall(self.qn("w:style")):
+            nm = st.find(self.qn("w:name"))
+            if nm is not None:
+                names.setdefault(nm.get(self.qn("w:val")), []).append(
+                    st.get(self.qn("w:styleId")))
+        dup = {n: ids for n, ids in names.items() if len(ids) > 1}
+        self.assertEqual(dup, {}, "样式重名：Word 会判定文档损坏")
+        self.assertEqual(names["FGW正文"], ["OldBody"], "不该改动文档原有样式")
+
     def test_style_inherited_numbering_survives_assignment(self):
         """改指 canonical 样式会把**原样式携带的 numPr** 一起弄丢——编号"一、"消失
         等于改了原文。指派时必须把有效编号钉成段落的直接 numPr 保号。"""

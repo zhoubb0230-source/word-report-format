@@ -29,19 +29,26 @@ W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 # 文字里的静态"图N/表N"前缀就被删掉了，此后**只能靠样式名判断这是图标题还是表标题**
 # （`headings.caption_kind_from_style` 对同时含图与表的"图表标题"返回 None＝认不出）。
 # 合成一个样式会让二次运行认不出种类、把图表标题降级成正文。
+#
+# ⚠️ 样式**名**统一带 "FGW" 前缀：Word 要求样式名在文档内**唯一**，重名会让它在打开时
+# 报"发现无法读取的内容"。而"标题 1""图标题""表标题""目录标题"这些名字在真实模板里
+# 很可能已经存在（LibreOffice 转换出来的 docx 尤其爱写本地化名），直接叫这些名字必然
+# 撞车。前缀既保证唯一，也让用户在样式列表里一眼认出哪些是本工具注入的。
+# 前缀不影响识别：`heading_level_from_style_name("FGW标题1")` 仍得 1，
+# `caption_kind_from_style` 仍能从"FGW图标题/FGW表标题"里认出图与表。
 ROLE_STYLES = (
-    ("title",                "FGWCanonTitle",      "封面题目"),
-    ("cover_classification", "FGWCanonCoverClass", "封面密级编号"),
-    ("cover_field",          "FGWCanonCoverField", "封面要素"),
-    ("heading1",             "FGWCanonH1",         "标题 1"),
-    ("heading2",             "FGWCanonH2",         "标题 2"),
-    ("heading3",             "FGWCanonH3",         "标题 3"),
-    ("heading4",             "FGWCanonH4",         "标题 4"),
+    ("title",                "FGWCanonTitle",      "FGW封面题目"),
+    ("cover_classification", "FGWCanonCoverClass", "FGW封面密级编号"),
+    ("cover_field",          "FGWCanonCoverField", "FGW封面要素"),
+    ("heading1",             "FGWCanonH1",         "FGW标题1"),
+    ("heading2",             "FGWCanonH2",         "FGW标题2"),
+    ("heading3",             "FGWCanonH3",         "FGW标题3"),
+    ("heading4",             "FGWCanonH4",         "FGW标题4"),
     ("body",                 "FGWCanonBody",       "FGW正文"),
-    ("caption_figure",       "FGWCanonCaptionFig", "图标题"),
-    ("caption_table",        "FGWCanonCaptionTbl", "表标题"),
-    ("table_body",           "FGWCanonTableBody",  "表格内容"),
-    ("toc_title",            "FGWCanonTocTitle",   "目录标题"),
+    ("caption_figure",       "FGWCanonCaptionFig", "FGW图标题"),
+    ("caption_table",        "FGWCanonCaptionTbl", "FGW表标题"),
+    ("table_body",           "FGWCanonTableBody",  "FGW表格内容"),
+    ("toc_title",            "FGWCanonTocTitle",   "FGW目录标题"),
 )
 
 # 角色名 -> 图表种类，供编号入列时选对序列。

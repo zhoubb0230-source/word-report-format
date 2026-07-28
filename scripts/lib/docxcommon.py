@@ -619,12 +619,65 @@ ELEMENT_ORDER = {
         "headers", "cellIns", "cellDel", "cellMerge", "tcPrChange",
     ),
     "w:sectPr": (
-        "headerReference", "footerReference", "footnotePr", "endnotePr", "type",
+        # headerReference / footerReference 是 EG_HdrFtrReferences —— 一个**可重复的
+        # choice**，两者可以任意交错出现。写成先后关系会把合法文档误判成乱序（真实
+        # 文档里 footerReference 出现在 headerReference 之前很常见），故并列同级。
+        ("headerReference", "footerReference"),
+        "footnotePr", "endnotePr", "type",
         "pgSz", "pgMar", "paperSrc", "pgBorders", "lnNumType", "pgNumType",
         "cols", "formProt", "vAlign", "noEndnote", "titlePg", "textDirection",
         "bidi", "rtlGutter", "docGrid", "printerSettings", "sectPrChange",
     ),
+    "w:styles": ("docDefaults", "latentStyles", "style"),
+    "w:numbering": ("numPicBullet", "abstractNum", "num", "numIdMacAtCleanup"),
+    # CT_Settings 的 sequence（节选常见项）。`updateFields` 曾被 insert(0,...) 塞到
+    # 最前面——那也是乱序。
+    "w:settings": (
+        "writeProtection", "view", "zoom", "removePersonalInformation",
+        "removeDateAndTime", "doNotDisplayPageBoundaries", "displayBackgroundShape",
+        "printPostScriptOverText", "printFractionalCharacterWidth", "printFormsData",
+        "embedTrueTypeFonts", "embedSystemFonts", "saveSubsetFonts", "saveFormsData",
+        "mirrorMargins", "alignBordersAndEdges", "bordersDoNotSurroundHeader",
+        "bordersDoNotSurroundFooter", "gutterAtTop", "hideSpellingErrors",
+        "hideGrammaticalErrors", "activeWritingStyle", "proofState", "formsDesign",
+        "attachedTemplate", "linkStyles", "stylePaneFormatFilter",
+        "stylePaneSortMethod", "documentType", "mailMerge", "revisionView",
+        "trackChanges", "doNotTrackMoves", "doNotTrackFormatting",
+        "documentProtection", "autoFormatOverride", "styleLockTheme",
+        "styleLockQFSet", "defaultTabStop", "autoHyphenation",
+        "consecutiveHyphenLimit", "hyphenationZone", "doNotHyphenateCaps",
+        "showEnvelope", "summaryLength", "clickAndTypeStyle", "defaultTableStyle",
+        "evenAndOddHeaders", "bookFoldRevPrinting", "bookFoldPrinting",
+        "bookFoldPrintingSheets", "drawingGridHorizontalSpacing",
+        "drawingGridVerticalSpacing", "displayHorizontalDrawingGridEvery",
+        "displayVerticalDrawingGridEvery", "doNotUseMarginsForDrawingGridOrigin",
+        "drawingGridHorizontalOrigin", "drawingGridVerticalOrigin",
+        "doNotShadeFormData", "noPunctuationKerning", "characterSpacingControl",
+        "printTwoOnOne", "strictFirstAndLastChars", "noLineBreaksAfter",
+        "noLineBreaksBefore", "savePreviewPicture", "doNotValidateAgainstSchema",
+        "saveInvalidXml", "ignoreMixedContent", "alwaysShowPlaceholderText",
+        "doNotDemarcateInvalidXml", "saveXmlDataOnly", "useXSLTWhenSaving",
+        "saveThroughXslt", "showXMLTags", "alwaysMergeEmptyNamespace",
+        "updateFields", "hdrShapeDefaults", "footnotePr", "endnotePr", "compat",
+        "docVars", "rsids", "mathPr", "attachedSchema", "themeFontLang",
+        "clrSchemeMapping", "doNotIncludeSubdocsInStats",
+        "doNotAutoCompressPictures", "forceUpgrade", "captions",
+        "readModeInkLockDown", "smartTagType", "schemaLibrary", "shapeDefaults",
+        "doNotEmbedSmartTags", "decimalSymbol", "listSeparator",
+    ),
 }
+
+
+def _rank_map(order):
+    """把顺序表（元素名，或"同级可互换"的名字元组）压成 {名字: 序号}。"""
+    ranks = {}
+    for i, entry in enumerate(order):
+        for name in ((entry,) if isinstance(entry, str) else entry):
+            ranks[name] = i
+    return ranks
+
+
+RANKS = {tag: _rank_map(order) for tag, order in ELEMENT_ORDER.items()}
 
 
 def local_name(el):
@@ -632,41 +685,50 @@ def local_name(el):
 
 
 def ordered_insert(parent, el, order):
-    """按 schema 顺序把 el 插进 parent；未知子元素不参与比较（跳过）。"""
-    try:
-        idx = order.index(local_name(el))
-    except ValueError:
+    """按 schema 顺序把 el 插进 parent；未知子元素不参与比较（跳过）。
+
+    ``order`` 可以是 `ELEMENT_ORDER` 里的顺序表，也可以直接是 {名字: 序号} 的 rank 表。"""
+    ranks = order if isinstance(order, dict) else _rank_map(order)
+    idx = ranks.get(local_name(el))
+    if idx is None:
         parent.append(el)
         return el
     for child in parent:
-        try:
-            if order.index(local_name(child)) > idx:
-                child.addprevious(el)
-                return el
-        except ValueError:
+        if not isinstance(child.tag, str):
             continue
+        cidx = ranks.get(local_name(child))
+        if cidx is not None and cidx > idx:
+            child.addprevious(el)
+            return el
     parent.append(el)
     return el
 
 
+def order_for(parent):
+    """该容器的 rank 表（没登记则 None）。"""
+    return RANKS.get("w:" + local_name(parent))
+
+
 def order_violations(root):
-    """产物自检：返回 [(容器路径, 乱序的子元素名, 前一个子元素名)]。
+    """产物自检：返回 [(容器名, 乱序的子元素名, 它前面那个子元素名)]。
 
     只查 `ELEMENT_ORDER` 里列出的容器，未知子元素跳过——这样表不全时只会漏报，
-    不会把 Word 本来打得开的文档误判成坏文件。"""
+    不会把 Word 本来打得开的文档误判成坏文件。同级可互换的元素（如 sectPr 里的
+    header/footer 引用）共用一个序号，不会被误报。"""
     bad = []
     for parent in root.iter():
-        order = ELEMENT_ORDER.get("w:" + local_name(parent))
-        if not order:
+        if not isinstance(parent.tag, str):
+            continue
+        ranks = RANKS.get("w:" + local_name(parent))
+        if not ranks:
             continue
         prev_name, prev_idx = None, -1
         for child in parent:
             if not isinstance(child.tag, str):
                 continue
             name = local_name(child)
-            try:
-                idx = order.index(name)
-            except ValueError:
+            idx = ranks.get(name)
+            if idx is None:
                 continue
             if idx < prev_idx:
                 bad.append((local_name(parent), name, prev_name))

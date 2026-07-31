@@ -1150,6 +1150,21 @@ def _inject_canonical_styles(pkg_dir, spec, caption_num_ids=None):
     return n
 
 
+# 段落标记 rPr 上的**装饰性**属性：斜体、颜色、下划线、删除线、突出显示/底纹、各种
+# 立体效果、隐藏、大写化、字符间距/缩放/升降。
+#
+# 为什么只对段落标记清、且清得比 run 狠：**自动编号的渲染完全取自段落标记的 rPr**。
+# 标记上残留一个 `<w:i/>` 或 `<w:color w:val="FF0000"/>`，就会出现"序号是红色斜体、
+# 标题文字却是黑色正体"（用户实测）。段落标记不是作者内容（它只是那个 ¶ 和自动编号的
+# 载体），这些装饰留着有害无益；内容 run 上的同名属性属于作者的行内强调，**照旧保留**。
+_MARK_DECORATION_TAGS = (
+    "w:i", "w:iCs", "w:color", "w:u", "w:strike", "w:dstrike", "w:highlight",
+    "w:shd", "w:bdr", "w:effect", "w:emboss", "w:imprint", "w:outline",
+    "w:shadow", "w:vanish", "w:webHidden", "w:specVanish", "w:caps",
+    "w:smallCaps", "w:position", "w:spacing", "w:w", "w:kern",
+)
+
+
 def _clear_run_props(p, clear_ea, clear_latin, clear_size, clear_bold=False,
                      overriding_char_styles=frozenset()):
     """清掉段落各 run 与段落标记 rPr 上、被 canonical 样式承载的字体/字号/加粗直接覆盖。
@@ -1158,9 +1173,13 @@ def _clear_run_props(p, clear_ea, clear_latin, clear_size, clear_bold=False,
     属性表达"不算合规。只清样式确实承载的键——颜色/下划线/上标之类样式没管的直接属性
     一律保留，指派样式不该顺手抹掉作者的行内强调。
 
-    同时摘掉**会抢戏的字符样式引用**（`w:rStyle`）：只摘那些确实设了字体/字号/加粗的
-    字符样式，其余（超链接色、批注引用等）原样留着。字符样式是共享对象，绝不能就地改
-    它的定义——那会溢到引用它的所有其它段落（#17 那类事故），所以摘引用而不是改样式。"""
+    同时摘掉**会抢戏的字符样式引用**（`w:rStyle`）：内容 run 只摘那些确实设了字体/字号/
+    加粗的字符样式，其余（超链接色、批注引用等）原样留着。字符样式是共享对象，绝不能就地
+    改它的定义——那会溢到引用它的所有其它段落（#17 那类事故），所以摘引用而不是改样式。
+
+    **段落标记（`pPr/rPr`）是例外，清得更狠**：它决定自动编号怎么渲染，所以标记上的加粗、
+    全部装饰性属性（`_MARK_DECORATION_TAGS`：斜体/颜色/下划线/底纹…）以及**任何**字符样式
+    引用一律清掉，保证序号与标题文字长得一样。"""
     # 只处理**已存在**的 rPr（别用 _run_rpr 顺手建空壳），清空后连壳一起删掉。
     owners = [(r, r.find(qn("w:rPr")), False) for r in _iter_runs(p)]
     pPr = get_pPr(p)
@@ -1170,13 +1189,21 @@ def _clear_run_props(p, clear_ea, clear_latin, clear_size, clear_bold=False,
             continue
         if is_mark:
             # **段落标记的 rPr 决定自动编号怎么渲染**。用户实测：原本"表1"是加粗的，
-            # 改成自动编号后编号仍然加粗、而标题文字不粗——因为加粗留在了段落标记上。
-            # 段落标记不是作者内容（它只是那个 ¶ 和自动编号的载体），所以这里一律把
-            # 加粗清掉，让编号跟随段落样式：标题样式加粗→编号也粗，图表标题不加粗→
-            # 编号也不粗，两边始终一致。
+            # 改成自动编号后编号仍然加粗、而标题文字不粗——因为加粗留在了段落标记上；
+            # 后来又实测到"部分标题序号是红色斜体"，同一个根因（斜体/颜色留在标记上）。
+            # 段落标记不是作者内容（它只是那个 ¶ 和自动编号的载体），所以这里把加粗与
+            # **全部装饰性属性**一并清掉，让编号严格跟随段落样式：标题样式加粗→编号也粗，
+            # 图表标题不加粗→编号也不粗，两边始终一致，且永远是正体、黑色。
             clear_bold = True
+            for tag in _MARK_DECORATION_TAGS:
+                for el in rpr.findall(qn(tag)):
+                    rpr.remove(el)
         rs = rpr.find(qn("w:rStyle"))
-        if rs is not None and rs.get(qn("w:val")) in overriding_char_styles:
+        # 段落标记上的**任何**字符样式引用都摘掉（不只"设了字体/字号/加粗"的那些）：
+        # 字符样式压过段落样式，标记上留着一个设了斜体/颜色的字符样式，编号照样会红、
+        # 会斜。内容 run 仍只摘 `overriding_char_styles` 里那些——那才是作者的强调。
+        if rs is not None and (is_mark
+                               or rs.get(qn("w:val")) in overriding_char_styles):
             rpr.remove(rs)
         rf = rpr.find(qn("w:rFonts"))
         if rf is not None:

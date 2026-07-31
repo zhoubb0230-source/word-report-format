@@ -215,6 +215,23 @@ class TestUnnumberedSection(unittest.TestCase):
         self.assertEqual(by_idx[2]["op"], "renumber_heading")
         self.assertEqual(by_idx[2]["new_token"], "二、")  # not 三、
 
+    def test_attachment_is_numbered_but_appendix_is_not(self):
+        """「附件」**要**编号（用户裁决：报告里的附件常常就是正文的一章），
+        「附录」仍不编号。别把"附件"加回 UNNUMBERED_HEADING_PREFIX。"""
+        self.assertFalse(checks.is_unnumbered_section("附件", None))
+        self.assertFalse(checks.is_unnumbered_section("附件1 设备清单", None))
+        self.assertTrue(checks.is_unnumbered_section("附录", None))
+        self.assertTrue(checks.is_unnumbered_section("附录A 计算过程", None))
+        recs = [
+            rec(i=0, is_heading=True, level=1, level_source="outline",
+                num_raw="一、", text="一、项目概况"),
+            rec(i=1, is_heading=True, level=1, level_source="outline",
+                num_raw=None, text="附件"),
+        ]
+        by_idx = {f["para_index"]: f for f in checks.continuity(recs, SPEC)}
+        self.assertEqual(by_idx[1]["op"], "renumber_heading")
+        self.assertEqual(by_idx[1]["new_token"], "二、")
+
 
 class TestCaptionGrouping(unittest.TestCase):
     """图/表编号：平铺走 Word 自动编号；章-序分组仍走静态重编号。"""

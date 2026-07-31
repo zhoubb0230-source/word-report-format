@@ -493,13 +493,15 @@ def heading_numbering_def(spec=None):
     级别里**不写 `lvlRestart`**：省略即 Word 默认的"上一级出现时归零"，正是规范要的
     逐级重新编号。缩进已中和（left=0、无 hanging），首行缩进由 canonical 标题样式承载。
 
-    编号与标题之间的分隔符跟着**形状**走，与手写序号的渲染规则同源（`_heading_insert_prefix`）：
-    "1." 这类点号结尾的用一个空格（"1. 总体设计"），"一、"/"（一）"这类全角标点结尾的
-    不加（"一、概述"）；两者都不用 Word 默认的制表符——制表符会把标题文字顶到制表位上。"""
+    **编号与标题之间是制表符**（`suff=tab`，取自 `spec.heading_numbering.suffix`）：这是
+    阶段0 参考件里经用户 Word 验收的排版（陷阱 #12「标题编号后制表符＝defaultTabStop」），
+    落点由 settings 的 `defaultTabStop`(2字符) 决定。**别改成 `nothing`/`space`**——
+    2026-07 曾按"与手写序号同形"的直觉改成不加分隔符，用户当轮就报"标题序号后的制表符
+    没有了"。手写序号那条路径（`_heading_insert_prefix`）是纯文本、没有制表位可用，
+    与这里不是一回事，不要互相看齐。"""
+    suff = ((spec or {}).get("heading_numbering") or {}).get("suffix") or "tab"
     lvls = "".join(
-        numbering_level_xml(fmt, lvl_text,
-                            suff="space" if lvl_text.endswith(".") else "nothing",
-                            ilvl=i)
+        numbering_level_xml(fmt, lvl_text, suff=suff, ilvl=i)
         for i, (fmt, lvl_text) in enumerate(heading_level_shapes(spec)))
     return {"kind": "heading", "marker": HEADING_NUM_MARKER,
             "multi_level_type": "multilevel", "lvl_xml": lvls}

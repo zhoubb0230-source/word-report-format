@@ -1366,6 +1366,11 @@ class TestCanonicalStyleInjection(unittest.TestCase):
                 ind = l.find(self.qn("w:pPr") + "/" + self.qn("w:ind"))
                 self.assertEqual(ind.get(self.qn("w:left")), "0")
                 self.assertIsNone(ind.get(self.qn("w:hanging")))
+                # 序号后**必须是制表符**（阶段0 Word 验收的排版；改成 nothing/space
+                # 用户当轮就报"标题序号后的制表符没有了"）
+                suff = l.find(self.qn("w:suff"))
+                self.assertIsNotNone(suff, "缺 w:suff（Word 默认虽是 tab，但要显式写）")
+                self.assertEqual(suff.get(self.qn("w:val")), "tab")
 
     def test_canonical_heading_numbering_matches_static_tokens(self):
         """自动编号的 lvlText 必须与手写序号被改成的 token 同形（一、/（一）/1./（1）），
@@ -1381,6 +1386,54 @@ class TestCanonicalStyleInjection(unittest.TestCase):
             expected = _heading_token(level, 1).replace(numeral, "%%%d" % level, 1)
             self.assertEqual(lvl_text, expected,
                              "%d 级自动编号与手写序号形状不一致" % level)
+
+    def test_paragraph_mark_decorations_cleared_so_number_matches_text(self):
+        """自动编号的渲染取自**段落标记的 rPr**：标记上留着斜体/颜色/字符样式，就会出现
+        "序号是红色斜体、标题文字却是黑色正体"（用户实测）。段落标记不是作者内容，
+        指派 canonical 样式时把装饰性属性与**任何** rStyle 一并清掉。"""
+        import zipfile
+        numbering = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                     '<w:numbering xmlns:w="%s"><w:abstractNum w:abstractNumId="0">'
+                     '<w:lvl w:ilvl="0"><w:start w:val="1"/>'
+                     '<w:numFmt w:val="decimal"/><w:lvlText w:val="%%1."/>'
+                     '<w:lvlJc w:val="left"/></w:lvl></w:abstractNum>'
+                     '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>'
+                     '</w:numbering>' % self.W)
+        styles = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                  '<w:styles xmlns:w="%s">'
+                  '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
+                  '<w:name w:val="Normal"/></w:style>'
+                  '<w:style w:type="paragraph" w:styleId="Heading1">'
+                  '<w:name w:val="heading 1"/><w:pPr><w:outlineLvl w:val="0"/>'
+                  '</w:pPr></w:style>'
+                  '<w:style w:type="character" w:styleId="RedEm">'
+                  '<w:name w:val="醒目"/><w:rPr><w:i/>'
+                  '<w:color w:val="FF0000"/></w:rPr></w:style></w:styles>') % self.W
+        doc = helpers.document_xml(
+            '<w:p><w:pPr><w:pStyle w:val="Heading1"/>'
+            '<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>'
+            # 段落标记带：字符样式引用 + 斜体 + 红色 + 下划线
+            '<w:rPr><w:rStyle w:val="RedEm"/><w:i/><w:iCs/>'
+            '<w:color w:val="FF0000"/><w:u w:val="single"/></w:rPr></w:pPr>'
+            '<w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="32"/></w:rPr>'
+            '<w:t xml:space="preserve">项目概况</w:t></w:r></w:p>')
+        src = os.path.join(self.tmp, "markdeco.docx")
+        with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", _CT_LO)
+            z.writestr("_rels/.rels", helpers.ROOT_RELS)
+            z.writestr("word/_rels/document.xml.rels", _DRELS_LO)
+            z.writestr("word/document.xml", doc)
+            z.writestr("word/styles.xml", styles)
+            z.writestr("word/numbering.xml", numbering)
+        wd = self._run_src(src, "wbmark")
+        p = list(self._doc(wd).iter(self.qn("w:p")))[0]
+        mark = p.find(self.qn("w:pPr") + "/" + self.qn("w:rPr"))
+        if mark is not None:
+            for tag in ("w:rStyle", "w:i", "w:iCs", "w:color", "w:u"):
+                self.assertIsNone(mark.find(self.qn(tag)),
+                                  "段落标记残留 %s → 自动编号会红/斜/带下划线" % tag)
+        # 内容 run 上的作者强调不受影响（只清样式承载的字体/字号/加粗）
+        self.assertTrue(p.find(self.qn("w:pPr") + "/" + self.qn("w:numPr")) is not None)
 
     def test_unnumbered_section_heading_loses_auto_number(self):
         """惯例不编号的章节（结论/前言/参考文献…）即便挂着自动编号，也要取消——判定层

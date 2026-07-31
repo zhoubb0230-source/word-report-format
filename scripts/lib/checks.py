@@ -105,7 +105,11 @@ UNNUMBERED_HEADING_EXACT = {
 }
 # Prefixes that start an unnumbered section even with a trailing token
 # ("附录A"/"附录一"/"参考文献 [续]").
-UNNUMBERED_HEADING_PREFIX = ("附录", "附件", "参考文献", "参考资料")
+#
+# **「附件」不在此列**（2026-07 用户裁决）：报告里的"附件"常常就是正文的一个章节、
+# 该跟着一起编号（"六、附件"）。挂了标题样式的"附件"因此走正常编号；真正不该编号的
+# 附加材料一般写作"附录"，仍在列。别照直觉把"附件"加回来。
+UNNUMBERED_HEADING_PREFIX = ("附录", "参考文献", "参考资料")
 
 
 def _norm_title(text, num_raw):

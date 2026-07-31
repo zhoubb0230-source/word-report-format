@@ -23,6 +23,9 @@ this guards against is real Microsoft Word opening the file and prompting
      note only.
   5b. 元素顺序 —— OOXML 的复杂类型基本都是 xsd:sequence，子元素乱序时文件仍然
      良构（第 3 项查不出），但真实 Word 拒绝打开并提示"发现无法读取的内容"。
+  5c. 批注一致性 + 编号身份链接 —— 悬空/重复的批注 id、不配对的批注区间，以及两条
+     abstractNum 抢同一个 styleLink / 同一个级别 pStyle；同样是"良构但 Word 拒绝
+     打开"的一类。
   6. 全坍缩不变量 (方案C 阶段3) —— 被指派 canonical 样式的段落，该样式承载的每个
      属性都必须由【样式层】供给；仍由 direct/numbering 供给且值≠canonical 即泄漏，
      硬失败。这是没有语料、没有 Word 时的确定性安全网（供给层是纯 XML 事实）。
@@ -40,7 +43,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
 from lxml import etree
 from docxcommon import (qn, iter_body_paragraphs, StyleResolver,
                         load_numbering_levels, get_style_id, get_pPr, get_mark_rpr,
-                        read_ppr, char_styles_overriding, order_violations, in_textbox)
+                        read_ppr, char_styles_overriding, order_violations, in_textbox,
+                        comment_problems, numbering_link_problems)
 from cascade import resolve_ppr_with_provenance
 import canonstyles
 from checks import load_default_spec
@@ -133,6 +137,20 @@ def _check_element_order(zf):
         for parent, child, prev in order_violations(_read_root(zf, part)):
             out.append({"part": part, "container": parent,
                         "element": child, "after": prev})
+    return out
+
+
+def _check_comments_and_numbering(zf):
+    """批注一致性 + 编号身份链接唯一性——都是"良构但 Word 拒绝打开"的成因，
+    与元素顺序同类，`45` 里一并硬查。规则实现在 `docxcommon`，与 diagnose_docx 共用。"""
+    names = set(zf.namelist())
+    out = []
+    if "word/document.xml" in names:
+        comments = (_read_root(zf, "word/comments.xml")
+                    if "word/comments.xml" in names else None)
+        out.extend(comment_problems(_read_root(zf, "word/document.xml"), comments))
+    if "word/numbering.xml" in names:
+        out.extend(numbering_link_problems(_read_root(zf, "word/numbering.xml")))
     return out
 
 
@@ -342,6 +360,17 @@ def validate(formatted_path, reference_path=None, indent_fix_indices=()):
                 info["element_order_violations"] = order_bad[:50]
         except (etree.XMLSyntaxError, KeyError) as e:
             info["element_order_skipped"] = str(e)
+
+        # 5c. 批注一致性（悬空引用/重复 id/区间不配对）与编号身份链接唯一性。
+        #     同 5b 一类：XML 良构、zip 完好，Word 照样报"发现无法读取的内容"。
+        try:
+            struct_bad = _check_comments_and_numbering(zf)
+            if struct_bad:
+                errors.append("批注/编号结构损坏：%d 处（Word 会提示内容无法读取）"
+                              % len(struct_bad))
+                info["structural_problems"] = struct_bad[:50]
+        except (etree.XMLSyntaxError, KeyError) as e:
+            info["structural_check_skipped"] = str(e)
 
         # 6. 全坍缩不变量（方案C 阶段3）：指派了 canonical 样式的段落，其样式承载的
         #    属性必须由样式层供给；仍由 direct/numbering 供给且值不等于 canonical

@@ -17,6 +17,9 @@
      里没有的编号；`num → abstractNumId` 指向不存在的 abstractNum。
   4. **关系/内容类型** —— document.xml 里用到的 `r:id` 在 rels 里找不到；存在的部件
      没有对应的 Content-Type Override。
+  5. **批注** —— 悬空的批注引用、重复的批注 id、不配对的 commentRangeStart/End。
+  6. **编号身份链接** —— 两条 abstractNum 抢同一个 `styleLink`/`numStyleLink`，或同一个
+     段落样式被两条编号定义的级别 `pStyle` 绑定。
 
 输出单行 JSON（`ok` 为 false 时逐项列出问题）；退出码：0 干净 / 2 发现问题。
 """
@@ -29,7 +32,8 @@ import zipfile
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 
 from lxml import etree
-from docxcommon import qn, order_violations, local_name
+from docxcommon import (qn, order_violations, local_name, comment_problems,
+                        numbering_link_problems)
 
 CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
 REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -89,7 +93,17 @@ def _check_numbering(zf, names, out):
                 out.append({"kind": "dangling_abstract_num",
                             "numId": num.get(qn("w:numId")),
                             "abstractNumId": a.get(qn("w:val"))})
+        out.extend(numbering_link_problems(root))
     return nums
+
+
+def _check_comments(zf, names, out):
+    """批注：悬空引用 / 重复 id / 区间不配对（覆盖式写批注留下的典型残骸）。"""
+    if "word/document.xml" not in names:
+        return
+    comments = (_root(zf, "word/comments.xml")
+                if "word/comments.xml" in names else None)
+    out.extend(comment_problems(_root(zf, "word/document.xml"), comments))
 
 
 def _check_references(zf, names, style_ids, num_ids, out):
@@ -163,6 +177,7 @@ def diagnose(path):
         style_ids = set(_check_styles(zf, names, problems) or ())
         num_ids = _check_numbering(zf, names, problems)
         _check_references(zf, names, style_ids, num_ids, problems)
+        _check_comments(zf, names, problems)
         _check_content_types(zf, names, problems)
     return {"status": "ok" if not problems else "error", "ok": not problems,
             "file": path, "n_problems": len(problems), "problems": problems[:80]}

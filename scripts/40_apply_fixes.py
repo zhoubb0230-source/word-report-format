@@ -36,7 +36,7 @@ from docxcommon import (qn, parse_xml, unzip_docx, rezip_docx,
                         local_name, order_for)
 from commentwriter import CommentWriter
 from headings import ANY_LABEL_RE, CAPTION_STYLE_HINTS
-from checks import load_default_spec, paragraph_role
+from checks import load_default_spec, paragraph_role, is_unnumbered_section
 import canonstyles
 from canonstyles import STYLE_ID_BY_ROLE
 
@@ -781,18 +781,45 @@ def _neutralize_level_indent(lvl):
     ind.set(qn("w:leftChars"), "0")
 
 
-def _restore_level_restart(lvl):
-    """在克隆的编号级别里去掉 `<w:lvlRestart w:val="0"/>`（＝"永不重新计数"）。
+# 克隆钳生成的 abstractNum 用 w:name 打这个前缀 + 源 abstractNumId 认领，重跑时复用
+# 同一条而不是再克隆一份（否则每跑一次 numbering.xml 就多一条克隆）。
+CLAMP_CLONE_MARKER = "FGWClampClone"
 
-    规范要求标题**逐级重新编号**：二级标题在其所在一级标题下从头数，三级在二级下从头
-    数，四级同理。Word 的默认行为正是如此——某一级出现更高一级时自动归零；而
-    `lvlRestart=0` 会把它关掉，于是二/三/四级变成**全文连续编号**（用户实测："编号变成
-    全局连贯了，应该在各自层级里连贯"）。模板里 `lvlRestart=0` 很常见，克隆时一并去掉，
-    恢复默认的层级归零。
 
-    只在**克隆**里改，原 abstractNum 不动（共享对象不可原地 mutate，陷阱 #11）。"""
-    for el in lvl.findall(qn("w:lvlRestart")):
-        lvl.remove(el)
+def _detach_clone_identity(clone):
+    """把克隆的 abstractNum 与**源列表/源样式**的身份链接全部摘掉。
+
+    克隆是一条**新的、独立的**列表，不能继续冒充源列表：
+
+      * `w:styleLink` / `w:numStyleLink` —— 指向"编号样式"。两条 abstractNum 声明自己
+        是同一个编号样式的定义是自相矛盾的，Word 打开时会判定文档需要修复
+        （"发现无法读取的内容"）。
+      * `w:tmpl` / `w:nsid` —— 列表标识。留着会让 Word 认为两条是同一个列表。
+      * 每个级别上的 `w:pStyle` —— 它把"该级别"与"某个段落样式"绑定。克隆一份等于给
+        同一个标题样式挂了两条编号定义，Word 究竟按哪条编号无从预期；而我们的段落已
+        改指 canonical 样式 + 直接 numPr，本来就不需要这层样式绑定。"""
+    for tag in ("w:styleLink", "w:numStyleLink", "w:tmpl", "w:nsid"):
+        for el in clone.findall(qn(tag)):
+            clone.remove(el)
+    for lvl in clone.findall(qn("w:lvl")):
+        for ps in lvl.findall(qn("w:pStyle")):
+            lvl.remove(ps)
+
+
+def _clone_marker(anum):
+    """该 abstractNum 的 `w:name` 若是克隆钳打的标记，返回它，否则 None。"""
+    nm = anum.find(qn("w:name"))
+    val = nm.get(qn("w:val")) if nm is not None else None
+    return val if (val and val.startswith(CLAMP_CLONE_MARKER)) else None
+
+
+def _set_abstract_name(anum, value):
+    """给 abstractNum 写 `w:name`（CT_AbstractNum 的 sequence：nsid → multiLevelType →
+    tmpl → name → styleLink → numStyleLink → lvl，故按序插）。"""
+    nm = anum.find(qn("w:name"))
+    if nm is None:
+        nm = ordered_insert(anum, etree.Element(qn("w:name")), order_for(anum))
+    nm.set(qn("w:val"), value)
 
 
 def _set_para_numid(p, new_num_id, ilvl):
@@ -829,6 +856,15 @@ def _clamp_numbering_indent(pkg_dir, targets, resolver, numbering_levels):
     段（bug #17"改一个标题行距、同级全变"）。只有拿到过缩进修复的段落才被改指
     克隆；未被修复的同 numId 段落仍指向原 abstractNum，格式不受影响。
 
+    克隆必须**摘掉源身份**（`_detach_clone_identity`：styleLink/numStyleLink/tmpl/nsid
+    与级别上的 pStyle），否则文档里会出现两条自称同一个编号样式、绑定同一批段落样式的
+    列表——Word 打开时报"发现无法读取的内容"。重跑时按 `w:name` 上的标记**认领已有的
+    克隆**，不再层层克隆（否则每跑一次 numbering.xml 就长一条）。
+
+    **标题不走这条路**（2026-07 改）：一~四级标题的自动编号统一改指注入的 canonical
+    四级列表（`canonstyles.heading_numbering_def`），逐级归零由"同一条多级列表"保证；
+    这里只服务正文里的普通自动编号列表，它们的 `lvlRestart` 是作者的选择，不动。
+
     钳住编号层后，段落自身的字符单位首行缩进（firstLineChars，无绝对伴随值）即可
     生效——这是 #12/#14"继承 hanging"那一半的根治，替代绝对伴随值 hack（§2.2）。
     返回被改指的段落数。**Word 渲染需实测**（沙箱验不了，见 handoff §1）。"""
@@ -845,6 +881,13 @@ def _clamp_numbering_indent(pkg_dir, targets, resolver, numbering_levels):
             num2abs[num.get(qn("w:numId"))] = a.get(qn("w:val"))
     for anum in root.findall(qn("w:abstractNum")):
         abs_by_id[anum.get(qn("w:abstractNumId"))] = anum
+    # 上一轮跑出来的克隆：{源 abstractNumId: 克隆的 abstractNumId}
+    clone_of = {}
+    for anum in root.findall(qn("w:abstractNum")):
+        nm = anum.find(qn("w:name"))
+        val = nm.get(qn("w:val")) if nm is not None else None
+        if val and val.startswith(CLAMP_CLONE_MARKER):
+            clone_of[val[len(CLAMP_CLONE_MARKER):]] = anum.get(qn("w:abstractNumId"))
 
     # group targets by source **abstractNum**（共享计数器的单位），keep each ilvl
     groups = {}   # src_abstractNumId -> {"ilvls": set, "paras": [(p, ilvl)]}
@@ -871,21 +914,38 @@ def _clamp_numbering_indent(pkg_dir, targets, resolver, numbering_levels):
         src_anum = abs_by_id.get(src_aid)
         if src_anum is None:
             continue
-        # clone the abstractNum with a fresh id (drop nsid so Word treats the
-        # cloned list as independent, not a duplicate of the original)
+        # 重跑：段落已经指向上一轮的克隆（或本轮源就是那条克隆）——就地把用到的级别
+        # 再中和一遍即可，不再克隆克隆。
+        reuse_aid = clone_of.get(src_aid)
+        if reuse_aid is None and _clone_marker(src_anum):
+            reuse_aid = src_aid
+        if reuse_aid is not None and reuse_aid in abs_by_id:
+            clone = abs_by_id[reuse_aid]
+            for lvl in clone.findall(qn("w:lvl")):
+                try:
+                    if int(lvl.get(qn("w:ilvl"))) in g["ilvls"]:
+                        _neutralize_level_indent(lvl)
+                except (TypeError, ValueError):
+                    continue
+            reuse_num = next((n.get(qn("w:numId")) for n in root.findall(qn("w:num"))
+                              if (n.find(qn("w:abstractNumId")) is not None
+                                  and n.find(qn("w:abstractNumId")).get(qn("w:val"))
+                                  == reuse_aid)), None)
+            if reuse_num is not None:
+                for p, il in g["paras"]:
+                    _set_para_numid(p, reuse_num, il)
+                    changed += 1
+                continue
+        # clone the abstractNum with a fresh id, detached from the source list's
+        # identity (see _detach_clone_identity) so Word treats it as its own list
         new_aid = str(_next_int_id(root, "w:abstractNum", "w:abstractNumId",
                                    taken=new_abs_ids))
         new_abs_ids.append(new_aid)
         clone = copy.deepcopy(src_anum)
         clone.set(qn("w:abstractNumId"), new_aid)
-        nsid = clone.find(qn("w:nsid"))
-        if nsid is not None:
-            clone.remove(nsid)
+        _detach_clone_identity(clone)
+        _set_abstract_name(clone, CLAMP_CLONE_MARKER + src_aid)
         for lvl in clone.findall(qn("w:lvl")):
-            # 逐级重新编号：**所有**级别都恢复默认的"更高一级出现时归零"，不只被
-            # 中和缩进的那几级——三级要不要归零取决于二级在不在场，只处理用到的
-            # 级别会漏掉中间层。
-            _restore_level_restart(lvl)
             lv = lvl.get(qn("w:ilvl"))
             try:
                 if int(lv) in g["ilvls"]:
@@ -1016,11 +1076,25 @@ def _patch_normal_and_defaults(styles_root, spec):
 
     canon_normal = _parse_fragment(canonstyles.normal_style_xml(spec))
     normal = None
-    for st in styles_root.findall(qn("w:style")):
-        if st.get(qn("w:type")) != "paragraph":
-            continue
-        if st.get(qn("w:default")) == "1" or st.get(qn("w:styleId")) == canonstyles.NORMAL_STYLE_ID:
-            normal = st
+    # 按 默认样式 → styleId=Normal → **名字**叫 Normal 三级找。名字这一级不能省：
+    # 注入的 Normal 样式名就叫 "Normal"，文档里若已有一个名为 Normal、id 却不是
+    # Normal 的样式（转换产物常见），漏掉它就会新增一个**重名**样式——Word 要求样式名
+    # 唯一，重名即报"发现无法读取的内容"（陷阱 #18）。
+    def _pick(pred):
+        for st in styles_root.findall(qn("w:style")):
+            if st.get(qn("w:type")) == "paragraph" and pred(st):
+                return st
+        return None
+
+    def _name_of(st):
+        nm = st.find(qn("w:name"))
+        return nm.get(qn("w:val")) if nm is not None else None
+
+    for pred in (lambda st: st.get(qn("w:default")) == "1",
+                 lambda st: st.get(qn("w:styleId")) == canonstyles.NORMAL_STYLE_ID,
+                 lambda st: _name_of(st) == _name_of(canon_normal)):
+        normal = _pick(pred)
+        if normal is not None:
             break
     if normal is None:
         styles_root.append(canon_normal)
@@ -1203,6 +1277,31 @@ def _blank_style(rec):
     return STYLE_ID_BY_ROLE["table_body" if rec.get("in_table") else "body"]
 
 
+def _heading_num_ref(rec, level, heading_num_id, current):
+    """一个**原本就自动编号**的标题该挂到哪条编号上：返回 ((numId, ilvl), 是否取消编号)。
+
+    三条分支：
+
+      * **惯例不编号的章节**（摘要/前言/结论/参考文献/附录/致谢…）——取消自动编号。
+        判定层（`checks.continuity`）本来就不给它们发号、也不让它们占同级序号，编号层
+        却照发不误的话，就会出现"三、结论"、而且它后面的同级标题全被顶掉一位。
+      * **序号已经写在文字里**（`num_raw`）——取消自动编号。这类序号由
+        `renumber_heading` 归位到规范 token，自动编号再叠一层就渲染成"一、一、绪论"。
+      * 其余——改指注入的 canonical 四级标题列表，`ilvl = 级别-1`。四级同处**一条**多级
+        列表是"二级在其一级下从头数"能成立的前提（见
+        `canonstyles.heading_numbering_def`）。
+
+    ``current`` 是该段**原有**的 (numId, ilvl)：spec 关掉标题自动编号时原样返回它——
+    指派 canonical 样式会丢掉原样式携带的 numPr，不保号等于把"一、"改没了（改原文）。"""
+    if is_unnumbered_section(rec.get("text") or "", rec.get("num_raw")):
+        return (None, None), True
+    if rec.get("num_raw"):
+        return (None, None), True
+    if not heading_num_id:
+        return current, False           # spec 没给标题编号定义：保号、原样不动
+    return (heading_num_id, min(max(level, 1), 4) - 1), False
+
+
 def _assignable(rec):
     """该段的角色是否**可信到可以承载 canonical 样式**（陷阱#5 安全阀）。
 
@@ -1347,15 +1446,15 @@ STRIP_CAPTION_LABEL = re.compile(r"^\s*(?:图|表)\s*[0-9]+(?:[-\.–][0-9]+)?[ 
 STRIP_CAPTION_LABEL_RESIDUE = re.compile(r"^\s*(?:图|表)[ \t　]*")
 
 
-def _ensure_caption_numbering(pkg_dir, spec, cache):
-    """确保 numbering.xml 里有"图%1 / 表%1"两条 canonical 编号定义，返回
-    {kind: numId}。
+def _ensure_injected_numbering(pkg_dir, spec, cache):
+    """确保 numbering.xml 里有本工具的 canonical 编号定义（图%1 / 表%1 / 四级标题），
+    返回 {kind: numId}，kind ∈ {"figure","table","heading"}。
 
-    幂等靠 `<w:name>` 标签认领已注入的定义——否则每跑一次就多两条编号定义。级别缩进
+    幂等靠 `<w:name>` 标签认领已注入的定义——否则每跑一次就多几条编号定义。级别缩进
     已中和（编号层压过样式层，不中和会把 canonical 样式的缩进盖掉，陷阱 #11）。"""
     if cache:
         return cache
-    defs = canonstyles.caption_numbering_defs(spec)
+    defs = canonstyles.injected_numbering_defs(spec)
     if not defs:
         return {}
     path = _ensure_part(pkg_dir, "numbering.xml", "numbering",
@@ -1389,8 +1488,9 @@ def _ensure_caption_numbering(pkg_dir, spec, cache):
         aid = str(_next_int_id(root, "w:abstractNum", "w:abstractNumId", taken=new_abs))
         new_abs.append(aid)
         anum = _parse_fragment(
-            '<w:abstractNum w:abstractNumId="%s"><w:multiLevelType w:val="singleLevel"/>'
-            '<w:name w:val="%s"/>%s</w:abstractNum>' % (aid, d["marker"], d["lvl_xml"]))
+            '<w:abstractNum w:abstractNumId="%s"><w:multiLevelType w:val="%s"/>'
+            '<w:name w:val="%s"/>%s</w:abstractNum>'
+            % (aid, d.get("multi_level_type", "singleLevel"), d["marker"], d["lvl_xml"]))
         # schema 要求所有 abstractNum 排在所有 num 之前
         if last_abstract is not None:
             last_abstract.addnext(anum)
@@ -1488,12 +1588,15 @@ def main():
     # ---- 方案C 阶段2：先注入 canonical 样式 + 文档网格，再指派 ----------------
     # 注入必须在算 char_unit_hp 之前：docDefaults 被钉成五号后，"N 字符"的尺子才是
     # 21 半点，目录制表位/左缩进伴随值都按它换算（陷阱 #12）。
-    caption_nums = {}
+    caption_nums, heading_num_id = {}, None
     if spec:
         # 图/表标题的自动编号定义必须**先**注入：它的 numId 要写进 canonical 题注样式，
         # 这样用户在 Word 里新插一张图、给标题套上"图标题"样式就直接生成编号（只挂在
-        # 段落上的话新段落没有编号——用户实测反馈）。
-        caption_nums = _ensure_caption_numbering(out_pkg, spec, {})
+        # 段落上的话新段落没有编号——用户实测反馈）。标题的四级编号定义同批注入。
+        injected_nums = _ensure_injected_numbering(out_pkg, spec, {})
+        caption_nums = {k: v for k, v in injected_nums.items()
+                        if k in ("figure", "table")}
+        heading_num_id = injected_nums.get("heading")
         applied["caption_numbering"] = len(caption_nums)
         applied["canonical_styles"] = _inject_canonical_styles(out_pkg, spec, caption_nums)
         applied["grid_settings"] = _apply_document_grid(out_pkg, spec)
@@ -1544,8 +1647,8 @@ def main():
             p = para_by_idx.get(rec.get("i"))
             if p is None or not _assignable(rec) or _is_object_only(p):
                 continue
-            sid = (STYLE_ID_BY_ROLE.get(paragraph_role(rec, spec) or "")
-                   or _blank_style(rec))
+            role = paragraph_role(rec, spec) or ""
+            sid = STYLE_ID_BY_ROLE.get(role) or _blank_style(rec)
             if sid is None:
                 continue
             gov = governs.get(sid, {})
@@ -1554,9 +1657,23 @@ def main():
             # 样式的编号（直接层优先），所以不保号——旧编号本来就要被换掉。
             num_ref = ((None, None) if sid in canon_caption_style_ids
                        else _para_num_ref(p, resolver, numbering_levels))
+            # 标题的自动编号统一改挂注入的 canonical 四级列表（逐级归零的前提），
+            # 或按 `_heading_num_ref` 的判断整段取消编号。
+            suppress_num, on_canonical_num = False, False
+            if role.startswith("heading") and num_ref[0]:
+                num_ref, suppress_num = _heading_num_ref(
+                    rec, int(role[-1]), heading_num_id, num_ref)
+                on_canonical_num = bool(num_ref[0]) and num_ref[0] == heading_num_id
+                if on_canonical_num:
+                    applied["heading_numbering"] = applied.get("heading_numbering", 0) + 1
             _assign_canonical_style(p, sid, gov, num_ref, overriding_char_styles)
+            if suppress_num:
+                _suppress_auto_numbering(p)
+                applied["heading_num_suppressed"] = applied.get(
+                    "heading_num_suppressed", 0) + 1
             assigned[rec["i"]] = sid
-            if gov.get("ind") and num_ref[0]:
+            # 挂上 canonical 标题编号的段落不进克隆钳：那条定义的级别缩进本来就中和过。
+            if gov.get("ind") and num_ref[0] and not on_canonical_num:
                 clamp_targets.append(p)
     applied["styles_assigned"] = len(assigned)
 

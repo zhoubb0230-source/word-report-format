@@ -425,9 +425,9 @@ def numbering_level_xml(num_fmt, lvl_text, suff=None, ilvl=0):
 def caption_numbering_defs(spec):
     """图/表标题各一条 canonical 自动编号定义。
 
-    返回 [{"kind","marker","lvl_text","lvl_xml"}]（figure 在前）。**静态编号不可取**：
-    插入/删除一张图之后所有后续编号都要重排，而 Word 自动编号自己维护序列；用户阶段2
-    验收明确指出"图/表标题采用了静态编号，这一点不正确"。
+    返回 [{"kind","marker","multi_level_type","lvl_text","lvl_xml"}]（figure 在前）。
+    **静态编号不可取**：插入/删除一张图之后所有后续编号都要重排，而 Word 自动编号自己
+    维护序列；用户阶段2 验收明确指出"图/表标题采用了静态编号，这一点不正确"。
 
     `spec.captions` 为真源：前缀取 `figure_prefixes[0]`/`table_prefixes[0]`，编号格式
     取 `num_fmt`，编号后分隔符取 `suffix`。"""
@@ -443,9 +443,79 @@ def caption_numbering_defs(spec):
             continue
         lvl_text = "%s%%1" % prefixes[0]
         out.append({"kind": kind, "marker": CAPTION_NUM_MARKER[kind],
-                    "lvl_text": lvl_text,
+                    "multi_level_type": "singleLevel", "lvl_text": lvl_text,
                     "lvl_xml": numbering_level_xml(num_fmt, lvl_text, suff)})
     return out
+
+
+# ---------------------------------------------------------------------------
+# 一~四级标题的多级自动编号
+# ---------------------------------------------------------------------------
+HEADING_NUM_MARKER = "FGWHeadingNumbering"
+
+# 每级 (numFmt, lvlText 模板) 的**兜底**值——正常取 `spec.heading_numbering.levels`
+# （判定值只来自 spec），spec 缺这一块时才用这里。**必须与 `checks._heading_token` 的
+# 静态 token 同形**——一、/（一）/1./（1）。文档里两种编号方式（手写在文字里的、Word
+# 自动生成的）常常并存，形状不一致就成了"同一篇文档两套编号规则"。
+HEADING_LEVEL_SHAPES = (
+    ("chineseCounting", "%1、"),
+    ("chineseCounting", "（%2）"),
+    ("decimal", "%3."),
+    ("decimal", "（%4）"),
+)
+
+
+def heading_level_shapes(spec=None):
+    """四级标题编号的 (numFmt, lvlText)，优先取 spec.heading_numbering.levels。"""
+    levels = ((spec or {}).get("heading_numbering") or {}).get("levels") or {}
+    out = []
+    for i, fallback in enumerate(HEADING_LEVEL_SHAPES):
+        entry = levels.get(str(i + 1)) or {}
+        out.append((entry.get("num_fmt") or fallback[0],
+                    entry.get("lvl_text") or fallback[1]))
+    return tuple(out)
+
+
+def heading_numbering_def(spec=None):
+    """canonical 的**四级标题编号**定义（一条 multilevel abstractNum）。
+
+    为什么要自己注入一条、而不是沿用模板里那条并就地修补（2026-07 推翻上一轮做法）：
+
+      * 规范要求标题**逐级重新编号**（二级在其一级下从头数）。Word 的逐级归零只在
+        **同一个列表实例（同一个 numId）内**才成立；而真实模板里一~四级标题经常挂在
+        **各自独立**的编号定义上（LibreOffice/WPS 转换尤其爱这么写），此时二级永远看
+        不到一级出现、只能一路数下去——就是用户实测的"二/三/四级变成全局编号"。这种
+        情况下无论怎么改 `lvlRestart` 都救不回来，唯一的解法是把四级**并进同一条多级
+        列表**。
+      * 级别的 `lvlText` 也是规范值（同 `_heading_token`），沿用模板的话自动编号会渲染
+        成"1.1"这类模板自带形状，与手写序号被改成的"（一）"打架。
+
+    级别里**不写 `lvlRestart`**：省略即 Word 默认的"上一级出现时归零"，正是规范要的
+    逐级重新编号。缩进已中和（left=0、无 hanging），首行缩进由 canonical 标题样式承载。
+
+    编号与标题之间的分隔符跟着**形状**走，与手写序号的渲染规则同源（`_heading_insert_prefix`）：
+    "1." 这类点号结尾的用一个空格（"1. 总体设计"），"一、"/"（一）"这类全角标点结尾的
+    不加（"一、概述"）；两者都不用 Word 默认的制表符——制表符会把标题文字顶到制表位上。"""
+    lvls = "".join(
+        numbering_level_xml(fmt, lvl_text,
+                            suff="space" if lvl_text.endswith(".") else "nothing",
+                            ilvl=i)
+        for i, (fmt, lvl_text) in enumerate(heading_level_shapes(spec)))
+    return {"kind": "heading", "marker": HEADING_NUM_MARKER,
+            "multi_level_type": "multilevel", "lvl_xml": lvls}
+
+
+def injected_numbering_defs(spec):
+    """本工具要注入 numbering.xml 的**全部** canonical 编号定义：图、表、标题。
+
+    统一由 40 的 `_ensure_injected_numbering` 按 `marker` 幂等注入/认领。
+    `spec.heading_numbering.auto_number` 关掉时不注入标题编号定义——此时自动编号的标题
+    保持原样（`_heading_num_ref` 的"spec 没给定义"分支）。"""
+    defs = caption_numbering_defs(spec)
+    if ((spec.get("heading_numbering") or {}).get("auto_number")
+            or "heading_numbering" not in spec):
+        defs = defs + [heading_numbering_def(spec)]
+    return defs
 
 
 def table_ind_xml(spec):

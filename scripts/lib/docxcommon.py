@@ -709,6 +709,92 @@ def order_for(parent):
     return RANKS.get("w:" + local_name(parent))
 
 
+def comment_problems(doc_root, comments_root=None):
+    """批注一致性问题清单（Word 判"发现无法读取的内容"的一类成因）。
+
+    查三样，全是 Word 打开时会当成损坏的：
+      * **悬空引用** —— document.xml 里的 `commentReference` / `commentRangeStart`
+        指向 comments.xml 里没有的 id；
+      * **id 重复** —— 同一个 id 被多个 `commentRangeStart` 用掉，或 comments.xml 里
+        有两条同 id 的批注；
+      * **区间不配对** —— `commentRangeStart` 没有对应的 `commentRangeEnd`（反之亦然）。
+
+    历史成因：批注写入曾**整体覆盖** comments.xml，原文档自带的审阅批注被抹掉、
+    document.xml 里它们的标记变成悬空引用，新批注的 id 还从 0 重排、与残留标记撞车。
+    45 与 diagnose_docx 共用本函数（同一规则只写一份）。"""
+    def _ids(tag):
+        out = []
+        for el in doc_root.iter(qn(tag)):
+            v = el.get(qn("w:id"))
+            if v is not None:
+                out.append(v)
+        return out
+
+    problems = []
+    starts, ends = _ids("w:commentRangeStart"), _ids("w:commentRangeEnd")
+    refs = _ids("w:commentReference")
+    defined = []
+    if comments_root is not None:
+        for c in comments_root.findall(qn("w:comment")):
+            v = c.get(qn("w:id"))
+            if v is not None:
+                defined.append(v)
+
+    dup_defined = sorted({v for v in defined if defined.count(v) > 1})
+    if dup_defined:
+        problems.append({"kind": "duplicate_comment_id", "ids": dup_defined,
+                         "hint": "comments.xml 里有多条同 id 的批注"})
+    dup_starts = sorted({v for v in starts if starts.count(v) > 1})
+    if dup_starts:
+        problems.append({"kind": "duplicate_comment_range", "ids": dup_starts,
+                         "hint": "同一个批注 id 被多个 commentRangeStart 占用"})
+    if comments_root is not None:
+        dangling = sorted(set(refs + starts) - set(defined))
+        if dangling:
+            problems.append({"kind": "dangling_comment_reference", "ids": dangling,
+                             "hint": "document.xml 引用了 comments.xml 里不存在的批注"})
+    unmatched = sorted(set(starts) ^ set(ends))
+    if unmatched:
+        problems.append({"kind": "unbalanced_comment_range", "ids": unmatched,
+                         "hint": "commentRangeStart/End 没有配对"})
+    return problems
+
+
+def numbering_link_problems(numbering_root):
+    """编号定义里"两条 abstractNum 抢同一个身份"的问题清单。
+
+    `w:styleLink`/`w:numStyleLink` 把 abstractNum 与一个**编号样式**绑定，级别上的
+    `w:pStyle` 把该级别与一个**段落样式**绑定——两者都必须唯一。克隆 abstractNum 时若
+    把这些链接一并复制过去，文档里就有两条列表自称同一个编号样式、绑定同一批标题样式，
+    Word 打开时判定需要修复，编号本身也无从预期。"""
+    problems = []
+    for tag, kind in (("w:styleLink", "duplicate_num_style_link"),
+                      ("w:numStyleLink", "duplicate_num_style_link")):
+        seen = {}
+        for anum in numbering_root.findall(qn("w:abstractNum")):
+            el = anum.find(qn(tag))
+            if el is None or not el.get(qn("w:val")):
+                continue
+            seen.setdefault(el.get(qn("w:val")), []).append(
+                anum.get(qn("w:abstractNumId")))
+        for val, owners in seen.items():
+            if len(owners) > 1:
+                problems.append({"kind": kind, "element": tag, "value": val,
+                                 "abstractNumIds": owners})
+    linked = {}
+    for anum in numbering_root.findall(qn("w:abstractNum")):
+        for lvl in anum.findall(qn("w:lvl")):
+            ps = lvl.find(qn("w:pStyle"))
+            if ps is not None and ps.get(qn("w:val")):
+                linked.setdefault(ps.get(qn("w:val")), []).append(
+                    anum.get(qn("w:abstractNumId")))
+    for sid, owners in linked.items():
+        if len(set(owners)) > 1:
+            problems.append({"kind": "duplicate_num_pstyle_link", "styleId": sid,
+                             "abstractNumIds": sorted(set(owners))})
+    return problems
+
+
 def order_violations(root):
     """产物自检：返回 [(容器名, 乱序的子元素名, 它前面那个子元素名)]。
 

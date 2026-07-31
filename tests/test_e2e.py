@@ -457,7 +457,7 @@ class TestLibreOfficeHeadingIndentPipeline(unittest.TestCase):
         self.assertEqual(heading["eff"]["hanging"], 420)
 
     def test_shared_abstractnum_not_mutated(self):
-        """两个共享 numId=1 的标题都被钳：都改指同一新 numId，原 abstractNum 0 不变。"""
+        """两个标题都改指注入的 canonical 标题编号（同一条列表），原 abstractNum 不动。"""
         from lxml import etree
         src = self._build(os.path.join(self.tmp, "lo2.docx"), second_heading=True)
         wd = self._run_pipeline(src)
@@ -468,7 +468,7 @@ class TestLibreOfficeHeadingIndentPipeline(unittest.TestCase):
         h1, h2 = paras[0], paras[1]  # 概述 / 背景
         n1 = h1.find(qn("w:pPr") + "/" + qn("w:numPr") + "/" + qn("w:numId")).get(qn("w:val"))
         n2 = h2.find(qn("w:pPr") + "/" + qn("w:numPr") + "/" + qn("w:numId")).get(qn("w:val"))
-        # 同组共享同一克隆（只克隆一次），且都不是原 numId
+        # 同一条 canonical 多级列表（逐级归零的前提），且都不是原 numId
         self.assertEqual(n1, n2)
         self.assertNotEqual(n1, "1")
 
@@ -476,17 +476,16 @@ class TestLibreOfficeHeadingIndentPipeline(unittest.TestCase):
         abs0 = [a for a in num_root.findall(qn("w:abstractNum"))
                 if a.get(qn("w:abstractNumId")) == "0"][0]
         ind0 = abs0.find(qn("w:lvl") + "/" + qn("w:pPr") + "/" + qn("w:ind"))
-        self.assertEqual(ind0.get(qn("w:hanging")), "420")
-        # 原 abstractNum 0 只被克隆【一次】：两个标题共享一条 abstractNum，就该合成
-        # 一组、共用一个新 numId——分开克隆会把一个多级列表劈成几条独立列表，二/三/
-        # 四级标题的编号从中间重新计数（用户实测的"标题编号顺序出错"）。
-        # 另外两条是图/表标题的编号定义（无条件注入，靠 w:name 认领）。
+        self.assertEqual(ind0.get(qn("w:hanging")), "420",
+                         "共享 abstractNum 被原地改了（#17 回退）")
+        # 标题不再克隆源 abstractNum：注入的三条（图/表/标题编号）＋ 原件那条 = 4，
+        # 其中只有原件那条没有 w:name 标记。
         names = [a.find(qn("w:name")).get(qn("w:val")) if a.find(qn("w:name")) is not None
                  else None for a in num_root.findall(qn("w:abstractNum"))]
         self.assertEqual(sorted(n for n in names if n),
-                         ["FGWCaptionFigure", "FGWCaptionTable"])
-        self.assertEqual(len([n for n in names if n is None]), 2,
-                         "原 abstractNum + 一份克隆 = 2 条（克隆多于一份即分组错了）")
+                         ["FGWCaptionFigure", "FGWCaptionTable", "FGWHeadingNumbering"])
+        self.assertEqual(len([n for n in names if n is None]), 1,
+                         "标题不该再克隆源 abstractNum（编号已改挂 canonical 列表）")
 
 
 @unittest.skipUnless(HAVE_LXML, "lxml not installed")
@@ -971,7 +970,8 @@ class TestCanonicalStyleInjection(unittest.TestCase):
                                             "numbering.xml")).getroot()
             return len(root.findall(self.qn("w:abstractNum")))
         first = n_abs()
-        self.assertEqual(first, 2)
+        # 图编号 + 表编号 + 四级标题编号 = 3 条注入的定义
+        self.assertEqual(first, 3)
         run(self._script("40_apply_fixes.py"), wd)
         self.assertEqual(n_abs(), first)
 
@@ -991,45 +991,114 @@ class TestCanonicalStyleInjection(unittest.TestCase):
             self.assertEqual(order_violations(etree.parse(path).getroot()), [],
                              "%s 元素顺序违反 schema" % part)
 
-    def test_shared_abstractnum_across_numids_stays_one_list(self):
-        """两个 `w:num` 指向同一 `abstractNum`（Word 里极常见）时，克隆钳必须把它们
-        **合成一组、只克隆一次**——共享 abstractNum 就是共享计数器，分开克隆会把一个
-        多级列表劈成几条独立列表，二/三/四级标题编号从中间重新计数（用户实测的
-        "标题编号顺序出错"）。"""
+    def _build_with_existing_comment(self, name="hascomment.docx"):
+        """造一个**原本就带审阅批注**的文档（id=7，故意不是 0）。"""
+        import zipfile
+        ct = _CT_LO.replace(
+            "</Types>",
+            '<Override PartName="/word/comments.xml" ContentType="application/vnd.'
+            'openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>')
+        rels = _DRELS_LO.replace(
+            "</Relationships>",
+            '<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/'
+            'officeDocument/2006/relationships/comments" Target="comments.xml"/>'
+            '</Relationships>')
+        comments = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                    '<w:comments xmlns:w="%s"><w:comment w:id="7" w:author="张三" '
+                    'w:date="2026-01-01T00:00:00Z" w:initials="Z"><w:p><w:r>'
+                    '<w:t>原有的审阅意见</w:t></w:r></w:p></w:comment>'
+                    '</w:comments>' % self.W)
+        doc = helpers.document_xml(
+            '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr>'
+            '<w:commentRangeStart w:id="7"/>'
+            '<w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="32"/></w:rPr>'
+            '<w:t xml:space="preserve">项目概况</w:t></w:r>'
+            '<w:commentRangeEnd w:id="7"/>'
+            '<w:r><w:commentReference w:id="7"/></w:r></w:p>'
+            '<w:p><w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="21"/></w:rPr>'
+            '<w:t xml:space="preserve">正文内容。</w:t></w:r></w:p>')
+        src = os.path.join(self.tmp, name)
+        with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", ct)
+            z.writestr("_rels/.rels", helpers.ROOT_RELS)
+            z.writestr("word/_rels/document.xml.rels", rels)
+            z.writestr("word/document.xml", doc)
+            z.writestr("word/styles.xml", _STYLES_LO)
+            z.writestr("word/numbering.xml", '<w:numbering xmlns:w="%s"/>' % self.W)
+            z.writestr("word/comments.xml", comments)
+        return src
+
+    def test_existing_comments_are_kept_and_ids_do_not_collide(self):
+        """原文档自带的批注必须**保留**，新批注的 id 从已用过的最大值之后接着排。
+
+        覆盖式写 comments.xml 会同时造成两种损坏：原批注被抹掉（那已经是"改原文"），
+        而 document.xml 里它们的 `commentRangeStart/commentReference` 还在 → 悬空引用；
+        新批注又从 id=0 重排 → 与残留标记撞 id。两者都会让 Word 提示"发现无法读取的
+        内容"（用户实测）。"""
+        from lxml import etree
+        sys.path.insert(0, os.path.join(helpers.SCRIPTS, "lib"))
+        from docxcommon import comment_problems
+        wd = self._run_src(self._build_with_existing_comment(), "wbcmt")
+        croot = etree.parse(os.path.join(wd, "out_pkg", "word",
+                                         "comments.xml")).getroot()
+        ids = [c.get(self.qn("w:id")) for c in croot.findall(self.qn("w:comment"))]
+        self.assertIn("7", ids, "原有批注被覆盖掉了（＝改了原文）")
+        authors = {c.get(self.qn("w:author")) for c in croot.findall(self.qn("w:comment"))}
+        self.assertIn("张三", authors)
+        self.assertIn("XAgent", authors, "本工具的批注没写进去")
+        self.assertEqual(len(ids), len(set(ids)), "批注 id 重复")
+        self.assertEqual(comment_problems(self._doc(wd), croot), [])
+        validated = run(self._script("45_validate_output.py"), wd)
+        self.assertTrue(validated["ok"], validated.get("errors"))
+
+    def test_rerun_on_own_output_keeps_comments_consistent(self):
+        """对**已经格式化过的成品**再跑一遍（用户反复验收时必然发生）：上一轮的批注标记
+        还在 document.xml 里，新批注不能与它们撞 id、也不能把上一轮的批注挤掉。"""
+        import shutil
+        from lxml import etree
+        sys.path.insert(0, os.path.join(helpers.SCRIPTS, "lib"))
+        from docxcommon import comment_problems
+        wd1 = self._run_src(self._build_with_existing_comment("rt1.docx"), "wbrt1")
+        again = os.path.join(self.tmp, "rt2.docx")
+        shutil.copy(os.path.join(wd1, "formatted.docx"), again)
+        wd2 = self._run_src(again, "wbrt2")
+        croot = etree.parse(os.path.join(wd2, "out_pkg", "word",
+                                         "comments.xml")).getroot()
+        self.assertEqual(comment_problems(self._doc(wd2), croot), [])
+        validated = run(self._script("45_validate_output.py"), wd2)
+        self.assertTrue(validated["ok"], validated.get("errors"))
+
+    def test_clamp_clone_is_detached_and_reused(self):
+        """正文里的普通自动编号列表仍走克隆钳。克隆必须**摘掉源身份**——两条 abstractNum
+        同时声明自己是 `styleLink` 指向的那个编号样式、或把同一个段落样式绑到自己的级别
+        上，Word 打开时会判定文档需要修复。重跑要认领上一轮的克隆，不能层层克隆。"""
         import zipfile
         from lxml import etree
-        lvls = "".join(
-            '<w:lvl w:ilvl="%d"><w:start w:val="1"/><w:numFmt w:val="decimal"/>'
-            '<w:lvlText w:val="%%%d."/><w:lvlJc w:val="left"/>'
-            '<w:pPr><w:ind w:left="420" w:hanging="420"/></w:pPr></w:lvl>' % (i, i + 1)
-            for i in range(3))
-        numbering = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-                     '<w:numbering xmlns:w="%s"><w:abstractNum w:abstractNumId="0">%s'
-                     '</w:abstractNum>'
-                     '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>'
-                     '<w:num w:numId="2"><w:abstractNumId w:val="0"/></w:num>'
-                     '</w:numbering>' % (self.W, lvls))
+        sys.path.insert(0, os.path.join(helpers.SCRIPTS, "lib"))
+        from docxcommon import numbering_link_problems
+        numbering = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<w:numbering xmlns:w="%s"><w:abstractNum w:abstractNumId="0">'
+            '<w:nsid w:val="11111111"/><w:multiLevelType w:val="multilevel"/>'
+            '<w:tmpl w:val="22222222"/><w:styleLink w:val="ListStyle1"/>'
+            '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/>'
+            '<w:pStyle w:val="ListPara"/><w:lvlText w:val="%%1."/>'
+            '<w:lvlJc w:val="left"/><w:pPr><w:ind w:left="420" w:hanging="420"/>'
+            '</w:pPr></w:lvl></w:abstractNum>'
+            '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>'
+            '</w:numbering>' % self.W)
         styles = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                   '<w:styles xmlns:w="%s">'
                   '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
                   '<w:name w:val="Normal"/></w:style>'
-                  + "".join('<w:style w:type="paragraph" w:styleId="Heading%d">'
-                            '<w:name w:val="heading %d"/><w:pPr>'
-                            '<w:outlineLvl w:val="%d"/></w:pPr></w:style>'
-                            % (i, i, i - 1) for i in (1, 2, 3))
-                  + '</w:styles>') % self.W
-
-        def para(style, text, ilvl, numid):
-            return ('<w:p><w:pPr><w:pStyle w:val="%s"/><w:numPr>'
-                    '<w:ilvl w:val="%d"/><w:numId w:val="%d"/></w:numPr></w:pPr>'
-                    '<w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="32"/></w:rPr>'
-                    '<w:t xml:space="preserve">%s</w:t></w:r></w:p>'
-                    % (style, ilvl, numid, text))
-        # 一级用 numId=1，二/三级用 numId=2 —— 同一 abstractNum
+                  '<w:style w:type="paragraph" w:styleId="ListPara">'
+                  '<w:name w:val="列表段落"/></w:style></w:styles>') % self.W
         doc = helpers.document_xml(
-            para("Heading1", "绪论", 0, 1) + para("Heading2", "研究方法", 1, 2)
-            + para("Heading3", "数据来源", 2, 2))
-        src = os.path.join(self.tmp, "shared.docx")
+            '<w:p><w:pPr><w:pStyle w:val="ListPara"/><w:numPr><w:ilvl w:val="0"/>'
+            '<w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:rPr>'
+            '<w:rFonts w:eastAsia="宋体"/><w:sz w:val="21"/></w:rPr>'
+            '<w:t xml:space="preserve">列表里的一条正文。</w:t></w:r></w:p>')
+        src = os.path.join(self.tmp, "clamp.docx")
         with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr("[Content_Types].xml", _CT_LO)
             z.writestr("_rels/.rels", helpers.ROOT_RELS)
@@ -1037,21 +1106,26 @@ class TestCanonicalStyleInjection(unittest.TestCase):
             z.writestr("word/document.xml", doc)
             z.writestr("word/styles.xml", styles)
             z.writestr("word/numbering.xml", numbering)
-        wd = self._run_src(src, "wbshared")
+        wd = self._run_src(src, "wbclamp")
 
-        paras = list(self._doc(wd).iter(self.qn("w:p")))
-        nids = [p.find(self.qn("w:pPr") + "/" + self.qn("w:numPr") + "/"
-                       + self.qn("w:numId")).get(self.qn("w:val")) for p in paras]
-        self.assertEqual(len(set(nids)), 1,
-                         "共享 abstractNum 的标题被拆到了不同 numId（计数器会分裂）")
-        ilvls = [p.find(self.qn("w:pPr") + "/" + self.qn("w:numPr") + "/"
-                        + self.qn("w:ilvl")).get(self.qn("w:val")) for p in paras]
-        self.assertEqual(ilvls, ["0", "1", "2"], "级别没保持原样")
-        num_root = etree.parse(os.path.join(wd, "out_pkg", "word",
+        def num_root():
+            return etree.parse(os.path.join(wd, "out_pkg", "word",
                                             "numbering.xml")).getroot()
-        unnamed = [a for a in num_root.findall(self.qn("w:abstractNum"))
-                   if a.find(self.qn("w:name")) is None]
-        self.assertEqual(len(unnamed), 2, "原 abstractNum 应只被克隆一次")
+        root = num_root()
+        self.assertEqual(numbering_link_problems(root), [],
+                         "克隆复制了 styleLink / 级别 pStyle → Word 会报文档损坏")
+        clones = [a for a in root.findall(self.qn("w:abstractNum"))
+                  if (a.find(self.qn("w:name")) is not None
+                      and a.find(self.qn("w:name")).get(
+                          self.qn("w:val")).startswith("FGWClampClone"))]
+        self.assertEqual(len(clones), 1, "没有生成克隆（或生成了多份）")
+        self.assertIsNone(clones[0].find(self.qn("w:styleLink")))
+        self.assertIsNone(clones[0].find(self.qn("w:tmpl")))
+        self.assertEqual(clones[0].findall(".//" + self.qn("w:pStyle")), [])
+        n_abs = len(root.findall(self.qn("w:abstractNum")))
+        run(self._script("40_apply_fixes.py"), wd)
+        self.assertEqual(len(num_root().findall(self.qn("w:abstractNum"))), n_abs,
+                         "重跑又克隆了一份（每跑一次 numbering.xml 就长一条）")
 
     def test_caption_number_not_bold_when_text_is_not(self):
         """自动编号的渲染取自**段落标记的 rPr**：原表标题整体加粗时，若不清掉段落标记
@@ -1172,42 +1246,59 @@ class TestCanonicalStyleInjection(unittest.TestCase):
              '<w:pgSz w:w="11906" w:h="16838"/></w:sectPr>' % self.W).encode("utf-8"))
         self.assertEqual(order_violations(sect), [])
 
-    def test_cloned_numbering_restarts_per_level(self):
-        """标题要**逐级重新编号**（二级在其一级下从头数）。模板里常见的
-        `<w:lvlRestart w:val="0"/>` 会关掉这个默认行为，导致二/三/四级变成全文连续
-        编号（用户实测）。克隆时去掉它，恢复层级归零；原 abstractNum 不动。"""
+    def _build_split_level_numbering(self, name, lvl_restart_zero=True,
+                                     one_abstract=False):
+        """造一个"各级标题挂在**各自**编号定义上"的文档（转换产物里极常见）。
+
+        `one_abstract=True` 时四级挂在同一条多级 abstractNum 上（另一种常见写法），
+        `lvl_restart_zero` 控制是否带 `<w:lvlRestart w:val="0"/>`。"""
         import zipfile
-        from lxml import etree
-        lvls = "".join(
-            '<w:lvl w:ilvl="%d"><w:start w:val="1"/><w:numFmt w:val="decimal"/>'
-            '<w:lvlRestart w:val="0"/><w:lvlText w:val="%%%d."/><w:lvlJc w:val="left"/>'
-            '<w:pPr><w:ind w:left="420" w:hanging="420"/></w:pPr></w:lvl>' % (i, i + 1)
-            for i in range(3))
+        restart = '<w:lvlRestart w:val="0"/>' if lvl_restart_zero else ""
+
+        def lvl(ilvl, n):
+            return ('<w:lvl w:ilvl="%d"><w:start w:val="1"/>'
+                    '<w:numFmt w:val="decimal"/>%s<w:lvlText w:val="%%%d."/>'
+                    '<w:lvlJc w:val="left"/><w:pPr>'
+                    '<w:ind w:left="420" w:hanging="420"/></w:pPr></w:lvl>'
+                    % (ilvl, restart, n))
+        if one_abstract:
+            abstracts = ('<w:abstractNum w:abstractNumId="0">%s</w:abstractNum>'
+                         % "".join(lvl(i, i + 1) for i in range(3)))
+            nums = "".join('<w:num w:numId="%d"><w:abstractNumId w:val="0"/></w:num>'
+                           % (i + 1) for i in range(3))
+            para_num = [(0, 1), (1, 2), (2, 3)]
+        else:
+            # 每级一条**独立**的单级列表：二级永远看不到一级出现，Word 无从归零，
+            # 于是二/三级变成全局连续编号——用户实测的那个 bug。
+            abstracts = "".join('<w:abstractNum w:abstractNumId="%d">%s</w:abstractNum>'
+                                % (i, lvl(0, 1)) for i in range(3))
+            nums = "".join('<w:num w:numId="%d"><w:abstractNumId w:val="%d"/></w:num>'
+                           % (i + 1, i) for i in range(3))
+            para_num = [(0, 1), (0, 2), (0, 3)]
         numbering = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-                     '<w:numbering xmlns:w="%s"><w:abstractNum w:abstractNumId="0">%s'
-                     '</w:abstractNum>'
-                     '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>'
-                     '</w:numbering>' % (self.W, lvls))
+                     '<w:numbering xmlns:w="%s">%s%s</w:numbering>'
+                     % (self.W, abstracts, nums))
         styles = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                   '<w:styles xmlns:w="%s">'
                   '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
                   '<w:name w:val="Normal"/></w:style>'
-                  '<w:style w:type="paragraph" w:styleId="Heading1">'
-                  '<w:name w:val="heading 1"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr>'
-                  '</w:style>'
-                  '<w:style w:type="paragraph" w:styleId="Heading2">'
-                  '<w:name w:val="heading 2"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr>'
-                  '</w:style></w:styles>') % self.W
-        doc = helpers.document_xml(
-            '<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:numPr><w:ilvl w:val="0"/>'
-            '<w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:rPr>'
-            '<w:rFonts w:eastAsia="宋体"/><w:sz w:val="32"/></w:rPr>'
-            '<w:t>绪论</w:t></w:r></w:p>'
-            '<w:p><w:pPr><w:pStyle w:val="Heading2"/><w:numPr><w:ilvl w:val="1"/>'
-            '<w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:rPr>'
-            '<w:rFonts w:eastAsia="宋体"/><w:sz w:val="32"/></w:rPr>'
-            '<w:t>研究方法</w:t></w:r></w:p>')
-        src = os.path.join(self.tmp, "restart.docx")
+                  + "".join('<w:style w:type="paragraph" w:styleId="Heading%d">'
+                            '<w:name w:val="heading %d"/><w:pPr>'
+                            '<w:outlineLvl w:val="%d"/></w:pPr></w:style>'
+                            % (i, i, i - 1) for i in (1, 2, 3))
+                  + '</w:styles>') % self.W
+
+        def para(style, text, ilvl, numid):
+            return ('<w:p><w:pPr><w:pStyle w:val="%s"/><w:numPr>'
+                    '<w:ilvl w:val="%d"/><w:numId w:val="%d"/></w:numPr></w:pPr>'
+                    '<w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="32"/></w:rPr>'
+                    '<w:t xml:space="preserve">%s</w:t></w:r></w:p>'
+                    % (style, ilvl, numid, text))
+        texts = ("项目概况", "建设内容", "技术路线")
+        doc = helpers.document_xml("".join(
+            para("Heading%d" % (i + 1), texts[i], para_num[i][0], para_num[i][1])
+            for i in range(3)))
+        src = os.path.join(self.tmp, name)
         with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr("[Content_Types].xml", _CT_LO)
             z.writestr("_rels/.rels", helpers.ROOT_RELS)
@@ -1215,19 +1306,140 @@ class TestCanonicalStyleInjection(unittest.TestCase):
             z.writestr("word/document.xml", doc)
             z.writestr("word/styles.xml", styles)
             z.writestr("word/numbering.xml", numbering)
-        wd = self._run_src(src, "wbrestart")
-        num_root = etree.parse(os.path.join(wd, "out_pkg", "word",
-                                            "numbering.xml")).getroot()
-        by_id = {a.get(self.qn("w:abstractNumId")): a
-                 for a in num_root.findall(self.qn("w:abstractNum"))}
-        self.assertEqual(len(by_id["0"].findall(".//" + self.qn("w:lvlRestart"))), 3,
-                         "原 abstractNum 被原地改了")
-        clones = [a for aid, a in by_id.items()
-                  if aid != "0" and a.find(self.qn("w:name")) is None]
-        self.assertTrue(clones, "没有生成克隆")
-        for c in clones:
-            self.assertEqual(c.findall(".//" + self.qn("w:lvlRestart")), [],
-                             "克隆里仍有 lvlRestart=0 → 编号会全局连续、不逐级归零")
+        return src
+
+    def _heading_num_refs(self, wd):
+        """产物里各标题段落的 (numId, ilvl)。"""
+        out = []
+        for p in self._doc(wd).iter(self.qn("w:p")):
+            st = p.find(self.qn("w:pPr") + "/" + self.qn("w:pStyle"))
+            if st is None or not st.get(self.qn("w:val")).startswith("FGWCanonH"):
+                continue
+            npr = p.find(self.qn("w:pPr") + "/" + self.qn("w:numPr"))
+            nid = npr.find(self.qn("w:numId")) if npr is not None else None
+            ilvl = npr.find(self.qn("w:ilvl")) if npr is not None else None
+            out.append((nid.get(self.qn("w:val")) if nid is not None else None,
+                        ilvl.get(self.qn("w:val")) if ilvl is not None else None))
+        return out
+
+    def _abstract_by_marker(self, wd, marker):
+        from lxml import etree
+        root = etree.parse(os.path.join(wd, "out_pkg", "word",
+                                        "numbering.xml")).getroot()
+        for a in root.findall(self.qn("w:abstractNum")):
+            nm = a.find(self.qn("w:name"))
+            if nm is not None and nm.get(self.qn("w:val")) == marker:
+                return root, a
+        return root, None
+
+    def test_headings_share_one_canonical_multilevel_list(self):
+        """一~四级标题必须落在**同一条**注入的多级列表上，`ilvl` 按级别排。
+
+        Word 的"逐级归零"只在同一个列表实例内成立。模板里各级标题常常挂在**各自独立**
+        的编号定义上，此时二级永远看不到一级出现、只能一路数下去——用户实测的"二/三/
+        四级变成全局编号"。改 `lvlRestart` 救不回来（那是同一条列表内部的开关），唯一的
+        解法是把四级并进同一条 canonical 多级列表。"""
+        for one_abstract in (False, True):
+            src = self._build_split_level_numbering(
+                "split%d.docx" % one_abstract, one_abstract=one_abstract)
+            wd = self._run_src(src, "wbsplit%d" % one_abstract)
+            refs = self._heading_num_refs(wd)
+            self.assertEqual([il for _n, il in refs], ["0", "1", "2"],
+                             "ilvl 应等于标题级别-1")
+            self.assertEqual(len({n for n, _il in refs}), 1,
+                             "各级标题没并进同一条列表 → Word 无法逐级归零")
+            root, canon = self._abstract_by_marker(wd, "FGWHeadingNumbering")
+            self.assertIsNotNone(canon, "没有注入 canonical 标题编号定义")
+            num2abs = {n.get(self.qn("w:numId")):
+                       n.find(self.qn("w:abstractNumId")).get(self.qn("w:val"))
+                       for n in root.findall(self.qn("w:num"))}
+            self.assertEqual(num2abs[refs[0][0]],
+                             canon.get(self.qn("w:abstractNumId")))
+            # canonical 定义本身：四级齐全、**不带 lvlRestart**（省略＝Word 默认的
+            # 逐级归零），缩进已中和
+            lvls = canon.findall(self.qn("w:lvl"))
+            self.assertEqual([l.get(self.qn("w:ilvl")) for l in lvls],
+                             ["0", "1", "2", "3"])
+            self.assertEqual(canon.findall(".//" + self.qn("w:lvlRestart")), [],
+                             "canonical 标题编号不该带 lvlRestart（会关掉逐级归零）")
+            for l in lvls:
+                ind = l.find(self.qn("w:pPr") + "/" + self.qn("w:ind"))
+                self.assertEqual(ind.get(self.qn("w:left")), "0")
+                self.assertIsNone(ind.get(self.qn("w:hanging")))
+
+    def test_canonical_heading_numbering_matches_static_tokens(self):
+        """自动编号的 lvlText 必须与手写序号被改成的 token 同形（一、/（一）/1./（1）），
+        否则同一篇文档里两种编号并存、看起来像两套规则。"""
+        sys.path.insert(0, os.path.join(helpers.SCRIPTS, "lib"))
+        import canonstyles
+        from checks import _heading_token
+        for i, (fmt, lvl_text) in enumerate(
+                canonstyles.heading_level_shapes(self.spec)):
+            level = i + 1
+            numeral = "一" if fmt == "chineseCounting" else "1"
+            # 静态 token 里的"第 1 号"换成 Word 的 %N 占位符，就该等于 lvlText
+            expected = _heading_token(level, 1).replace(numeral, "%%%d" % level, 1)
+            self.assertEqual(lvl_text, expected,
+                             "%d 级自动编号与手写序号形状不一致" % level)
+
+    def test_unnumbered_section_heading_loses_auto_number(self):
+        """惯例不编号的章节（结论/前言/参考文献…）即便挂着自动编号，也要取消——判定层
+        本就不给它们发号、不让它们占同级序号，编号层照发就成了"三、结论"，后面的同级
+        标题还全被顶掉一位。"""
+        src = self._build_split_level_numbering("unnum.docx", one_abstract=True)
+        # 把三级标题的文字换成"结论"（Heading3 → 惯例不编号）
+        import zipfile
+        import shutil
+        patched = os.path.join(self.tmp, "unnum2.docx")
+        shutil.copy(src, patched)
+        with zipfile.ZipFile(src) as zin:
+            items = {n: zin.read(n) for n in zin.namelist()}
+        items["word/document.xml"] = items["word/document.xml"].replace(
+            "技术路线".encode("utf-8"), "结论".encode("utf-8"))
+        with zipfile.ZipFile(patched, "w", zipfile.ZIP_DEFLATED) as zout:
+            for n, data in items.items():
+                zout.writestr(n, data)
+        wd = self._run_src(patched, "wbunnum")
+        refs = self._heading_num_refs(wd)
+        self.assertEqual(refs[2][0], "0",
+                         "惯例不编号章节仍带自动编号（会渲染出“1.结论”并顶掉同级序号）")
+
+    def test_typed_ordinal_wins_over_auto_number(self):
+        """序号已经写在文字里的标题，自动编号必须取消——否则 `renumber_heading` 把文字
+        里的序号归位后，Word 再生成一个，渲染成"一、一、绪论"（历史实测）。"""
+        import zipfile
+        numbering = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                     '<w:numbering xmlns:w="%s"><w:abstractNum w:abstractNumId="0">'
+                     '<w:lvl w:ilvl="0"><w:start w:val="1"/>'
+                     '<w:numFmt w:val="decimal"/><w:lvlText w:val="%%1."/>'
+                     '<w:lvlJc w:val="left"/></w:lvl></w:abstractNum>'
+                     '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>'
+                     '</w:numbering>' % self.W)
+        styles = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                  '<w:styles xmlns:w="%s">'
+                  '<w:style w:type="paragraph" w:default="1" w:styleId="Normal">'
+                  '<w:name w:val="Normal"/></w:style>'
+                  '<w:style w:type="paragraph" w:styleId="Heading1">'
+                  '<w:name w:val="heading 1"/><w:pPr><w:outlineLvl w:val="0"/>'
+                  '</w:pPr></w:style></w:styles>') % self.W
+        doc = helpers.document_xml(
+            '<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:numPr><w:ilvl w:val="0"/>'
+            '<w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:rPr>'
+            '<w:rFonts w:eastAsia="宋体"/><w:sz w:val="32"/></w:rPr>'
+            '<w:t xml:space="preserve">3、项目概况</w:t></w:r></w:p>')
+        src = os.path.join(self.tmp, "typed.docx")
+        with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", _CT_LO)
+            z.writestr("_rels/.rels", helpers.ROOT_RELS)
+            z.writestr("word/_rels/document.xml.rels", _DRELS_LO)
+            z.writestr("word/document.xml", doc)
+            z.writestr("word/styles.xml", styles)
+            z.writestr("word/numbering.xml", numbering)
+        wd = self._run_src(src, "wbtyped")
+        self.assertEqual(self._heading_num_refs(wd)[0][0], "0",
+                         "文字里已有序号的标题还留着自动编号 → 会渲染成“一、一、…”")
+        text = "".join(t.text or "" for t in self._doc(wd).iter(self.qn("w:t")))
+        self.assertTrue(text.startswith("一、"), text)
 
     def test_injected_style_name_collision_is_avoided(self):
         """Word 要求样式名唯一，重名会让它提示"发现无法读取的内容"。文档里已存在同名
@@ -1297,6 +1509,63 @@ class TestCanonicalStyleInjection(unittest.TestCase):
             self.qn("w:val")), "FGWCanonH1")
         numid = p.find(self.qn("w:pPr") + "/" + self.qn("w:numPr") + "/" + self.qn("w:numId"))
         self.assertIsNotNone(numid, "指派样式后编号丢了（自动编号消失＝改了原文）")
+
+
+@unittest.skipUnless(HAVE_LXML, "lxml not installed")
+class TestStructuralDetectors(unittest.TestCase):
+    """`docxcommon` 里两个"良构但 Word 拒绝打开"的探测器本身要真的探得到——
+    45 与 diagnose_docx 都靠它们，一个永远返回空列表的检查器比没有还糟。"""
+
+    W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(helpers.SCRIPTS, "lib"))
+
+    def _el(self, xml):
+        from lxml import etree
+        return etree.fromstring(xml.encode("utf-8"))
+
+    def test_comment_problems_detects_dangling_and_duplicate(self):
+        from docxcommon import comment_problems
+        doc = self._el(
+            '<w:document xmlns:w="%s"><w:body>'
+            '<w:p><w:commentRangeStart w:id="0"/><w:commentRangeEnd w:id="0"/>'
+            '<w:r><w:commentReference w:id="0"/></w:r></w:p>'
+            '<w:p><w:commentRangeStart w:id="0"/><w:commentRangeEnd w:id="0"/>'
+            '<w:r><w:commentReference w:id="9"/></w:r></w:p>'
+            '</w:body></w:document>' % self.W)
+        comments = self._el('<w:comments xmlns:w="%s"><w:comment w:id="0"/>'
+                            '</w:comments>' % self.W)
+        kinds = {p["kind"] for p in comment_problems(doc, comments)}
+        self.assertIn("duplicate_comment_range", kinds)
+        self.assertIn("dangling_comment_reference", kinds)
+        # 干净的文档不该被误报
+        ok_doc = self._el(
+            '<w:document xmlns:w="%s"><w:body>'
+            '<w:p><w:commentRangeStart w:id="0"/><w:commentRangeEnd w:id="0"/>'
+            '<w:r><w:commentReference w:id="0"/></w:r></w:p>'
+            '</w:body></w:document>' % self.W)
+        self.assertEqual(comment_problems(ok_doc, comments), [])
+
+    def test_numbering_link_problems_detects_duplicate_identity(self):
+        from docxcommon import numbering_link_problems
+        num = self._el(
+            '<w:numbering xmlns:w="%s">'
+            '<w:abstractNum w:abstractNumId="0"><w:styleLink w:val="L1"/>'
+            '<w:lvl w:ilvl="0"><w:pStyle w:val="Heading1"/></w:lvl></w:abstractNum>'
+            '<w:abstractNum w:abstractNumId="1"><w:styleLink w:val="L1"/>'
+            '<w:lvl w:ilvl="0"><w:pStyle w:val="Heading1"/></w:lvl></w:abstractNum>'
+            '</w:numbering>' % self.W)
+        kinds = {p["kind"] for p in numbering_link_problems(num)}
+        self.assertEqual(kinds, {"duplicate_num_style_link",
+                                 "duplicate_num_pstyle_link"})
+        clean = self._el(
+            '<w:numbering xmlns:w="%s">'
+            '<w:abstractNum w:abstractNumId="0"><w:styleLink w:val="L1"/>'
+            '<w:lvl w:ilvl="0"><w:pStyle w:val="Heading1"/></w:lvl></w:abstractNum>'
+            '<w:abstractNum w:abstractNumId="1">'
+            '<w:lvl w:ilvl="0"/></w:abstractNum></w:numbering>' % self.W)
+        self.assertEqual(numbering_link_problems(clean), [])
 
 
 if __name__ == "__main__":

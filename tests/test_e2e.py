@@ -1160,21 +1160,24 @@ class TestCanonicalStyleInjection(unittest.TestCase):
         self.assertEqual(texts[0], "一、绪论")
         self.assertEqual(texts[1], "系统架构")
 
-    def test_blank_lines_outside_cover_get_body_style(self):
-        """新增规范：封面外的空行统一套正文样式（仿宋三号）。
+    def test_blank_lines_get_body_style_including_cover(self):
+        """空行统一套正文样式（仿宋三号），**封面也不例外**。
 
         不这么做的话空行跟随 Normal——而 Normal 已被钉成五号（文档网格的前提），
-        空行会莫名变矮、与正文行距不一致。封面空行属版式留白，不在规则内。"""
+        空行会莫名变矮、与正文行距不一致。封面空行一度作为"版式留白"排除在外，
+        2026-08 第六轮验收由用户推翻（"封面的空行也应用正文的样式"），代价是封面留白
+        变成正文行距 28 磅、整体变高——知情裁决，别以"封面是版式"为由改回去。"""
         body = (helpers.para("先进项目2024年度自评价报告", east_asia="宋体",
                              size_hp=44, jc="center")
-                + '<w:p/>'                       # 封面空行：不动
+                + '<w:p/>'                       # 封面空行：也套正文样式
                 + helpers.para("一、绪论", east_asia="宋体", size_hp=32, outline=0)
                 + '<w:p/>'                       # 正文区空行：套正文样式
                 + helpers.para("正文内容。", east_asia="宋体", size_hp=32))
         wd, _ = self._run(body)
         paras = list(self._doc(wd).iter(self.qn("w:p")))
         cover_blank = paras[1].find(self.qn("w:pPr") + "/" + self.qn("w:pStyle"))
-        self.assertIsNone(cover_blank, "封面空行不该被指派样式")
+        self.assertIsNotNone(cover_blank, "封面空行也应套正文样式（用户第六轮裁决）")
+        self.assertEqual(cover_blank.get(self.qn("w:val")), "FGWCanonBody")
         body_blank = paras[3].find(self.qn("w:pPr") + "/" + self.qn("w:pStyle"))
         self.assertIsNotNone(body_blank, "正文区空行应套正文样式")
         self.assertEqual(body_blank.get(self.qn("w:val")), "FGWCanonBody")

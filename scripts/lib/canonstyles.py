@@ -405,21 +405,40 @@ def settings_children_xml(spec):
 CAPTION_NUM_MARKER = {"figure": "FGWCaptionFigure", "table": "FGWCaptionTable"}
 
 
-def numbering_level_xml(num_fmt, lvl_text, suff=None, ilvl=0):
+def numbering_level_xml(num_fmt, lvl_text, suff=None, ilvl=0,
+                        east_asia=None, western=None):
     """一个编号级别，**缩进已中和**（left=0、无 hanging）。
 
     中和是必须的：编号层在 cascade 里压过样式层，级别自带的 hanging 会把 canonical
     样式的缩进盖掉（陷阱 #11）。`suff` 控编号与文字之间的分隔符——图/表标题要
     `tab`（编号后一个制表符），Word 的默认值也是 tab，这里显式写出来免得依赖默认。
 
+    ``east_asia`` / ``western`` 给这一级的**序号本身**指定字体（写成级别的 `w:rPr`，
+    等价于 Word「定义多级列表 → 字体」里设的那一套）。不写就没有 rPr，序号跟随段落
+    标记 → 段落样式；写了则序号严格按这里渲染，**与标题文字的字体解耦**——规范里
+    "一级序号黑体、二级半角括号 Times New Roman、四级序号仿宋"就靠它表达。
+    **只写 rFonts**：字号/加粗仍旧继承标题样式，免得序号与标题文字一粗一细（#13/#19）。
+
     **子元素顺序必须照 CT_Lvl 的 sequence**：start → numFmt → lvlRestart → pStyle →
-    isLgl → **suff** → lvlText → … 。把 `suff` 写到 `numFmt` 前面文件依然良构、45 的
-    XML 检查也过，但**真实 Word 直接拒绝打开**（"发现无法读取的内容"）——踩过一次。"""
+    isLgl → **suff** → lvlText → … → pPr → **rPr**。把 `suff` 写到 `numFmt` 前面文件
+    依然良构、45 的 XML 检查也过，但**真实 Word 直接拒绝打开**（"发现无法读取的内容"）
+    ——踩过一次。`rPr` 同理，必须排在 `pPr` **之后**。"""
     suff_el = ('<w:suff w:val="%s"/>' % _esc(suff)) if suff else ""
+    rpr_el = ""
+    if east_asia or western:
+        # 只写给了值的那一半：没给中文字体就别拿西文字体去填 eastAsia（缺省属性会
+        # 正常继承段落标记/样式，硬填反而把中文序号拽成西文字体）。
+        attrs = []
+        if western:
+            attrs.append('w:ascii="%s" w:hAnsi="%s" w:cs="%s"'
+                         % (_esc(western), _esc(western), _esc(western)))
+        if east_asia:
+            attrs.append('w:eastAsia="%s"' % _esc(east_asia))
+        rpr_el = '<w:rPr><w:rFonts %s/></w:rPr>' % " ".join(attrs)
     return ('<w:lvl w:ilvl="%d"><w:start w:val="1"/><w:numFmt w:val="%s"/>%s'
             '<w:lvlText w:val="%s"/><w:lvlJc w:val="left"/>'
-            '<w:pPr><w:ind w:left="0" w:leftChars="0"/></w:pPr></w:lvl>'
-            % (ilvl, _esc(num_fmt), suff_el, _esc(lvl_text)))
+            '<w:pPr><w:ind w:left="0" w:leftChars="0"/></w:pPr>%s</w:lvl>'
+            % (ilvl, _esc(num_fmt), suff_el, _esc(lvl_text), rpr_el))
 
 
 def caption_numbering_defs(spec):
@@ -455,11 +474,13 @@ HEADING_NUM_MARKER = "FGWHeadingNumbering"
 
 # 每级 (numFmt, lvlText 模板) 的**兜底**值——正常取 `spec.heading_numbering.levels`
 # （判定值只来自 spec），spec 缺这一块时才用这里。**必须与 `checks._heading_token` 的
-# 静态 token 同形**——一、/（一）/1./（1）。文档里两种编号方式（手写在文字里的、Word
+# 静态 token 同形**——一、/(一)/1./（1）。文档里两种编号方式（手写在文字里的、Word
 # 自动生成的）常常并存，形状不一致就成了"同一篇文档两套编号规则"。
+# 二级用**半角括号** `(一)`：用户第六轮验收明确要求"二级标题前后的括号是英文括号"，
+# 阶段0 的参考件本来也是半角（全角括号更宽，在目录里会越过左制表位）。
 HEADING_LEVEL_SHAPES = (
     ("chineseCounting", "%1、"),
-    ("chineseCounting", "（%2）"),
+    ("chineseCounting", "(%2)"),
     ("decimal", "%3."),
     ("decimal", "（%4）"),
 )
@@ -473,6 +494,31 @@ def heading_level_shapes(spec=None):
         entry = levels.get(str(i + 1)) or {}
         out.append((entry.get("num_fmt") or fallback[0],
                     entry.get("lvl_text") or fallback[1]))
+    return tuple(out)
+
+
+def heading_level_fonts(spec=None):
+    """四级标题**序号自身**的 (中文字体, 西文字体)，取自 `heading_numbering.levels`。
+
+    序号的字体不能一律跟着标题样式走（那是 2026-08 第六轮验收报的三个问题）：
+
+      * 一级 `一、` 是中文，要与标题文字同为**黑体**——标题样式本身是黑体，但西文位
+        走的是 Times，序号里万一出现西文就会不一致，故两边都钉成黑体；
+      * 二级 `(一)` 的**半角括号是西文字符**，要求走 **Times New Roman**，而括号里的
+        中文数字仍是标题的楷体——一个 rFonts 正好分别管 ascii/hAnsi 与 eastAsia；
+      * 四级 `（1）` 的数字与全角括号**整体用仿宋**（不走 Times）。
+
+    spec 没给某一级时的兜底：中文＝该级标题的 `east_asia`（"序号与标题内容同字体"的
+    默认语义），西文＝`spec.western_font`。"""
+    spec = spec or {}
+    levels = (spec.get("heading_numbering") or {}).get("levels") or {}
+    headings = spec.get("headings") or {}
+    western_default = spec.get("western_font") or "Times New Roman"
+    out = []
+    for lvl in ("1", "2", "3", "4"):
+        entry = levels.get(lvl) or {}
+        ea = entry.get("east_asia") or (headings.get(lvl) or {}).get("east_asia")
+        out.append((ea, entry.get("western") or western_default))
     return tuple(out)
 
 
@@ -498,10 +544,16 @@ def heading_numbering_def(spec=None):
     落点由 settings 的 `defaultTabStop`(2字符) 决定。**别改成 `nothing`/`space`**——
     2026-07 曾按"与手写序号同形"的直觉改成不加分隔符，用户当轮就报"标题序号后的制表符
     没有了"。手写序号那条路径（`_heading_insert_prefix`）是纯文本、没有制表位可用，
-    与这里不是一回事，不要互相看齐。"""
+    与这里不是一回事，不要互相看齐。
+
+    **每级带自己的 `rPr`（序号字体）**：见 `heading_level_fonts`——序号跟着段落标记走
+    的话，一级序号会是 Times 的西文位、二级的半角括号也是标题的楷体，正是用户第六轮
+    报的问题。只钉字体，字号/加粗仍继承标题样式。"""
     suff = ((spec or {}).get("heading_numbering") or {}).get("suffix") or "tab"
+    fonts = heading_level_fonts(spec)
     lvls = "".join(
-        numbering_level_xml(fmt, lvl_text, suff=suff, ilvl=i)
+        numbering_level_xml(fmt, lvl_text, suff=suff, ilvl=i,
+                            east_asia=fonts[i][0], western=fonts[i][1])
         for i, (fmt, lvl_text) in enumerate(heading_level_shapes(spec)))
     return {"kind": "heading", "marker": HEADING_NUM_MARKER,
             "multi_level_type": "multilevel", "lvl_xml": lvls}

@@ -1294,12 +1294,17 @@ def _blank_style(rec):
     网格的前提，陷阱 #12），空行会莫名其妙变矮、和正文行距不一致。用户因此要求
     "封面外的空行统一应用正文样式"。
 
-    三处例外：① **封面**空行属版式留白，用户明确划在规则之外；② **目录区**空行可能
-    在 TOC 域跨度内，动它有破坏域的风险；③ 表格里的空行跟随单元格内容的表格样式，
-    与同格文字保持一致更合理。（图片/文本框段落由 `_is_object_only` 更早滤掉。）"""
+    三处例外：① **封面**空行属版式留白，用户明确划在规则之外；② 落在 **TOC 域/目录
+    内容控件跨度内**的空行，动它有破坏域的风险；③ 表格里的空行跟随单元格内容的表格
+    样式，与同格文字保持一致更合理。（图片/文本框段落由 `_is_object_only` 更早滤掉。）
+
+    例外②只认**域跨度**（`toc_in_field`），不认"套着目录样式"：目录后面紧跟的那几个
+    空行往往顺手继承了 `TOC3`/`Contents 3` 样式，它们并不在域里、刷新目录不会碰它们，
+    却因为旧的 `is_toc` 判据被一起放过——用户第六轮报的"空行没有应用正文样式"就是这类
+    （旧结构 json 没有 `toc_in_field` 字段时回退到 `is_toc`，保持旧行为）。"""
     if not rec.get("is_blank"):
         return None
-    if rec.get("region") == "cover" or rec.get("is_toc"):
+    if rec.get("region") == "cover" or rec.get("toc_in_field", rec.get("is_toc")):
         return None
     return STYLE_ID_BY_ROLE["table_body" if rec.get("in_table") else "body"]
 

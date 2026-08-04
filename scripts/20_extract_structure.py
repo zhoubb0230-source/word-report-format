@@ -333,8 +333,12 @@ def main():
         auto_num = bool(num_id and num_id != "0")
 
         is_blank = not text.strip()
-        is_toc = (style_is_toc(sid, resolver) or has_toc_field(p)
-                  or in_toc_sdt(p) or (i in toc_span))
+        # 段落是否落在**目录域/目录内容控件的跨度内**——即"Word 刷新目录时会重写它"。
+        # 这比 is_toc 严格：is_toc 还包含"只是套着目录样式"的段落，而目录后面那几个
+        # 顺手继承了目录样式的空行并不在域里，动它们没有破坏域的风险（见 40 的
+        # `_blank_style`：空行套正文样式的例外只认这一项，不认样式）。
+        toc_in_field = has_toc_field(p) or in_toc_sdt(p) or (i in toc_span)
+        is_toc = style_is_toc(sid, resolver) or toc_in_field
         is_toctitle = bool(RE_TOCTITLE.match(text))
         toc_level = toc_level_from_style(sid, resolver) if (is_toc and not is_toctitle) else None
 
@@ -390,6 +394,8 @@ def main():
             "text_len": len(text),
             "is_blank": is_blank,
             "is_toc": is_toc or is_toctitle,
+            # 在真正的目录域/内容控件跨度内（刷新目录会重写它）——空行样式的唯一目录例外
+            "toc_in_field": toc_in_field,
             "toc_level": toc_level,
             "auto_num": auto_num,
             "is_title": False,     # set by _mark_title_block() after region tagging

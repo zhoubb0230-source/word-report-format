@@ -878,10 +878,14 @@ def _caption_fix(r, kind, new_num, old_num, insert=False):
 
 
 def _heading_token(level, n):
+    """手写在文字里的序号被规范成的 token。**必须与 canonical 自动编号的 lvlText
+    同形**（`canonstyles.HEADING_LEVEL_SHAPES`，由 tests 锁住）——同一篇文档里两种编号
+    方式常常并存，形状不一致就成了两套规则。二级用**半角括号** `(一)`：用户第六轮验收
+    要求"二级标题前后的括号是英文括号"（半角括号还会自动走西文字体 Times New Roman）。"""
     if level == 1:
         return int2cn(n) + "、"
     if level == 2:
-        return "（" + int2cn(n) + "）"
+        return "(" + int2cn(n) + ")"
     if level == 3:
         return "%d." % n
     if level == 4:

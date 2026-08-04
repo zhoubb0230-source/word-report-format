@@ -13,8 +13,10 @@
   1. 每个角色的字体/字号/居中/行距是否与规范一致（每段前有【角色·规范】标签）；一~四级标题**加粗**。
   2. **首行缩进显示为"2 字符"而非厘米**——选中正文/标题段，看"段落→缩进→首行缩进 2 字符"，
      不是 0.74cm/0.85cm 之类。这是严格-spec §2.2 的关键判据（canonical 只写字符单位、无绝对伴随值）。
-  3. **自动编号标题**（一~四级都自动编号："一、/（一）/1./（1）"）：首行是 2 字符缩进、不是 -0.74cm
+  3. **自动编号标题**（一~四级都自动编号："一、/(一)/1./（1）"）：首行是 2 字符缩进、不是 -0.74cm
      悬挂缩进——验证甲法克隆钳。编号后的制表位位置留待用户确认（当前不设 defaultTabStop）。
+     **序号字体**：一级黑体、二级的半角括号是 Times New Roman（括号里的中文数字是楷体）、
+     四级整个"（1）"是仿宋——点在序号上看 Word 的字体框。
   4. **目录**：为真正的 TOC 域，打开即显示正确缓存条目（编号+制表符+标题+点线+页码）——制表位、
      半角编号、右点线位置(8664)全部照规范文档 XML；点线应在标题与页码之间、页码右对齐不换行。
      （一级目录只有左制表位、无页码点线，与规范文档一致。）
@@ -64,22 +66,17 @@ def build_styles(spec):
 
 def build_numbering(spec):
     """三条 canonical 编号定义（级别缩进全部中和，甲法目标形态）：
-      * abstractNum 0 / numId 1 —— 多级标题：一、/(一)/1./(1)，suff=tab（编号后制表符）。
+      * abstractNum 0 / numId 1 —— 多级标题：一、/(一)/1./（1），suff=tab（编号后制表符），
+        每级带自己的序号字体（一级黑体、二级半角括号走 Times、四级仿宋）。
       * abstractNum 1 / numId 2 —— 图标题：图%%1，decimal，suff=tab。
       * abstractNum 2 / numId 3 —— 表标题：表%%1，decimal，suff=tab。
 
-    图/表两条**直接取自 `canonstyles.caption_numbering_defs`**——`40_apply_fixes.py` 往
-    真实文档里注入的是同一份字符串，参考件与流水线不会各写一套（漂移是这个项目最容易
-    犯的错）。自动编号后"图1"是一个整体（不能拆选），编号后是制表符。"""
-    # 编号用【半角括号 (一)】而非全角（一）——规范文档如此；全角括号更宽，会越过目录左
-    # 制表位、把点线挤到编号与标题之间（用户 v4 实测的乱象根因）。
-    lvl = canonstyles.numbering_level_xml
-    headings = "".join([
-        lvl("chineseCounting", "%1、", "tab", 0),
-        lvl("chineseCounting", "(%2)", "tab", 1),
-        lvl("decimal", "%3.", "tab", 2),
-        lvl("decimal", "(%4)", "tab", 3),
-    ])
+    三条**全部直接取自 `canonstyles`**（标题 `heading_numbering_def`、图表
+    `caption_numbering_defs`）——`40_apply_fixes.py` 往真实文档里注入的是同一份字符串，
+    参考件与流水线不会各写一套。标题那条曾经在这里手写过一遍，结果两边的括号形状
+    （半角 vs 全角）就漂了，用户当轮报"二级标题的括号不是英文括号"；漂移是这个项目最
+    容易犯的错，别再把它抄回来。自动编号后"图1"是一个整体（不能拆选），编号后是制表符。"""
+    headings = canonstyles.heading_numbering_def(spec)["lvl_xml"]
     caps = {d["kind"]: d["lvl_xml"] for d in canonstyles.caption_numbering_defs(spec)}
     return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             '<w:numbering xmlns:w="%s">'

@@ -1179,6 +1179,39 @@ class TestCanonicalStyleInjection(unittest.TestCase):
         self.assertIsNotNone(body_blank, "正文区空行应套正文样式")
         self.assertEqual(body_blank.get(self.qn("w:val")), "FGWCanonBody")
 
+    def test_blank_after_toc_field_gets_body_style(self):
+        """目录**域跨度之外**、只是顺手继承了目录样式的空行照样套正文样式。
+
+        用户第六轮报"空行没有应用正文样式"：目录后面那几个空行往往带着 `TOC1`/
+        `Contents 3` 样式，旧判据只看 `is_toc`（含"套着目录样式"）就把它们一起放过了。
+        真正需要保护的只有**落在 TOC 域/内容控件跨度内**的段落（刷新目录会重写它们），
+        那一类仍旧不动。"""
+        toc = ('<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>'
+               '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+               '<w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" \\h </w:instrText></w:r>'
+               '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+               '<w:r><w:t>一、绪论\t1</w:t></w:r></w:p>'
+               # 域跨度**内**的空行：不动
+               '<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr></w:p>'
+               '<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>'
+               '<w:r><w:t>二、方法\t2</w:t></w:r>'
+               '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>')
+        body = (helpers.para("先进项目2024年度自评价报告", east_asia="宋体",
+                             size_hp=44, jc="center")
+                + toc
+                # 域跨度**外**、但继承了目录样式的空行：应套正文样式
+                + '<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr></w:p>'
+                + helpers.para("一、绪论", east_asia="宋体", size_hp=32, outline=0)
+                + helpers.para("正文内容。", east_asia="宋体", size_hp=32))
+        wd, _ = self._run(body)
+        paras = list(self._doc(wd).iter(self.qn("w:p")))
+        in_field = paras[2].find(self.qn("w:pPr") + "/" + self.qn("w:pStyle"))
+        self.assertEqual(in_field.get(self.qn("w:val")), "TOC1",
+                         "目录域跨度内的空行不该被动（刷新域会重写它）")
+        after = paras[4].find(self.qn("w:pPr") + "/" + self.qn("w:pStyle"))
+        self.assertEqual(after.get(self.qn("w:val")), "FGWCanonBody",
+                         "目录域外的空行应套正文样式")
+
     _IMAGE_P = ('<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats'
                 '.org/drawingml/2006/wordprocessingDrawing"><wp:extent cx="5000000" '
                 'cy="3000000"/></wp:inline></w:drawing></w:r></w:p>')
@@ -1372,8 +1405,60 @@ class TestCanonicalStyleInjection(unittest.TestCase):
                 self.assertIsNotNone(suff, "缺 w:suff（Word 默认虽是 tab，但要显式写）")
                 self.assertEqual(suff.get(self.qn("w:val")), "tab")
 
+    def test_heading_numbering_levels_carry_their_own_fonts(self):
+        """每级序号的字体钉在**级别的 rPr** 上（Word「定义多级列表→字体」的落点）。
+
+        第六轮验收：① 一级序号要与标题文字同为黑体；② 二级的**半角括号**要走
+        Times New Roman（括号里的中文数字仍是楷体）；③ 四级序号整体是仿宋。序号跟着
+        段落标记继承的话，西文位一律是 Times，②的中文位和③就都不对。只钉 rFonts——
+        字号/加粗继续跟随标题样式，否则又会出现"序号与标题一粗一细"（#13/#19）。"""
+        src = self._build_split_level_numbering("numfont.docx", one_abstract=True)
+        wd = self._run_src(src, "wbnumfont")
+        _root, canon = self._abstract_by_marker(wd, "FGWHeadingNumbering")
+        self.assertIsNotNone(canon)
+        want = {  # ilvl -> (ascii/hAnsi, eastAsia)
+            "0": ("黑体", "黑体"),
+            "1": ("Times New Roman", "楷体"),
+            "2": ("Times New Roman", "仿宋"),
+            "3": ("仿宋", "仿宋"),
+        }
+        for l in canon.findall(self.qn("w:lvl")):
+            rpr = l.find(self.qn("w:rPr"))
+            self.assertIsNotNone(rpr, "级别缺 rPr → 序号字体又跟着段落标记走了")
+            rf = rpr.find(self.qn("w:rFonts"))
+            latin, ea = want[l.get(self.qn("w:ilvl"))]
+            self.assertEqual(rf.get(self.qn("w:ascii")), latin)
+            self.assertEqual(rf.get(self.qn("w:hAnsi")), latin)
+            self.assertEqual(rf.get(self.qn("w:eastAsia")), ea)
+            # 字号/加粗不写进级别：让序号继续跟随标题样式
+            self.assertIsNone(rpr.find(self.qn("w:sz")))
+            self.assertIsNone(rpr.find(self.qn("w:b")))
+            # CT_Lvl 的 sequence 是 … pPr → rPr，顺序反了 Word 会拒绝打开
+            from lxml import etree
+            kids = [etree.QName(k).localname for k in l]
+            self.assertLess(kids.index("pPr"), kids.index("rPr"))
+
+    def test_level2_numbering_uses_halfwidth_parens(self):
+        """二级序号用**半角括号** `(一)`（用户第六轮："二级标题前后的括号要英文括号"）。
+
+        半角括号是西文字符，因此自动走级别 rPr 里的 Times New Roman；手写在文字里的
+        序号同样被规范成半角，两条路径形状一致（另有 test 锁住"同形"）。"""
+        sys.path.insert(0, os.path.join(helpers.SCRIPTS, "lib"))
+        import canonstyles
+        from checks import _heading_token
+        self.assertEqual(_heading_token(2, 3), "(三)")
+        self.assertEqual(canonstyles.heading_level_shapes(self.spec)[1][1], "(%2)")
+
+    def test_reference_generator_shares_the_canonical_numbering(self):
+        """人肉验收参考件与流水线用**同一份**标题编号定义（曾经各写一遍就漂了括号形状）。"""
+        sys.path.insert(0, os.path.join(helpers.SCRIPTS, "lib"))
+        import canonstyles
+        mkref = helpers.load_script("make_canonical_reference.py")
+        self.assertIn(canonstyles.heading_numbering_def(self.spec)["lvl_xml"],
+                      mkref.build_numbering(self.spec))
+
     def test_canonical_heading_numbering_matches_static_tokens(self):
-        """自动编号的 lvlText 必须与手写序号被改成的 token 同形（一、/（一）/1./（1）），
+        """自动编号的 lvlText 必须与手写序号被改成的 token 同形（一、/(一)/1./（1）），
         否则同一篇文档里两种编号并存、看起来像两套规则。"""
         sys.path.insert(0, os.path.join(helpers.SCRIPTS, "lib"))
         import canonstyles

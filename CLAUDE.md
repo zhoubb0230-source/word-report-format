@@ -12,6 +12,11 @@
 >   「生效中」区、同步在「索引」表加一行、被推翻的旧条目压缩一行挪到「已退役」区、「生效中」维持约 10 条内。
 >   (只归档"别回退"级别的决策;普通改动交给 git log,不必写这里。)
 
+## 从哪儿开始（新 session）
+
+**先读 `references/HANDOFF_验收修复轮次.md`** —— 现在做到哪、还没确认的第一优先事项、怎么复现。
+项目已进入「用户在 Word 里验收 → 报问题 → 修 → 再验收」的循环，那份文件是接力棒。
+
 ## 这是什么
 
 一个 Claude skill：对中文 Word 报告做**格式**审查，并在副本上自动修正 + 加批注。
@@ -99,9 +104,22 @@ python3 -m unittest discover -s tests -p "test_*.py"
 - 封面角色：`title` / `classification`(密级·编号) / `field`(项目名称等) / `other`。字体字号取值在
   `spec` 的 `title` / `cover_classification` / `cover_field`。
 
+### `scripts/lib/canonstyles.py`（canonical 样式的唯一渲染源，纯 stdlib）
+- 把每个角色（title / cover_* / heading1-4 / body / caption / table_body / toc_title）渲染成一段
+  `<w:style>` **字符串**，外加 docDefaults / Normal / 目录样式 / settings 网格块 / 表格默认值。
+- **两条路径共用同一份字符串**：`make_canonical_reference.py`（人肉验收件）直接拼进 styles.xml，
+  `40_apply_fixes.py` 用 lxml 解析后注入真实文档。**别在 40 里另写一套 lxml 构造**——"参考件验收通过、
+  流水线注入的是另一套"是本项目最容易犯的漂移（同 `tag_regions` 的教训）。
+- 每个角色带一份 `governs`（该样式承载哪些属性）：它同时决定"指派时清掉哪些直接覆盖"与"45 步全坍缩
+  不变量查哪些键"。**新增一个 canonical 属性 = 同时改 `governs`**，否则清不干净或查不到。
+- 不 import lxml（参考件生成器零依赖）；判定值全部读 spec。
+
 ### `scripts/40_apply_fixes.py`（应用层，直接改 `document.xml`）
-- 所有改动写成**段落/run 的直接属性（override）**，覆盖样式继承值；清缩进用「显式置 0」而非删属性
-  （否则会露出样式里的缩进）。
+- **规范值优先写进「注入的 canonical 命名样式」**，段落只指派 `pStyle` 并**清掉样式已承载的直接属性**
+  （方案C 阶段2；角色分派复用 `checks.paragraph_role`，判定/指派同源）。没有 canonical 样式承载的角色
+  （目录条目）才继续写段落直接属性。
+- 直接属性里的缩进**只写字符单位**（`firstLineChars`/`leftChars`），不补非零绝对伴随值；清缩进用
+  「显式置 0」而非删属性（否则会露出样式里的缩进）。
 - `format` op 的每个 `set_*` / `clear_*` / `strip_text` 键，在 `main()` 的 `op == "format"` 分支里
   各有一段应用逻辑；改 `w:t` 文本时只动内容 run（`_iter_runs` 已跳过文本框 `w:txbxContent`），
   保留行内空格与 `xml:space`。

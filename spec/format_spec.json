@@ -14,20 +14,66 @@
   "tolerance_twips": 3,
   "source": "页边距 上3.5cm 下3.2cm 左/右2.85cm；页眉1.5cm 页脚1.75cm"
  },
+ "document_grid": {
+  "grid_type": "lines",
+  "line_pitch_twips": 312,
+  "normal_size_hp": 21,
+  "doc_defaults_size_hp": 21,
+  "default_tab_stop_twips": 420,
+  "drawing_grid_h_twips": 105,
+  "drawing_grid_v_twips": 156,
+  "display_grid_every_h": 2,
+  "display_grid_every_v": 2,
+  "no_punctuation_kerning": true,
+  "character_spacing_control": "compressPunctuation",
+  "theme_font_lang_east_asia": "zh-CN",
+  "compat_flags": [
+   "spaceForUL",
+   "balanceSingleByteDoubleByteWidth",
+   "doNotLeaveBackslashAlone",
+   "ulTrailSpace",
+   "doNotExpandShiftReturn",
+   "adjustLineHeightInTable",
+   "useFELayout"
+  ],
+  "compat_settings": {
+   "compatibilityMode": "15",
+   "overrideTableStyleFontSizeAndJustification": "1",
+   "enableOpenTypeFeatures": "1",
+   "doNotFlipMirrorIndents": "1",
+   "differentiateMultirowTableHeaders": "1",
+   "useWord2013TrackBottomHyphenation": "1"
+  },
+  "source": "文档网格：行网格（docGrid type=lines、linePitch=312 即行距15.6磅、每页41行）；网格能否生效取决于 settings 的 compat 块（尤其 useFELayout + compatibilityMode=15，缺它 Word 用旧版式把行距顶到21.75磅/29行）与 Normal 样式字号——Word 的【文档网格字体】链接的是 Normal（名'正文'）样式，故 Normal/docDefaults 必须是五号(21)，正文内容另走三号的独立正文样式；默认制表位 2 字符=420（标题自动编号后的制表符落此）；绘图网格 0.5字符/0.5行、每2个显示一条。阶段0 Word 逐项验收通过",
+  "hint_only": false
+ },
+ "table_defaults": {
+  "tbl_ind_twips": 0,
+  "cell_margin_twips": {
+   "top": 0,
+   "left": 108,
+   "bottom": 0,
+   "right": 108
+  },
+  "cell_valign": "center",
+  "source": "表格：表格左缩进 0（tblInd，与单元格边距是两回事）；默认单元格边距 上0/左0.19cm(108)/下0/右0.19cm(108)；单元格内容垂直居中"
+ },
  "line_spacing": {
   "line_rule": "exact",
   "line_twips": 560,
-  "source": "行距固定值28磅"
+  "source": "行距固定值28磅（正文、一~四级标题、图表标题均适用）"
  },
  "western_font": "Times New Roman",
  "title": {
-  "east_asia": "方正小标宋",
+  "east_asia": "方正小标宋_GBK",
   "east_asia_match": [
+   "方正小标宋_GBK",
    "小标宋"
   ],
   "size_hp": 40,
   "jc": "center",
-  "source": "题目：方正小标宋 20磅 居中（删除首尾多余空格后再居中，保留内部空格）"
+  "enforce_western": true,
+  "source": "题目：方正小标宋_GBK 20磅 居中（删除首尾多余空格后再居中，保留内部空格）；题目内的数字/西文用 Times New Roman（含数字的题目才校验西文）"
  },
  "headings": {
   "1": {
@@ -37,8 +83,9 @@
     "SimHei"
    ],
    "size_hp": 32,
+   "bold": true,
    "first_line_chars": 200,
-   "source": "一级标题 黑体 三号 首行缩进2字符；西文 Times New Roman"
+   "source": "一级标题 黑体 三号 **加粗** 首行缩进2字符；西文 Times New Roman（加粗由注入的标题样式承载，段落上的直接加粗/取消加粗一律清掉，避免同一标题半粗半细）"
   },
   "2": {
    "east_asia": "楷体",
@@ -48,8 +95,9 @@
     "楷体_GB2312"
    ],
    "size_hp": 32,
+   "bold": true,
    "first_line_chars": 200,
-   "source": "二级标题 楷体 三号 首行缩进2字符；西文 Times New Roman"
+   "source": "二级标题 楷体 三号 **加粗** 首行缩进2字符；西文 Times New Roman（加粗由注入的标题样式承载，段落上的直接加粗/取消加粗一律清掉，避免同一标题半粗半细）"
   },
   "3": {
    "east_asia": "仿宋",
@@ -59,8 +107,9 @@
     "仿宋_GB2312"
    ],
    "size_hp": 32,
+   "bold": true,
    "first_line_chars": 200,
-   "source": "三级标题 仿宋 三号 首行缩进2字符；西文 Times New Roman"
+   "source": "三级标题 仿宋 三号 **加粗** 首行缩进2字符；西文 Times New Roman（加粗由注入的标题样式承载，段落上的直接加粗/取消加粗一律清掉，避免同一标题半粗半细）"
   },
   "4": {
    "east_asia": "仿宋",
@@ -70,8 +119,9 @@
     "仿宋_GB2312"
    ],
    "size_hp": 32,
+   "bold": true,
    "first_line_chars": 200,
-   "source": "四级标题 仿宋 三号 首行缩进2字符；西文 Times New Roman"
+   "source": "四级标题 仿宋 三号 **加粗** 首行缩进2字符；西文 Times New Roman（加粗由注入的标题样式承载，段落上的直接加粗/取消加粗一律清掉，避免同一标题半粗半细）"
   }
  },
  "body": {
@@ -83,7 +133,8 @@
   ],
   "size_hp": 32,
   "first_line_chars": 200,
-  "source": "正文 仿宋 三号 首行缩进2字符；西文 Times New Roman"
+  "no_space_before_after": true,
+  "source": "正文 仿宋 三号 首行缩进2字符；西文 Times New Roman；去除段前/段后间距"
  },
  "table_body": {
   "east_asia": "仿宋",
@@ -93,7 +144,10 @@
    "仿宋_GB2312"
   ],
   "size_hp": 28,
-  "source": "表格内容 仿宋 四号；西文 Times New Roman（仅校验字体字号，不动缩进/行距）"
+  "line_rule": "exact",
+  "line_twips": 560,
+  "no_indent": true,
+  "source": "表格内容 仿宋 四号、行距固定值28磅、无任何缩进（悬挂/左/右/首行全部清零）；西文 Times New Roman"
  },
  "page_number": {
   "ascii": "Times New Roman",
@@ -108,22 +162,26 @@
    "FangSong",
    "仿宋_GB2312"
   ],
-  "size_hp": 32,
+  "size_hp": 30,
   "max_level": 3,
   "indent_chars_by_level": {
    "1": 0,
    "2": 200,
    "3": 400
   },
-  "source": "目录：仿宋 三号；一级不缩进/二级缩进2字符/三级缩进4字符（leftChars 0/200/400）；不超过三级标题",
+  "tab_left_chars_by_level": {
+   "1": 400,
+   "2": 500,
+   "3": 600
+  },
+  "tab_right_chars": 4126,
+  "tab_leader": "dot",
+  "source": "目录：仿宋 小三（15磅=30半点）；一级不缩进/二级缩进2字符/三级缩进4字符（leftChars 0/200/400）；目录合规只认 leftChars；制表位写进 TOC 样式——左制表位 4/5/6 字符、右制表位 41.26 字符带点线（字符单位随 Normal 字号换算：Normal=五号 → 840/1050/1260 + 8665 twips），阶段0 Word 验收确认 Word 更新域后沿用样式制表位；不超过三级标题",
   "hint_only": true
  },
  "caption_format": {
   "jc": "center",
   "no_indent": true,
-  "source": "图表标题 居中 无任何缩进（首行/左/右全部清零）"
- },
- "cover_classification": {
   "east_asia": "仿宋",
   "east_asia_match": [
    "仿宋",
@@ -131,7 +189,18 @@
    "仿宋_GB2312"
   ],
   "size_hp": 32,
-  "source": "封面 密级/文本编号行（位于报告题目上方，同一行）仿宋 三号（16磅=32半点）；文本编号字体字号与密级一致（仅校验字体字号）"
+  "line_rule": "exact",
+  "line_twips": 560,
+  "source": "图/表标题 仿宋 三号、行距固定值28磅、居中、无任何缩进（首行/左/右全部清零）"
+ },
+ "cover_classification": {
+  "east_asia": "方正黑体_GBK",
+  "east_asia_match": [
+   "方正黑体_GBK"
+  ],
+  "size_hp": 32,
+  "enforce_western": true,
+  "source": "封面 密级/文本编号行（位于报告题目上方，同一行）方正黑体_GBK 三号（16磅=32半点，严格按档位不按磅换算）；文本编号字体字号与密级一致；行内数字/西文用 Times New Roman（阶段0 Word 验收确认——封面这一行的编号数字走西文，仅在该行含数字/西文时才校验）"
  },
  "cover_field": {
   "east_asia": "方正黑体_GBK",
@@ -139,9 +208,10 @@
    "方正黑体_GBK"
   ],
   "size_hp": 30,
-  "line_rule": "exact",
-  "line_twips": 588,
-  "source": "封面 报告题目下的各要素（项目名称/项目编号/承担单位（盖章）/项目负责人（签字）/项目起止时间/报告编制时间等）方正黑体_GBK 小三（15磅）、行距固定值29.4磅，两端对齐、首行缩进2字符（删除行首空格、清除左侧字符缩进；行内填空空格保留）"
+  "line_rule": "auto",
+  "line_twips": 480,
+  "enforce_western": true,
+  "source": "封面 报告题目下的各要素（项目名称/项目编号/承担单位（盖章）/项目负责人（签字）/项目起止时间/报告编制时间等）方正黑体_GBK 小三（15磅）、2倍行距（lineRule=auto、line=480），两端对齐、首行缩进2字符（删除行首空格、清除左侧字符缩进；行内填空空格保留）；行内数字/西文用 Times New Roman（阶段0 Word 验收确认，仅在该行含数字/西文时才校验）"
  },
  "cover": {
   "required_fields": [
@@ -194,8 +264,34 @@
    "表"
   ],
   "require_content": true,
-  "source": "图表按顺序编号并标注内容",
+  "auto_number": true,
+  "num_fmt": "decimal",
+  "suffix": "tab",
+  "source": "图表按顺序编号并标注内容；编号用 Word【自动编号】（注入 图%1 / 表%1 两条十进制编号定义，编号后接制表符 suff=tab），不写静态编号——静态编号插入/删除图表后会失序。文字里原有的静态“图N/表N”前缀会被删掉，改由 Word 生成；例外：章-序分组编号（如“图2-1”）无法用平铺自动编号表达，仍走静态编号",
   "renumber": true
+ },
+ "heading_numbering": {
+  "auto_number": true,
+  "levels": {
+   "1": {
+    "num_fmt": "chineseCounting",
+    "lvl_text": "%1、"
+   },
+   "2": {
+    "num_fmt": "chineseCounting",
+    "lvl_text": "（%2）"
+   },
+   "3": {
+    "num_fmt": "decimal",
+    "lvl_text": "%3."
+   },
+   "4": {
+    "num_fmt": "decimal",
+    "lvl_text": "（%4）"
+   }
+  },
+  "suffix": "tab",
+  "source": "标题的 Word 自动编号：注入**一条四级 multilevel 编号定义**，一~四级的形状与手写序号被规范成的 token 同源（一、/（一）/1./（1）），原本就自动编号的已确认标题统一改挂它、ilvl=级别-1。四级必须同处一条列表——Word 的“逐级重新编号”只在同一个列表实例内成立，模板里各级标题常挂在各自独立的编号定义上，那样二/三/四级会变成全文连续的全局编号。级别上不写 lvlRestart（省略即默认的逐级归零），缩进已中和；编号与标题之间是**制表符**（suff=tab，落点由 settings 的 defaultTabStop=2字符决定，阶段0 参考件已 Word 验收）。惯例不编号的章节、以及序号已经写在文字里的标题会被取消自动编号（numId=0）"
  },
  "comment_author": "XAgent"
 }

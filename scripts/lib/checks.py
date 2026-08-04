@@ -10,13 +10,22 @@ Fix object shapes
 format fix (auto-fixable, one per paragraph, combines all its violations):
   {"para_index": i, "op": "format",
    "set_east_asia": str|None, "set_ascii": str|None, "set_size_hp": int|None,
-   "set_line_exact": int|None, "set_first_line_chars": int|None,
+   "set_line_exact": int|None, "set_line_rule": "exact"|"auto"|None,
+   "clear_space_before_after": bool,
+   "set_first_line_chars": int|None, "set_left_chars": int|None,
    "clear_left_indent": bool, "clear_right_indent": bool, "set_jc": str|None,
+   "strip_text": "both"|"leading"|None,
    "rule_id": "combined", "rule_text": "<multi-line 违反规范>", "comment": true}
 
 renumber fix (auto-fixable text change on the leading ordinal):
   {"para_index": i, "op": "renumber_caption", "kind": "figure"|"table",
    "new_num": "2", "rule_id":..., "rule_text":..., "comment": true}
+  (只用于【章-序分组编号】如"图2-1"——平铺编号改走下面的自动编号)
+
+autonumber fix (把图/表标题交给 Word 自动编号：删掉文字里的静态"图N/表N"、
+把段落挂到注入的图/表编号序列上):
+  {"para_index": i, "op": "autonumber_caption", "kind": "figure"|"table",
+   "rule_id":..., "rule_text":..., "comment": true}
   {"para_index": i, "op": "renumber_heading", "level": 1,
    "new_token": "二、", "rule_id":..., "rule_text":..., "comment": true}
 
@@ -30,7 +39,14 @@ import json
 import os
 import re
 
+from canonstyles import CAPTION_ROLE_BY_KIND, STYLE_ID_BY_ROLE
+
 CN_DIGITS = "零一二三四五六七八九"
+
+# 注入的图/表标题样式 id —— 判"该图表标题是否已是 canonical 自动编号形态"要用到
+# （见 `_caption_already_autonumbered`）。canonstyles 是纯 stdlib，判定层引它不引入依赖。
+_CANON_CAPTION_STYLE_IDS = frozenset(
+    STYLE_ID_BY_ROLE[r] for r in CAPTION_ROLE_BY_KIND.values())
 
 # Canonical location of the authoritative spec, resolved once relative to this
 # file (scripts/lib/checks.py -> ../../spec/format_spec.json). Every pipeline
@@ -89,7 +105,11 @@ UNNUMBERED_HEADING_EXACT = {
 }
 # Prefixes that start an unnumbered section even with a trailing token
 # ("附录A"/"附录一"/"参考文献 [续]").
-UNNUMBERED_HEADING_PREFIX = ("附录", "附件", "参考文献", "参考资料")
+#
+# **「附件」不在此列**（2026-07 用户裁决）：报告里的"附件"常常就是正文的一个章节、
+# 该跟着一起编号（"六、附件"）。挂了标题样式的"附件"因此走正常编号；真正不该编号的
+# 附加材料一般写作"附录"，仍在列。别照直觉把"附件"加回来。
+UNNUMBERED_HEADING_PREFIX = ("附录", "参考文献", "参考资料")
 
 
 def _norm_title(text, num_raw):
@@ -173,19 +193,60 @@ def _new_sets():
     apply stage and the summary never trip over a key that only some check
     branches happened to include."""
     return {"set_east_asia": None, "set_ascii": None, "set_size_hp": None,
-            "set_line_exact": None, "set_first_line_chars": None,
+            "set_bold": None,
+            "set_line_exact": None, "set_line_rule": None,
+            "clear_space_before_after": False,
+            "set_first_line_chars": None,
             "set_left_chars": None,
             "clear_left_indent": False, "clear_right_indent": False,
             "set_jc": None, "strip_text": None}
 
 
-def check_paragraph(rec, spec):
-    """Return a combined 'format' fix for this paragraph, or None if compliant/skip."""
-    if rec.get("is_blank"):
-        return None  # an empty line has no format to judge
+def paragraph_role(rec, spec):
+    """本段的**格式角色**——`check_paragraph` 的分派依据，也是方案C 样式指派的依据。
 
+    返回值即 `canonstyles.ROLE_STYLES` 的角色名：
+        None（空行 / AI 豁免的封面 other 行：不判、也不指派样式）
+        'toc' | 'caption_figure' | 'caption_table' | 'table_body'
+        'title' | 'cover_classification' | 'cover_field'
+        'heading1'..'heading4' | 'body'
+
+    **判定与指派共用同一份分派**（历史教训：同一规则各写一遍必然漂移，见 CLAUDE.md
+    「区域划分是共享逻辑」）。安全阀（陷阱#5）在这里体现为：pattern（仅凭形状认出、
+    未经确认）的标题**不返回 heading 角色**，按 body 处理——套错标题字体的风险大于
+    收益，模型确认（level_source 变 model_confirmed）后下一轮才享受标题待遇。"""
+    if rec.get("is_blank"):
+        return None
     region = rec.get("region", "body")
     if region == "toc":
+        return "toc"
+    cap = rec.get("caption")
+    if cap:
+        # 图/表分成两个角色：静态"图N/表N"前缀改成自动编号后会从文字里删掉，此后种类
+        # 只能靠样式名回读，所以图标题与表标题必须是两个不同的样式（见 canonstyles）。
+        return "caption_table" if cap.get("kind") == "table" else "caption_figure"
+    if rec.get("in_table"):
+        return "table_body"
+    if region == "cover":
+        role = cover_role(rec, spec)
+        if role == "other":
+            return None
+        return {"title": "title", "classification": "cover_classification",
+                "field": "cover_field"}.get(role)
+    if rec.get("is_heading") and rec.get("level_source") != "pattern":
+        lvl = min(max(rec.get("level") or 1, 1), 4)
+        return "heading%d" % lvl
+    return "body"
+
+
+def check_paragraph(rec, spec):
+    """Return a combined 'format' fix for this paragraph, or None if compliant/skip."""
+    role = paragraph_role(rec, spec)
+    if role is None:
+        # 空行没有可判的格式；封面 other 行是 AI 明确豁免的，原样不动。
+        return None
+
+    if role == "toc":
         # 目录条目只做字体/字号校验（仿宋 三号）；不动缩进/行距，避免破坏 TOC
         # 域代码自身的制表位/悬挂缩进结构。
         return _check_toc(rec, spec)
@@ -193,7 +254,7 @@ def check_paragraph(rec, spec):
     # Caption paragraphs (图.../表...): center them and remove all indent
     # (spec.caption_format). Font/size are left alone (the spec states no
     # caption font rule). Numbering is handled separately by continuity().
-    if rec.get("caption"):
+    if role in ("caption_figure", "caption_table"):
         return _check_caption_format(rec, spec)
 
     # Table-cell content has its OWN font/size rule (仿宋 14磅), distinct from
@@ -202,7 +263,7 @@ def check_paragraph(rec, spec):
     # forced onto it — neither of which is right for tabular content. Only the
     # font/size are enforced here (the spec states nothing about a cell's indent
     # or line spacing, so those are left untouched).
-    if rec.get("in_table"):
+    if role == "table_body":
         return _check_table_body(rec, spec)
 
     eff = rec["eff"]
@@ -210,10 +271,7 @@ def check_paragraph(rec, spec):
     violations = []
 
     # -- Cover region: title / classification (密级·文本编号) / other fields --
-    if region == "cover":
-        role = cover_role(rec, spec)
-        if role == "other":
-            return None  # AI explicitly exempted this line; leave it untouched
+    if role in ("title", "cover_classification", "cover_field"):
         if role == "title":
             t = spec["title"]
             if not _font_ok(eff.get("east_asia"), t):
@@ -223,6 +281,14 @@ def check_paragraph(rec, spec):
             if eff.get("size_hp") != t["size_hp"]:
                 sets["set_size_hp"] = t["size_hp"]
                 violations.append("题目字号应为20磅")
+            # 题目内的数字/西文用西文字体（Times New Roman）。仅当题目【含数字/西文】
+            # 时才校验，纯中文题目不会被误报（enforce_western 的统一语义，见 §封面西文）。
+            western = spec.get("western_font")
+            if t.get("enforce_western") and western and rec.get("has_western") \
+                    and eff.get("ascii") != western:
+                sets["set_ascii"] = western
+                violations.append("题目内数字/西文字体应为%s（实际：%s）"
+                                  % (western, eff.get("ascii")))
             if eff.get("jc") != "center":
                 sets["set_jc"] = "center"
                 violations.append("题目应居中")
@@ -240,12 +306,14 @@ def check_paragraph(rec, spec):
         # classification (密级/文本编号): font/size only, per spec.
         # Alignment/indent are NOT enforced -- the spec states nothing about them
         # and the 密级/编号 line's position is template layout.
-        if role == "classification":
+        if role == "cover_classification":
             entry = spec.get("cover_classification")
             label = "封面密级/文本编号"
             if not entry or not entry.get("east_asia") or not entry.get("size_hp"):
                 return None  # spec not configured; nothing to check
-            _check_font_size(eff, entry, sets, violations, label=label)
+            _check_font_size(eff, entry, sets, violations, label=label,
+                             western=_western_for(spec, entry),
+                             has_western=rec.get("has_western", False))
             return _mk_format(rec["i"], sets, violations)
         # field role (项目名称/承担单位/项目负责人/起止时间/编制时间 等):
         # font/size per spec, PLUS these lines must be left-aligned. When they
@@ -257,14 +325,14 @@ def check_paragraph(rec, spec):
         entry = spec.get("cover_field")
         label = "封面要素"
         if entry and entry.get("east_asia") and entry.get("size_hp"):
-            _check_font_size(eff, entry, sets, violations, label=label)
-        # 行距：报告题目下的各要素为固定值（spec.cover_field.line_twips，29.4磅），
-        # 与正文的 28 磅不同——单独按 cover_field 的行距规则校验。
+            _check_font_size(eff, entry, sets, violations, label=label,
+                             western=_western_for(spec, entry),
+                             has_western=rec.get("has_western", False))
+        # 行距：报告题目下的各要素为 2 倍行距（spec.cover_field，lineRule=auto/
+        # line=480），与正文的固定 28 磅不同——单独按 cover_field 的行距规则校验。
         if entry and entry.get("line_twips") and entry.get("line_rule"):
-            if not (eff.get("line") == entry["line_twips"]
-                    and eff.get("line_rule") == entry["line_rule"]):
-                sets["set_line_exact"] = entry["line_twips"]
-                violations.append("封面要素行距应为固定值%g磅" % (entry["line_twips"] / 20.0))
+            _check_line_spacing(eff, entry["line_twips"], entry["line_rule"],
+                                sets, violations, "封面要素")
         _check_cover_field_left(rec, eff, sets, violations)
         return _mk_format(rec["i"], sets, violations)
 
@@ -285,25 +353,36 @@ def check_paragraph(rec, spec):
         h = spec["headings"][str(lvl)]
         _check_font_size(eff, h, sets, violations,
                          label="%d级标题" % lvl, western=western, has_western=has_western)
+        # 加粗：`eff.bold` 只有在**整段每个文字 run 都加粗**时才为 True，所以"前半加粗、
+        # 后半不加粗"（同一标题被历史编辑切成多段 run）也会被判不合规并批注。真正的
+        # 统一由样式承载 + 清直接加粗完成（apply 层），这里负责给出提示。
+        if h.get("bold") and eff.get("bold") is not True:
+            sets["set_bold"] = True
+            violations.append("%d级标题应加粗" % lvl)
+        _check_strip_ends(rec, sets, violations, "%d级标题" % lvl)
+        # 一~四级标题行距固定值28磅（与正文一致，取 spec.line_spacing）。
+        ls = spec["line_spacing"]
+        _check_line_spacing(eff, ls["line_twips"], ls["line_rule"],
+                            sets, violations, "%d级标题" % lvl)
         _check_first_line(eff, h, sets, violations, auto_num=rec.get("auto_num"))
-        # headings are not forced to a specific line rule by the spec table
     else:
         b = spec["body"]
         _check_font_size(eff, b, sets, violations, label="正文",
                          western=western, has_western=has_western)
         # line spacing: fixed value 28pt (exact 560)
         ls = spec["line_spacing"]
-        if not (eff.get("line") == ls["line_twips"] and eff.get("line_rule") == ls["line_rule"]):
-            sets["set_line_exact"] = ls["line_twips"]
-            violations.append("行距应为固定值28磅")
+        _check_line_spacing(eff, ls["line_twips"], ls["line_rule"],
+                            sets, violations, "正文")
+        # 去除段前/段后间距（正文规范）
+        if b.get("no_space_before_after"):
+            _check_space_before_after(eff, sets, violations, "正文")
         _check_first_line(eff, b, sets, violations, auto_num=rec.get("auto_num"))
 
     return _mk_format(rec["i"], sets, violations)
 
 
 def _check_table_body(rec, spec):
-    """表格内容：仿宋 14磅。Only font + size are checked (the spec says nothing
-    about a cell's indent/line spacing, so we do not invent those)."""
+    """表格内容：仿宋 四号、行距固定值28磅、无任何缩进（悬挂/左/右/首行全部清零）。"""
     tb = spec.get("table_body")
     if not tb or not tb.get("east_asia") or not tb.get("size_hp"):
         return None  # spec not configured for table content; nothing to check
@@ -313,24 +392,53 @@ def _check_table_body(rec, spec):
     _check_font_size(eff, tb, sets, violations, label="表格内容",
                      western=spec.get("western_font"),
                      has_western=rec.get("has_western", False))
+    # 行距固定值28磅
+    if tb.get("line_twips") and tb.get("line_rule"):
+        _check_line_spacing(eff, tb["line_twips"], tb["line_rule"],
+                            sets, violations, "表格内容")
+    # 无任何缩进：悬挂/左/右/首行全部清零
+    if tb.get("no_indent"):
+        _check_no_indent(eff, sets, violations, "表格内容")
     return _mk_format(rec["i"], sets, violations)
 
 
 def _check_caption_format(rec, spec):
-    """图表标题：居中、无任何缩进（首行/左/右全部清零）。字体字号规范未定义，不动。"""
+    """图/表标题：仿宋 三号、行距固定值28磅、居中、无任何缩进（首行/左/右全部清零）。"""
     cf = spec.get("caption_format")
     if not cf:
         return None
     eff = rec["eff"]
     sets = _new_sets()
     violations = []
+    # 字体字号（仿宋 三号）：spec 定义了才校验
+    if cf.get("east_asia") and cf.get("size_hp"):
+        _check_font_size(eff, cf, sets, violations, label="图表标题",
+                         western=spec.get("western_font"),
+                         has_western=rec.get("has_western", False))
+    # 行距固定值28磅
+    if cf.get("line_twips") and cf.get("line_rule"):
+        _check_line_spacing(eff, cf["line_twips"], cf["line_rule"],
+                            sets, violations, "图表标题")
     want_jc = cf.get("jc")
     if want_jc and eff.get("jc") != want_jc:
         sets["set_jc"] = want_jc
         violations.append("图表标题应居中")
     if cf.get("no_indent"):
         _check_no_indent(eff, sets, violations, "图表标题")
+    _check_strip_ends(rec, sets, violations, "图表标题")
     return _mk_format(rec["i"], sets, violations)
+
+
+def _check_strip_ends(rec, sets, violations, label):
+    """标题类段落的首尾空格要删掉（图/表标题、一~四级标题；封面题目另有分支）。
+
+    首尾空格会参与居中/缩进计算，让"居中"看着偏、"首行缩进2字符"实际变成 2字符+空格；
+    图表标题还会把自动生成的编号顶开。**行内空格保留**（`_strip_para_ws` 只削两端），
+    像"20  年  月"这类填写位不受影响。"""
+    text = rec.get("text") or ""
+    if text != text.strip():
+        sets["strip_text"] = "both"
+        violations.append("%s首尾多余空格应删除" % label)
 
 
 def _check_toc(rec, spec):
@@ -366,7 +474,14 @@ def _check_toc(rec, spec):
     if any(eff.get(k) for k in ("right_chars", "right", "end_chars", "end")):
         sets["clear_right_indent"] = True
         violations.append("目录不应有右缩进")
-    return _mk_format(rec["i"], sets, violations)
+    fix = _mk_format(rec["i"], sets, violations)
+    # 目录条目【不挂批注】：目录格式靠样式回写（_patch_toc_styles）保证，而且
+    # updateFields=true 会让 Word 打开时刷新目录域、重排条目——挂在旧条目上的批注
+    # 区间会被"孤儿化"，显示成一个个空白批注（用户实测每行目录一个空批注）。直接
+    # 改动仍写（用户若拒绝刷新时也能生效），但 comment 置 False。
+    if fix is not None:
+        fix["comment"] = False
+    return fix
 
 
 def _check_cover_field_left(rec, eff, sets, violations):
@@ -409,6 +524,17 @@ def _check_no_indent(eff, sets, violations, label):
         violations.append("%s不应有缩进" % label)
 
 
+def _western_for(spec, spec_entry):
+    """该角色是否套西文（Times）——**封面角色靠 spec 的 `enforce_western` 显式开启**。
+
+    正文/标题/表格/图表标题一律套西文；封面各行历史上整体不套（陷阱#7），阶段0 的
+    canonical 参考件经用户 Word 验收后确认：封面**密级/文本编号行与题目下要素行里的
+    数字/西文也走 Times**（"文本编号：XXXX-2024-001"、"20 年 月" 这类），故这两个角色
+    在 spec 里带上了 `enforce_western`。仍受 `has_western` 保护——纯中文的封面行没有
+    西文可规范，永远不会被标。目录仍不套（`_check_toc` 不传 western）。"""
+    return spec.get("western_font") if spec_entry.get("enforce_western") else None
+
+
 def _check_font_size(eff, spec_entry, sets, violations, label,
                      western=None, has_western=False):
     """Check east-asian font + size against spec_entry. When `western` is given
@@ -433,6 +559,27 @@ def _check_font_size(eff, spec_entry, sets, violations, label,
         violations.append("%s字号应为%s" % (label, _size_name(spec_entry["size_hp"])))
 
 
+def _check_line_spacing(eff, line_twips, line_rule, sets, violations, label):
+    """行距校验：eff.line/line_rule 必须与规范一致，否则记违规并让 apply 写。
+    lineRule=exact 报"固定值X磅"，lineRule=auto 报"N倍行距"（480=2倍）。"""
+    if not (eff.get("line") == line_twips and eff.get("line_rule") == line_rule):
+        sets["set_line_exact"] = line_twips
+        sets["set_line_rule"] = line_rule
+        if line_rule == "auto":
+            violations.append("%s行距应为%g倍" % (label, line_twips / 240.0))
+        else:
+            violations.append("%s行距应为固定值%g磅" % (label, line_twips / 20.0))
+
+
+def _check_space_before_after(eff, sets, violations, label):
+    """段前/段后间距应为 0（正文规范：去除段前段后）。任何非零的绝对间距
+    (space_before/after) 或行单位间距 (space_*_lines) 都记违规并清零。"""
+    if any(eff.get(k) for k in ("space_before", "space_after",
+                                "space_before_lines", "space_after_lines")):
+        sets["clear_space_before_after"] = True
+        violations.append("%s应去除段前/段后间距" % label)
+
+
 def _check_first_line(eff, spec_entry, sets, violations, auto_num=False):
     want = spec_entry.get("first_line_chars")
     if want is None:
@@ -448,9 +595,18 @@ def _check_first_line(eff, spec_entry, sets, violations, auto_num=False):
         sets["clear_right_indent"] = True
         violations.append("首行缩进应为2字符，并清除左右缩进（含自动编号带来的缩进）")
         return
-    if eff.get("first_line_chars") != want:
+    # 悬挂缩进：即使首行缩进值看起来已对，只要段落带 hanging（首行缩进被误显示成
+    # 悬挂缩进的成因，见 #12/#14），也要强制重写首行缩进——apply 的
+    # _set_first_line_and_clear_left 在写 firstLine 时会清掉直接 hanging。
+    # 注：继承自【编号层/样式层】的 hanging 需完整方案C（钳编号层）才能根除，
+    # 这里只处理段落直接 hanging。
+    has_hanging = any(eff.get(k) for k in ("hanging", "hanging_chars"))
+    if eff.get("first_line_chars") != want or has_hanging:
         sets["set_first_line_chars"] = want
-        violations.append("首行缩进应为2字符")
+        if eff.get("first_line_chars") != want:
+            violations.append("首行缩进应为2字符")
+        elif has_hanging:
+            violations.append("应为首行缩进2字符（清除悬挂缩进）")
     # left/right indent must NOT be stacked on top of the first-line indent:
     # an existing left indent makes the first line indent by (left + 2 chars),
     # i.e. more than the required 2 characters, so any left/right indent is
@@ -650,6 +806,13 @@ def continuity(records, spec):
                 expected = "%s%s%d" % (prefix, sep, group_counter[prefix])
                 if raw != expected:
                     fixes.append(_caption_fix(r, kind, expected, raw))
+        elif spec.get("captions", {}).get("auto_number"):
+            # 平铺编号 → 交给 **Word 自动编号**（注入的 图%1/表%1 定义，编号后带制表符）。
+            # 静态编号在插入/删除图表后会整体失序，用户阶段2 验收明确否掉了它。
+            for r in confirmed:
+                if _caption_already_autonumbered(r):
+                    continue          # 已是 canonical 形态：幂等，不动也不批注
+                fixes.append(_caption_autonumber_fix(r, kind))
         else:
             n = 0
             for r in confirmed:
@@ -663,6 +826,35 @@ def continuity(records, spec):
                 elif raw != expected:
                     fixes.append(_caption_fix(r, kind, expected, raw))
     return fixes
+
+
+def _caption_already_autonumbered(r):
+    """该图表标题是否**已经**是 canonical 自动编号形态——编号由 Word 生成（`auto_num`）、
+    文字里没有静态编号（`num_raw is None`）、且承载在注入的图/表标题样式上。
+
+    第三个条件不能省：只看前两条的话，文档自带的一套**外来**编号定义（英文 "Figure 1"、
+    带悬挂缩进的等）会被当成合规而放过；带上样式判断，则只有我们上一轮处理过的产物才算
+    合规——于是重跑收敛（幂等），而首次处理的文档一律转成规范编号并留批注。"""
+    if not (r.get("auto_num") and r["caption"].get("num_raw") is None):
+        return False
+    return r.get("style_id") in _CANON_CAPTION_STYLE_IDS
+
+
+def _caption_autonumber_fix(r, kind):
+    kname = "图" if kind == "figure" else "表"
+    raw = r["caption"].get("num_raw")
+    if raw is not None:
+        detail = "原静态编号“%s%s”已删除，改由 Word 按顺序生成" % (kname, raw)
+    elif r.get("auto_num"):
+        detail = "原自动编号已改用规范的编号定义"
+    else:
+        detail = "原缺少编号，已加入自动编号序列"
+    return {
+        "para_index": r["i"], "op": "autonumber_caption", "kind": kind,
+        "rule_id": "caption.%s.autonumber" % kind,
+        "rule_text": "%s标题应使用 Word 自动编号（编号后接制表符）——%s" % (kname, detail),
+        "comment": True,
+    }
 
 
 def _caption_fix(r, kind, new_num, old_num, insert=False):

@@ -22,7 +22,8 @@ SPEC = checks.load_spec(helpers.SPEC_PATH)
 def eff(**kw):
     """Effective-format dict defaulting to a COMPLIANT body paragraph
     (仿宋 / 三号 / 固定行距28磅 / 首行缩进2字符); override what a test needs."""
-    d = dict(east_asia="仿宋", ascii=None, size_hp=32, line=560, line_rule="exact",
+    d = dict(east_asia="仿宋", ascii=None, size_hp=32, bold=True,
+             line=560, line_rule="exact",
              first_line_chars=200, first_line=None, left_chars=None, left=None,
              start_chars=None, start=None, right_chars=None, right=None,
              end_chars=None, end=None, hanging_chars=None, hanging=None,
@@ -52,7 +53,7 @@ class TestCoverTitle(unittest.TestCase):
         self.assertEqual(fix["set_jc"], "center")
         self.assertTrue(fix["clear_left_indent"])
         self.assertTrue(fix["clear_right_indent"], "右缩进必须与左缩进一起清零")
-        self.assertEqual(fix["set_east_asia"], "方正小标宋")
+        self.assertEqual(fix["set_east_asia"], "方正小标宋_GBK")
 
 
 class TestCoverField(unittest.TestCase):
@@ -72,14 +73,15 @@ class TestCoverField(unittest.TestCase):
         self.assertEqual(fix["set_east_asia"], "方正黑体_GBK")
 
     def test_field_font_size_and_line_spacing(self):
-        # 报告题目下的要素：方正黑体_GBK / 小三（30半点）/ 固定行距29.4磅（588）。
+        # 报告题目下的要素：方正黑体_GBK / 小三（30半点）/ 2倍行距（auto/480）。
         r = rec(region="cover", text="项目名称：先进项目",
                 eff_=eff(east_asia="宋体", size_hp=32, jc="both",
                          first_line_chars=200, line=560, line_rule="exact"))
         fix = checks.check_paragraph(r, SPEC)
         self.assertEqual(fix["set_east_asia"], "方正黑体_GBK")
         self.assertEqual(fix["set_size_hp"], 30)            # 小三
-        self.assertEqual(fix["set_line_exact"], 588)        # 固定值29.4磅
+        self.assertEqual(fix["set_line_exact"], 480)        # 2倍行距
+        self.assertEqual(fix["set_line_rule"], "auto")
 
     def test_project_number_is_field_not_classification(self):
         # 问题1：项目编号是报告题目下的要素（方正黑体_GBK 小三），不是密级/文本
@@ -95,23 +97,38 @@ class TestCoverField(unittest.TestCase):
     def test_compliant_field_no_fix(self):
         r = rec(region="cover", text="项目名称：先进项目",
                 eff_=eff(east_asia="方正黑体_GBK", size_hp=30, jc="both",
-                         first_line_chars=200, line=588, line_rule="exact"))
+                         first_line_chars=200, line=480, line_rule="auto"))
         self.assertIsNone(checks.check_paragraph(r, SPEC))
 
 
 class TestTableBody(unittest.TestCase):
-    """表格内容：仿宋 四号（28半点）；仅校验字体字号，不动缩进/行距。"""
+    """表格内容：仿宋 四号（28半点）、行距固定值28磅、无任何缩进。"""
 
     def test_table_size_is_sihao(self):
         r = rec(in_table=True, text="设备名称123", has_western=True,
-                eff_=eff(east_asia="仿宋", size_hp=32, ascii="仿宋"))
+                eff_=eff(east_asia="仿宋", size_hp=32, ascii="仿宋",
+                         first_line_chars=None))
         fix = checks.check_paragraph(r, SPEC)
         self.assertEqual(fix["set_size_hp"], 28)   # 四号，非三号
 
     def test_table_sihao_compliant_no_fix(self):
+        # 合规表格内容：四号 + 固定28磅 + 无缩进
         r = rec(in_table=True, text="设备名称", has_western=False,
-                eff_=eff(east_asia="仿宋", size_hp=28, ascii="仿宋"))
+                eff_=eff(east_asia="仿宋", size_hp=28, ascii="仿宋",
+                         first_line_chars=None, line=560, line_rule="exact"))
         self.assertIsNone(checks.check_paragraph(r, SPEC))
+
+    def test_table_indent_and_line_spacing_flagged(self):
+        # 表格内容带缩进 + 行距非28磅固定 -> 都要被清/改
+        r = rec(in_table=True, text="设备名称", has_western=False,
+                eff_=eff(east_asia="仿宋", size_hp=28, ascii="仿宋",
+                         first_line_chars=200, left_chars=100,
+                         line=480, line_rule="auto"))
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertEqual(fix["set_line_exact"], 560)
+        self.assertEqual(fix["set_line_rule"], "exact")
+        self.assertTrue(fix["clear_left_indent"])
+        self.assertEqual(fix["set_first_line_chars"], 0)
 
 
 class TestCoverTextNumberVsProjectNumber(unittest.TestCase):
@@ -144,12 +161,21 @@ class TestTocExcluded(unittest.TestCase):
                 eff_=eff(east_asia="黑体", size_hp=28))
         fix = checks.check_paragraph(r, SPEC)
         self.assertEqual(fix["set_east_asia"], "仿宋")  # toc font, not 黑体
-        self.assertEqual(fix["set_size_hp"], 32)         # 三号
+        self.assertEqual(fix["set_size_hp"], 30)         # 小三
 
     def test_toc_not_counted_in_continuity(self):
         recs = [rec(i=0, region="toc", is_toc=True, is_heading=False,
                     text="一、绪论")]
         self.assertEqual(checks.continuity(recs, SPEC), [])
+
+    def test_toc_fix_carries_no_comment(self):
+        # 目录条目的格式 fix 不挂批注：updateFields 刷新目录会孤儿化批注区间，
+        # 显示成空白批注；目录格式靠样式回写保证。
+        r = rec(region="toc", is_toc=True, toc_level=2, text="研究方法\t3",
+                eff_=eff(east_asia="黑体", size_hp=28, left_chars=0))
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertIsNotNone(fix)               # 仍产出直接格式修正
+        self.assertFalse(fix["comment"])        # 但不挂批注
 
 
 class TestPatternHeadingNeverAutoEdited(unittest.TestCase):
@@ -189,26 +215,62 @@ class TestUnnumberedSection(unittest.TestCase):
         self.assertEqual(by_idx[2]["op"], "renumber_heading")
         self.assertEqual(by_idx[2]["new_token"], "二、")  # not 三、
 
+    def test_attachment_is_numbered_but_appendix_is_not(self):
+        """「附件」**要**编号（用户裁决：报告里的附件常常就是正文的一章），
+        「附录」仍不编号。别把"附件"加回 UNNUMBERED_HEADING_PREFIX。"""
+        self.assertFalse(checks.is_unnumbered_section("附件", None))
+        self.assertFalse(checks.is_unnumbered_section("附件1 设备清单", None))
+        self.assertTrue(checks.is_unnumbered_section("附录", None))
+        self.assertTrue(checks.is_unnumbered_section("附录A 计算过程", None))
+        recs = [
+            rec(i=0, is_heading=True, level=1, level_source="outline",
+                num_raw="一、", text="一、项目概况"),
+            rec(i=1, is_heading=True, level=1, level_source="outline",
+                num_raw=None, text="附件"),
+        ]
+        by_idx = {f["para_index"]: f for f in checks.continuity(recs, SPEC)}
+        self.assertEqual(by_idx[1]["op"], "renumber_heading")
+        self.assertEqual(by_idx[1]["new_token"], "二、")
+
 
 class TestCaptionGrouping(unittest.TestCase):
-    """图/表编号：平铺 vs 章-序分组，各自计数。"""
+    """图/表编号：平铺走 Word 自动编号；章-序分组仍走静态重编号。"""
 
-    def _cap(self, i, num_raw):
+    def _cap(self, i, num_raw, **kw):
         return rec(i=i, caption={"kind": "figure", "num_raw": num_raw,
-                                 "has_content": True, "source": "style"})
+                                 "has_content": True, "source": "style"}, **kw)
 
-    def test_flat_renumber(self):
+    def test_flat_captions_go_to_word_autonumbering(self):
+        # 静态编号插/删图后会整体失序，用户阶段2 验收否掉了它：平铺编号一律改成
+        # Word 自动编号（注入 图%1 定义、编号后带制表符），文字里的"图N"删掉。
         recs = [self._cap(0, "1"), self._cap(1, "3")]
         fixes = checks.continuity(recs, SPEC)
         by_idx = {f["para_index"]: f for f in fixes}
-        self.assertNotIn(0, by_idx)
-        self.assertEqual(by_idx[1]["new_num"], "2")
+        self.assertEqual({f["op"] for f in fixes}, {"autonumber_caption"})
+        self.assertEqual(by_idx[0]["kind"], "figure")
+        # 连"编号看着是对的"那条也要转（静态编号本身就不合规）
+        self.assertIn(0, by_idx)
+
+    def test_already_canonical_autonumbered_caption_is_left_alone(self):
+        # 幂等：上一轮处理过的产物（自动编号 + 文字里无编号 + 注入的图标题样式）
+        # 不再产生 fix，重跑收敛。
+        r = self._cap(0, None, auto_num=True, style_id="FGWCanonCaptionFig")
+        self.assertEqual(checks.continuity([r], SPEC), [])
+
+    def test_foreign_autonumbering_still_converted(self):
+        # 文档自带的一套外来编号定义（未承载在我们注入的题注样式上）仍要转成规范编号，
+        # 否则"Figure 1"这类会被当成合规放过。
+        r = self._cap(0, None, auto_num=True, style_id="SomeOtherCaption")
+        fixes = checks.continuity([r], SPEC)
+        self.assertEqual([f["op"] for f in fixes], ["autonumber_caption"])
 
     def test_chapter_based_renumber(self):
+        # 章-序分组（图1-1）平铺自动编号表达不了，仍走静态重编号——别顺手也改掉。
         recs = [self._cap(0, "1-1"), self._cap(1, "1-3")]
         fixes = checks.continuity(recs, SPEC)
         by_idx = {f["para_index"]: f for f in fixes}
         self.assertNotIn(0, by_idx)
+        self.assertEqual(by_idx[1]["op"], "renumber_caption")
         self.assertEqual(by_idx[1]["new_num"], "1-2")
 
 
@@ -226,10 +288,93 @@ class TestHeadingInference(unittest.TestCase):
         self.assertEqual(level, 1)      # 标题 1 wins over "1." looking like level 3
         self.assertEqual(source, "style")
 
+    def test_leading_spaces_before_ordinal_still_parse(self):
+        # 模板里常见"　　一、绪论"。行首空白若不吃掉，num_raw 取不到 → 连续性检查
+        # 当成"漏编号"再补一个 → 渲染成"一、一、绪论"（用户实测）。
+        self.assertEqual(headings.parse_leading_label("　　一、绪论"), "　　一、")
+        self.assertEqual(headings.parse_leading_label("  （一）研究方法"), "  （一）")
+        self.assertIsNone(headings.parse_leading_label("  正文没有序号"))
+
     def test_bare_pattern_is_unconfirmed(self):
         level, source = headings.infer_heading_level(None, None, "1. 概述", None)
         self.assertEqual(level, 3)
         self.assertEqual(source, "pattern")
+
+
+class TestLibreOfficeTocStyle(unittest.TestCase):
+    """LibreOffice .doc→.docx 兼容：目录条目样式被命名为 'Contents N'（Word 用
+    'TOC N'/'目录 N'）。若不识别，toc_level 取不到而退化成不缩进（目录被压平）、
+    且 40 的样式回写会跳过它们，刷新后目录彻底丢缩进。"""
+
+    def _resolver(self):
+        w_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        styles = etree.fromstring(
+            ('<w:styles xmlns:w="%s">'
+             '<w:style w:type="paragraph" w:styleId="Contents2">'
+             '<w:name w:val="Contents 2"/></w:style></w:styles>'
+             % w_ns).encode("utf-8"))
+        return StyleResolver(styles)
+
+    def test_contents_style_recognized_as_toc(self):
+        resolver = self._resolver()
+        self.assertTrue(headings.style_is_toc("Contents2", resolver))
+        self.assertEqual(headings.toc_level_from_style("Contents2", resolver), 2)
+
+
+class TestTocStyleLeftCharsOnly(unittest.TestCase):
+    """目录样式回写：_patch_toc_styles 钉 font/size/leftChars(按级 0/200/400) **以及
+    制表位**（左制表位 + 右点线制表位）。
+
+    别再删制表位：2026-07 曾以"Word updateFields 会自建、写死会被盖掉"为由删掉，
+    阶段0 的 Word 逐项验收**推翻**了它——目录条目的"编号→标题→点线→页码"排布正是
+    靠样式制表位撑起来的，缺了点线会跑到编号与标题之间、页码换行（陷阱 #12）。
+    制表位没有字符单位形式，只能按【文档字符单位字号】把字符数换算成绝对 twips：
+    Normal=五号(21) → 二级左 1050、右点线 8665。判定层仍只按 leftChars 判合规。"""
+
+    W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+    def _make_pkg(self, tmp):
+        word = os.path.join(tmp, "word")
+        os.makedirs(word)
+        with open(os.path.join(word, "styles.xml"), "wb") as f:
+            f.write(('<w:styles xmlns:w="%s">'
+                     '<w:style w:type="paragraph" w:styleId="TOC2">'
+                     '<w:name w:val="toc 2"/></w:style></w:styles>' % self.W
+                     ).encode("utf-8"))
+        with open(os.path.join(word, "document.xml"), "wb") as f:
+            f.write(('<w:document xmlns:w="%s"><w:body><w:sectPr>'
+                     '<w:pgSz w:w="11906" w:h="16838"/>'
+                     '<w:pgMar w:left="1616" w:right="1616" w:top="1984" w:bottom="1814"/>'
+                     '</w:sectPr></w:body></w:document>' % self.W).encode("utf-8"))
+        return tmp
+
+    def test_toc_style_gets_leftchars_and_tabs(self):
+        mod = helpers.load_script("40_apply_fixes.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            self._make_pkg(tmp)
+            n = mod._patch_toc_styles(tmp, SPEC["toc"], char_unit_hp=21)
+            self.assertEqual(n, 1)
+            root = etree.parse(os.path.join(tmp, "word", "styles.xml")).getroot()
+            ind = root.find(".//{%s}ind" % self.W)
+            self.assertIsNotNone(ind)
+            # 二级 leftChars = 200（2字符）
+            self.assertEqual(ind.get("{%s}leftChars" % self.W), "200")
+            # 制表位：左 5字符=1050、右点线 41.26字符=8665（均按五号 210/字符换算）
+            tabs = root.findall(".//{%s}tabs/{%s}tab" % (self.W, self.W))
+            got = [(t.get("{%s}val" % self.W), t.get("{%s}pos" % self.W),
+                    t.get("{%s}leader" % self.W)) for t in tabs]
+            self.assertEqual(got, [("left", "1050", None), ("right", "8665", "dot")])
+
+    def test_toc_tab_positions_follow_char_unit_size(self):
+        # 字符单位随 Normal 字号走：Normal=三号(32) 时同样的字符数换算成 1600/13203。
+        mod = helpers.load_script("40_apply_fixes.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            self._make_pkg(tmp)
+            mod._patch_toc_styles(tmp, SPEC["toc"], char_unit_hp=32)
+            root = etree.parse(os.path.join(tmp, "word", "styles.xml")).getroot()
+            pos = [t.get("{%s}pos" % self.W)
+                   for t in root.findall(".//{%s}tabs/{%s}tab" % (self.W, self.W))]
+            self.assertEqual(pos, ["1600", "13203"])
 
 
 class TestInt2Cn(unittest.TestCase):
@@ -280,7 +425,8 @@ class TestWesternFont(unittest.TestCase):
     def test_pure_chinese_table_no_western_fix(self):
         # Bug2 exact report: 表格内容纯中文 误判 "西文应为 TNR（实际：仿宋）".
         r = rec(in_table=True, text="设备名称", has_western=False,
-                eff_=eff(east_asia="仿宋", size_hp=28, ascii="仿宋"))
+                eff_=eff(east_asia="仿宋", size_hp=28, ascii="仿宋",
+                         first_line_chars=None, line=560, line_rule="exact"))
         self.assertIsNone(checks.check_paragraph(r, SPEC))
 
     def test_heading_with_western_gets_tnr(self):
@@ -289,14 +435,137 @@ class TestWesternFont(unittest.TestCase):
                 eff_=eff(ascii="Arial"))
         self.assertEqual(checks.check_paragraph(r, SPEC)["set_ascii"], "Times New Roman")
 
-    def test_cover_field_not_forced_western(self):
-        # cover layout lines deliberately opt out of western enforcement:
-        # an otherwise-compliant field with a wrong Latin font gets NO fix.
-        r = rec(region="cover", text="项目名称ABC", has_western=True,
+    def test_cover_field_western_enforced_when_line_has_digits(self):
+        # 阶段0 Word 验收推翻了陷阱#7 在封面的范围：封面要素/密级行里的数字与西文
+        # 也要走 Times（spec 的 cover_field.enforce_western）。含西文的行才校验。
+        r = rec(region="cover", text="项目编号：KJ-2024-001", has_western=True,
                 eff_=eff(east_asia="方正黑体_GBK", size_hp=30, ascii="Calibri",
-                         jc="both", first_line_chars=200, line=588,
-                         line_rule="exact"))
-        self.assertIsNone(checks.check_paragraph(r, SPEC))  # western not enforced here
+                         jc="both", first_line_chars=200, line=480,
+                         line_rule="auto"))
+        self.assertEqual(checks.check_paragraph(r, SPEC)["set_ascii"], "Times New Roman")
+
+    def test_pure_chinese_cover_field_no_western_fix(self):
+        # 但纯中文的封面行没有西文可规范，仍然一个字都不动（has_western 保护）。
+        r = rec(region="cover", text="承担单位（盖章）：某某研究院", has_western=False,
+                eff_=eff(east_asia="方正黑体_GBK", size_hp=30, ascii="仿宋",
+                         jc="both", first_line_chars=200, line=480,
+                         line_rule="auto"))
+        self.assertIsNone(checks.check_paragraph(r, SPEC))
+
+    def test_toc_still_not_forced_western(self):
+        # 目录仍**不**套西文（_check_toc 不传 western）——只有封面被推翻，别顺手扩大。
+        r = rec(region="toc", is_toc=True, toc_level=1, text="一、概述 3",
+                has_western=True,
+                eff_=eff(east_asia="仿宋", size_hp=30, ascii="Calibri"))
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertIsNone(fix if fix is None else fix.get("set_ascii"))
+
+
+class TestNewFormatRules2026(unittest.TestCase):
+    """2026-07 批次新增/调整的规则（见 HANDOFF §12 分诊 A/B）。每条锁一个决策。"""
+
+    def test_classification_font_is_fangzheng_heiti_gbk(self):
+        # #1 密级/文本编号 -> 方正黑体_GBK（三号不变）
+        r = rec(region="cover", above_title=True, text="机密　2025013",
+                eff_=eff(east_asia="仿宋", size_hp=32))
+        self.assertEqual(checks.cover_role(r, SPEC), "classification")
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertEqual(fix["set_east_asia"], "方正黑体_GBK")
+        self.assertIsNone(fix["set_size_hp"])  # 三号(32) 不变
+
+    def test_title_font_gbk_and_digits_western(self):
+        # #2 题目字体 方正小标宋_GBK；题目内数字用西文(TNR)
+        r = rec(region="cover", is_title=True, text="2024年度自评价报告",
+                has_western=True,
+                eff_=eff(east_asia="宋体", size_hp=40, jc="center", ascii="宋体",
+                         first_line_chars=None))
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertEqual(fix["set_east_asia"], "方正小标宋_GBK")
+        self.assertEqual(fix["set_ascii"], "Times New Roman")
+
+    def test_title_pure_chinese_no_western_flag(self):
+        # 纯中文题目（无数字）不因西文被误报
+        r = rec(region="cover", is_title=True, text="先进项目自评价报告",
+                has_western=False,
+                eff_=eff(east_asia="方正小标宋_GBK", size_hp=40, jc="center",
+                         first_line_chars=None))
+        self.assertIsNone(checks.check_paragraph(r, SPEC))
+
+    def test_heading_line_spacing_28pt(self):
+        # #6 一~四级标题行距固定值28磅(560/exact)
+        r = rec(is_heading=True, level=2, level_source="outline", num_raw="（一）",
+                text="（一）研究背景",
+                eff_=eff(east_asia="楷体", size_hp=32, line=None, line_rule=None))
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertEqual(fix["set_line_exact"], 560)
+        self.assertEqual(fix["set_line_rule"], "exact")
+
+    def test_caption_font_size_line(self):
+        # #8 图/表标题 仿宋 三号 + 行距固定28磅 + 居中 + 无缩进
+        r = rec(text="图1 系统结构", caption={"kind": "figure", "num_raw": "1",
+                "has_content": True, "source": "style"},
+                eff_=eff(east_asia="黑体", size_hp=40, jc="left",
+                         first_line_chars=200, line=None, line_rule=None))
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertEqual(fix["set_east_asia"], "仿宋")
+        self.assertEqual(fix["set_size_hp"], 32)
+        self.assertEqual(fix["set_line_exact"], 560)
+        self.assertEqual(fix["set_jc"], "center")
+        self.assertEqual(fix["set_first_line_chars"], 0)
+
+    def test_body_removes_space_before_after(self):
+        # #15 正文去段前/段后间距
+        r = rec(text="正文一段。",
+                eff_=eff(space_before=100, space_after=50))
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertTrue(fix["clear_space_before_after"])
+
+    def test_body_compliant_with_zero_spacing_no_fix(self):
+        r = rec(text="正文一段。",
+                eff_=eff(space_before=None, space_after=None))
+        self.assertIsNone(checks.check_paragraph(r, SPEC))
+
+    def test_headings_must_be_bold(self):
+        # 2026-07 新增规范：一~四级标题加粗。
+        r = rec(is_heading=True, level=2, level_source="outline", num_raw="（一）",
+                text="（一）研究方法",
+                eff_=eff(east_asia="楷体", size_hp=32, line=560, line_rule="exact",
+                         first_line_chars=200, bold=False))
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertTrue(fix["set_bold"])
+        self.assertIn("加粗", fix["rule_text"])
+
+    def test_bold_heading_compliant_no_bold_fix(self):
+        r = rec(is_heading=True, level=2, level_source="outline", num_raw="（一）",
+                text="（一）研究方法",
+                eff_=eff(east_asia="楷体", size_hp=32, line=560, line_rule="exact",
+                         first_line_chars=200, bold=True))
+        self.assertIsNone(checks.check_paragraph(r, SPEC))
+
+    def test_half_bold_heading_is_flagged(self):
+        # "前半加粗、后半不加粗"：eff.bold 走【全体一致】语义（20 抽取时只要有一个
+        # 文字 run 不粗就是 False），所以这种半粗半细会被判不合规而不是被多数票放过。
+        r = rec(is_heading=True, level=3, level_source="outline", num_raw="1.",
+                text="1. 数据来源与口径说明",
+                eff_=eff(east_asia="仿宋", size_hp=32, line=560, line_rule="exact",
+                         first_line_chars=200, bold=False))
+        self.assertTrue(checks.check_paragraph(r, SPEC)["set_bold"])
+
+    def test_body_bold_is_not_touched(self):
+        # 规范没规定正文加粗 → 正文样式不承载 bold，作者的行内加粗保持原样。
+        r = rec(text="正文内容。",
+                eff_=eff(east_asia="仿宋", size_hp=32, line=560, line_rule="exact",
+                         first_line_chars=200, space_before=0, space_after=0,
+                         bold=True))
+        self.assertIsNone(checks.check_paragraph(r, SPEC))
+
+    def test_direct_hanging_forces_first_line_rewrite(self):
+        # #12/#14 段落带直接 hanging，即使首行缩进值看似已对，也强制重写首行缩进
+        # （apply 写 firstLine 时清直接 hanging）
+        r = rec(text="正文一段。",
+                eff_=eff(first_line_chars=200, hanging=420))
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertEqual(fix["set_first_line_chars"], 200)
 
 
 class TestDocHints(unittest.TestCase):

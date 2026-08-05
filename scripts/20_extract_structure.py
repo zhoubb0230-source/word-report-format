@@ -3,11 +3,10 @@
 Stage 2 — extract a structured IR from the working .docx.
 
 Usage:
-    python 20_extract_structure.py <workdir> [--shard-size N]
+    python 20_extract_structure.py <workdir>
 
 Reads   <workdir>/working.docx
 Writes  <workdir>/structure.json          (full IR; stays on disk, NOT for model)
-        <workdir>/shards/shard_000.json ... (paragraph slices for sub-agents)
 Prints  a COMPACT summary JSON to stdout (counts only), so the orchestrating
         model's context stays small even for 3000-page documents.
 
@@ -30,25 +29,34 @@ Deterministic. No model calls.
 """
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
 from docxcommon import (
     qn, parse_xml, unzip_docx, iter_body_paragraphs, para_text, in_table,
     StyleResolver, read_ppr, read_rpr, get_pPr, get_style_id, get_mark_rpr,
-    iter_text_runs, run_effective_rpr, load_numbering_levels, INDENT_KEYS,
+    iter_text_runs, run_effective_rpr, load_numbering_levels,
+    label_followed_by_tab,
 )
 from headings import (
     RE_CAPTION, RE_TOCTITLE, infer_heading_level, parse_leading_label,
     looks_like_caption_style, caption_kind_from_style, toc_level_from_style,
     style_is_toc,
 )
+from structure import tag_regions
 
 
 def dominant_run_props(p, baseline):
-    """Return (east_asia, ascii, size_hp) most used across text runs."""
+    """Return (east_asia, ascii, size_hp, bold) across the paragraph's text runs.
+
+    字体/字号取**用量最多**的那个（少数几个字的例外不该改变整段判定）；**加粗则相反，
+    取"全体一致"语义**——只有每个文字 run 都加粗才返回 True，否则 False（没有文字 run
+    时 None）。理由：加粗的违规形态正是"同一个标题前半加粗、后半不加粗"（历史编辑把
+    一段切成多个 run），按多数投票会把它判成合规而放过。"""
     ea_count, as_count, sz_count = {}, {}, {}
     total = 0
+    bold_all, saw_text = True, False
     for run, txt in iter_text_runs(p):
         eff = run_effective_rpr(run, baseline)
         n = len(txt)
@@ -59,13 +67,17 @@ def dominant_run_props(p, baseline):
             as_count[eff["ascii"]] = as_count.get(eff["ascii"], 0) + n
         if eff.get("size_hp"):
             sz_count[eff["size_hp"]] = sz_count.get(eff["size_hp"], 0) + n
+        if txt.strip():
+            saw_text = True
+            if eff.get("bold") is not True:
+                bold_all = False
 
     def top(d, fallback):
         return max(d.items(), key=lambda kv: kv[1])[0] if d else fallback
     ea = top(ea_count, baseline.get("east_asia"))
     asc = top(as_count, baseline.get("ascii"))
     sz = top(sz_count, baseline.get("size_hp"))
-    return ea, asc, sz
+    return ea, asc, sz, (bold_all if saw_text else None)
 
 
 def has_toc_field(p):
@@ -79,6 +91,57 @@ def has_toc_field(p):
     return False
 
 
+def _has_page_field(p):
+    """True if paragraph p contains a PAGE (or NUMPAGES) field — the page number."""
+    for it in p.iter(qn("w:instrText")):
+        if it.text and "PAGE" in it.text.upper():
+            return True
+    for fs in p.iter(qn("w:fldSimple")):
+        if "PAGE" in (fs.get(qn("w:instr")) or "").upper():
+            return True
+    return False
+
+
+def scan_page_number(unpack):
+    """Best-effort: find the page-number run in headers/footers and return its
+    western font + size {ascii, size_hp}, or None if no PAGE field is present.
+
+    The page number lives in a header/footer PAGE field, not the body, so it is
+    read here and recorded into structure for a HINT-ONLY check downstream
+    (doc_hints). A rough read of the direct rPr on the field's paragraph runs is
+    enough for a hint; nothing is auto-changed from it."""
+    import glob
+    word = os.path.join(unpack, "word")
+    if not os.path.isdir(word):
+        return None
+    parts = sorted(glob.glob(os.path.join(word, "header*.xml"))
+                   + glob.glob(os.path.join(word, "footer*.xml")))
+    for part in parts:
+        try:
+            root = parse_xml(part).getroot()
+        except Exception:
+            continue
+        for p in root.iter(qn("w:p")):
+            if not _has_page_field(p):
+                continue
+            asc, sz = None, None
+            for run in p.iter(qn("w:r")):
+                rpr = run.find(qn("w:rPr"))
+                if rpr is None:
+                    continue
+                rf = rpr.find(qn("w:rFonts"))
+                if rf is not None and rf.get(qn("w:ascii")):
+                    asc = rf.get(qn("w:ascii"))
+                s = rpr.find(qn("w:sz"))
+                if s is not None and s.get(qn("w:val")):
+                    try:
+                        sz = int(s.get(qn("w:val")))
+                    except ValueError:
+                        pass
+            return {"ascii": asc, "size_hp": sz}
+    return None
+
+
 def in_toc_sdt(p):
     anc = p.getparent()
     while anc is not None:
@@ -88,6 +151,44 @@ def in_toc_sdt(p):
                     return True
         anc = anc.getparent()
     return False
+
+
+def toc_field_para_indices(doc_root):
+    """Body-paragraph indices covered by a TOC FIELD span (fldChar begin..end).
+
+    A Word table of contents is ONE field spanning MANY paragraphs, but only the
+    first entry carries the 'TOC' instruction text; the continuation entries hold
+    just the field RESULT. Detecting the TOC only per-paragraph (has_toc_field)
+    therefore tags only the first entry — and any continuation entry that carries
+    an inherited outlineLvl or heading-ish style then gets mis-detected as a
+    HEADING (wrong 黑体 font + indent, and it corrupts the cover boundary and the
+    numbering continuity). Tracking the field span across paragraphs tags every
+    entry as TOC. Nested per-entry fields (HYPERLINK / PAGEREF) are handled by a
+    depth stack so the outer TOC stays open until its own matching end."""
+    inside = set()
+    open_fields = []  # stack of {"is_toc": bool, "instr": str} per open field
+    for idx, p in iter_body_paragraphs(doc_root):
+        touched = any(f["is_toc"] for f in open_fields)
+        for el in p.iter():
+            tag = el.tag
+            if tag == qn("w:fldChar"):
+                typ = el.get(qn("w:fldCharType"))
+                if typ == "begin":
+                    open_fields.append({"is_toc": False, "instr": ""})
+                elif typ == "end" and open_fields:
+                    open_fields.pop()
+            elif tag == qn("w:instrText") and open_fields:
+                open_fields[-1]["instr"] += (el.text or "")
+                if "TOC" in open_fields[-1]["instr"].upper():
+                    open_fields[-1]["is_toc"] = True
+            elif tag == qn("w:fldSimple"):
+                if "TOC" in (el.get(qn("w:instr")) or "").upper():
+                    touched = True
+            if any(f["is_toc"] for f in open_fields):
+                touched = True
+        if touched:
+            inside.add(idx)
+    return inside
 
 
 # Font size (half-points) at/above which a cover line is "large" enough to be
@@ -158,10 +259,11 @@ def _mark_title_block(records):
 
 
 def main():
+    if len(sys.argv) < 2:
+        print(json.dumps({"status": "error",
+                          "error": "usage: 20_extract_structure.py <workdir>"}))
+        sys.exit(1)
     workdir = sys.argv[1]
-    shard_size = 400
-    if "--shard-size" in sys.argv:
-        shard_size = int(sys.argv[sys.argv.index("--shard-size") + 1])
 
     unpack = os.path.join(workdir, "unpacked_read")
     if os.path.isdir(unpack):
@@ -203,36 +305,41 @@ def main():
             }
 
     # ---- iterate paragraphs ----
+    # Paragraphs inside a TOC field span (many entries, only the first carries
+    # the TOC instruction) — tagged TOC below so continuation entries are never
+    # mistaken for headings.
+    toc_span = toc_field_para_indices(doc_root)
     records = []
     for i, p in iter_body_paragraphs(doc_root):
         sid = get_style_id(p)
         ppr_el = get_pPr(p)
         mark_rpr = get_mark_rpr(p)
-        ppr, rpr = resolver.resolve(sid, ppr_el, mark_rpr)
+        # Unified cascade INCLUDING the numbering layer (docDefaults → style chain
+        # → numbering level → direct). A paragraph's visible number ("一、") is
+        # generated by Word and does NOT appear in the text, and its indent
+        # (very often a w:hanging) frequently comes from the numbering LEVEL
+        # rather than the paragraph. resolve_cascade folds that in at the CORRECT
+        # precedence — the numbering level OVERRIDES the style chain but is
+        # OVERRIDDEN by any direct value — so a hanging that a heading inherits
+        # from its list level is visible in eff even when the style ALSO carries
+        # an indent (the old gap-fill only filled INDENT_KEYS left None, so a
+        # style-supplied indent hid the competing numbering hanging). This is the
+        # "把编号层折进有效值" requirement (方案C §2.3); the numbering-layer clamp
+        # (甲法) in 40 then neutralizes the hanging surfaced here.
+        ppr, rpr = resolver.resolve_cascade(sid, ppr_el, mark_rpr, numbering_levels)
         text = para_text(p)
-        ea, asc, sz = dominant_run_props(p, rpr)
+        ea, asc, sz, bold = dominant_run_props(p, rpr)
 
-        # Automatic list numbering (w:numPr, possibly inherited from the style
-        # chain). numId "0" is the explicit "no numbering" override. When a
-        # paragraph IS auto-numbered, its visible number ("一、") is generated
-        # by Word and does NOT appear in the text, and its indent frequently
-        # comes from the numbering LEVEL definition rather than the paragraph.
-        # Pull that level's indent in as a fallback so the effective indent we
-        # judge/clear reflects what the reader actually sees.
         num_id = ppr.get("num_id")
         auto_num = bool(num_id and num_id != "0")
-        if auto_num:
-            try:
-                ilvl = int(ppr.get("ilvl") or 0)
-            except ValueError:
-                ilvl = 0
-            lvl_ppr = numbering_levels.get(num_id, {}).get(ilvl, {})
-            for k in INDENT_KEYS:
-                if ppr.get(k) is None and lvl_ppr.get(k) is not None:
-                    ppr[k] = lvl_ppr[k]
 
         is_blank = not text.strip()
-        is_toc = style_is_toc(sid, resolver) or has_toc_field(p) or in_toc_sdt(p)
+        # 段落是否落在**目录域/目录内容控件的跨度内**——即"Word 刷新目录时会重写它"。
+        # 这比 is_toc 严格：is_toc 还包含"只是套着目录样式"的段落，而目录后面那几个
+        # 顺手继承了目录样式的空行并不在域里，动它们没有破坏域的风险（见 40 的
+        # `_blank_style`：空行套正文样式的例外只认这一项，不认样式）。
+        toc_in_field = has_toc_field(p) or in_toc_sdt(p) or (i in toc_span)
+        is_toc = style_is_toc(sid, resolver) or toc_in_field
         is_toctitle = bool(RE_TOCTITLE.match(text))
         toc_level = toc_level_from_style(sid, resolver) if (is_toc and not is_toctitle) else None
 
@@ -242,6 +349,9 @@ def main():
         if not is_blank and not is_toc and not is_toctitle:
             level, level_source = infer_heading_level(sid, outline, text, resolver)
         num_raw = parse_leading_label(text) if level else None
+        # 序号后的分隔符是不是真制表符。`para_text` 看不见 `w:tab`，不单独记一笔的话
+        # 判定层无从知道"手写序号后缺制表符"，补完也没法判断已经补过（会每轮重复报）。
+        num_tab = label_followed_by_tab(p, num_raw) if num_raw else False
 
         caption = None
         if not is_blank and not is_toc and not is_toctitle and level is None:
@@ -288,6 +398,8 @@ def main():
             "text_len": len(text),
             "is_blank": is_blank,
             "is_toc": is_toc or is_toctitle,
+            # 在真正的目录域/内容控件跨度内（刷新目录会重写它）——空行样式的唯一目录例外
+            "toc_in_field": toc_in_field,
             "toc_level": toc_level,
             "auto_num": auto_num,
             "is_title": False,     # set by _mark_title_block() after region tagging
@@ -297,11 +409,21 @@ def main():
             "level": level,
             "level_source": level_source,
             "num_raw": num_raw,
+            "num_tab": num_tab,
             "caption": caption,
             "in_table": in_table(p),
+            # Whether the paragraph actually contains Western text (Latin letters
+            # or digits). The western-font rule only applies where such text
+            # exists, so a pure-Chinese paragraph is never flagged for its Latin
+            # font (computed from the FULL text, before the 60-char truncation).
+            "has_western": bool(re.search(r"[A-Za-z0-9]", text)),
             "eff": {
-                "east_asia": ea, "ascii": asc, "size_hp": sz,
+                "east_asia": ea, "ascii": asc, "size_hp": sz, "bold": bold,
                 "line": ppr.get("line"), "line_rule": ppr.get("line_rule"),
+                "space_before": ppr.get("space_before"),
+                "space_after": ppr.get("space_after"),
+                "space_before_lines": ppr.get("space_before_lines"),
+                "space_after_lines": ppr.get("space_after_lines"),
                 "first_line_chars": ppr.get("first_line_chars"),
                 "first_line": ppr.get("first_line"),
                 "left_chars": ppr.get("left_chars"), "left": ppr.get("left"),
@@ -315,16 +437,7 @@ def main():
         records.append(rec)
 
     # ---- region tagging: cover / toc / body ----
-    first_toc_idx = next((r["i"] for r in records if r["is_toc"]), None)
-    first_heading_idx = next((r["i"] for r in records if r["is_heading"]), None)
-    cover_end = first_toc_idx if first_toc_idx is not None else first_heading_idx
-    for r in records:
-        if r["is_toc"]:
-            r["region"] = "toc"
-        elif cover_end is not None and r["i"] < cover_end:
-            r["region"] = "cover"
-        else:
-            r["region"] = "body"
+    tag_regions(records)
 
     # ---- title block on the cover (may wrap across paragraphs) ----
     _mark_title_block(records)
@@ -337,24 +450,11 @@ def main():
         "n_paragraphs": len(records),
         "page_setup": page_setup,
         "has_background": bool(has_background),
+        "page_number": scan_page_number(unpack),
         "records": records,
     }
     with open(os.path.join(workdir, "structure.json"), "w", encoding="utf-8") as f:
         json.dump(structure, f, ensure_ascii=False)
-
-    # ---- shards (paragraph records only) ----
-    shard_dir = os.path.join(workdir, "shards")
-    os.makedirs(shard_dir, exist_ok=True)
-    for f in os.listdir(shard_dir):
-        os.remove(os.path.join(shard_dir, f))
-    shard_files = []
-    for si, start in enumerate(range(0, len(records), shard_size)):
-        chunk = records[start:start + shard_size]
-        name = "shard_%03d.json" % si
-        with open(os.path.join(shard_dir, name), "w", encoding="utf-8") as f:
-            json.dump({"shard_id": si, "range": [chunk[0]["i"], chunk[-1]["i"]],
-                       "records": chunk}, f, ensure_ascii=False)
-        shard_files.append(name)
 
     summary = {
         "status": "ok",
@@ -369,9 +469,6 @@ def main():
         "headings_unconfirmed": sum(1 for r in records if r["is_heading"] and r["level_source"] == "pattern"),
         "captions": sum(1 for r in records if r["caption"]),
         "captions_unconfirmed": sum(1 for r in records if r["caption"] and r["caption"].get("source") == "pattern"),
-        "n_shards": len(shard_files),
-        "shard_dir": os.path.abspath(shard_dir),
-        "shard_files": shard_files,
         "page_setup_found": page_setup is not None,
         "next_step": "python 26_export_review.py <workdir>  # full-document heading/caption review before checking format",
     }

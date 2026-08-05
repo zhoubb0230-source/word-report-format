@@ -12,8 +12,8 @@ ENTIRELY — a heading can have no recognizable leading number AND no
 heading-ish style name, which no amount of pattern tuning can catch from
 text shape alone. This is genuinely a full-document decision: you cannot
 tell from one paragraph in isolation which level "1." means here, only from
-seeing how ALL the headings in the document relate to each other. That is
-why this step is NEVER sharded — read the whole list, in document order,
+seeing how ALL the headings in the document relate to each other. So this is
+a whole-document judgment — read the entire candidate list, in document order,
 before deciding anything (see SKILL.md).
 
 Every heading/caption candidate carries a trust tier (see lib/headings.py):
@@ -67,7 +67,7 @@ possible_missed_headings, decide case by case whether each is really a
 heading/caption that needs promoting via overrides.json, or should be left
 alone (in which case it just stays a review hint in the output — never
 silently modified). If nothing needs correcting or promoting, proceed
-straight to step 3; 31_check_global.py will use the current classification
+straight to step 3; 30_check_format.py will use the current classification
 as-is.
 """
 import json
@@ -75,9 +75,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
-from checks import cover_role, _cover_missing_fields
+from checks import cover_role, _cover_missing_fields, SPEC_PATH
 
-SPEC_PATH = os.path.join(os.path.dirname(__file__), "..", "spec", "format_spec.json")
 MAX_CANDIDATE_LEN = 40  # a heading-length line; mirrors the "short" heuristic
                         # infer_heading_level() already uses for pattern-based guesses
 
@@ -123,6 +122,10 @@ def _find_possible_missed_headings(records, spec):
 
 
 def main():
+    if len(sys.argv) < 2:
+        print(json.dumps({"status": "error",
+                          "error": "usage: 26_export_review.py <workdir>"}))
+        sys.exit(1)
     workdir = sys.argv[1]
     with open(os.path.join(workdir, "structure.json"), encoding="utf-8") as f:
         structure = json.load(f)

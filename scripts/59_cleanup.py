@@ -7,7 +7,7 @@ Usage:
 Run this ONLY after 50_finalize.py has copied the final document out to the
 user's output directory (which lives OUTSIDE the workdir) — everything left in
 <workdir> is disposable intermediate state (working.docx / structure.json /
-shards/ / out_pkg/ / formatted.docx / ...).
+out_pkg/ / formatted.docx / ...).
 
 Safety: refuses to delete anything that is not inside a ``.word_report_work``
 base (see lib/workdir.is_inside_base), so a mistyped or unexpected path can never

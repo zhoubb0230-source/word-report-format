@@ -12,6 +12,11 @@
 >   「生效中」区、同步在「索引」表加一行、被推翻的旧条目压缩一行挪到「已退役」区、「生效中」维持约 10 条内。
 >   (只归档"别回退"级别的决策;普通改动交给 git log,不必写这里。)
 
+## 从哪儿开始（新 session）
+
+**先读 `references/HANDOFF_验收修复轮次.md`** —— 现在做到哪、还没确认的第一优先事项、怎么复现。
+项目已进入「用户在 Word 里验收 → 报问题 → 修 → 再验收」的循环，那份文件是接力棒。
+
 ## 这是什么
 
 一个 Claude skill：对中文 Word 报告做**格式**审查，并在副本上自动修正 + 加批注。
@@ -22,11 +27,29 @@
 
 - 唯一依赖是 **`lxml`**，且**默认没装**——先 `pip install lxml`（`scripts/lib/` 是自包含的，
   不用 python-docx / defusedxml）。
-- `python3 scripts/00_check_env.py` 探测 `python/lxml/soffice`；`soffice` 只在 `.doc`↔`.docx`
-  转换时需要（`.docx` 全程用不到）。
-- 无第三方测试框架，无 `requirements.txt`。
+- `python3 scripts/00_check_env.py` 探测 `python/lxml/soffice/msword`；`.doc`↔`.docx` 转换需要
+  **两种后端之一**：`soffice`（LibreOffice，跨平台）或 `msword`（Windows 上装了 Microsoft Word，经
+  PowerShell + COM 调用）。转换后端由 `scripts/lib/docconv.py` 统一封装（优先 soffice、回退 msword），
+  `.docx` 全程用不到任何后端。
+- 无第三方测试框架，无 `requirements.txt`。测试用 stdlib `unittest`（只依赖 lxml）。
 
-## 冒烟测试（没有测试套件，手动跑一遍最快）
+## 回归测试（先跑这个，再手动冒烟）
+
+`tests/` 有一套零依赖回归测试，**改判定/应用逻辑后必跑**：
+
+```
+python3 -m unittest discover -s tests -p "test_*.py"
+```
+
+- `tests/test_checks.py`：判定层单测，把《已知陷阱与设计决策》里每条"别回退"锁成断言
+  （封面题目/字段、目录排除、pattern 只批注、层级判定、图表分组编号、西文字体、页码/目录深度提示…）。
+  改了 `checks.py`/`headings.py` 的行为却没同步改这里 = 有测试会红，正是防回退的意义。
+- `tests/test_e2e.py`：手搓最小 docx 跑 `05→10→20→30→40→45`，断言输出自检 `ok` 且段落数守恒。
+- `tests/helpers.py`：`build_docx()` 造最小 docx、`load_script()` 以模块方式载入带数字前缀的脚本。
+
+新增一条陷阱级决策时，**同时**在 `tests/` 补一个锁它的用例，别只写进散文记录。
+
+## 冒烟测试（手动跑一遍最直观）
 
 最省事的两种方式：
 
@@ -40,7 +63,7 @@
    python3 scripts/05_new_workdir.py                 # 打印 {workdir}；下面的 <workdir> 全用它
    python3 scripts/10_prepare_input.py <src.docx> <workdir>
    python3 scripts/20_extract_structure.py <workdir>
-   python3 scripts/30_check_format.py <workdir>     # 全量模式，直接写 workdir/fixes.json
+   python3 scripts/30_check_format.py <workdir>     # 一次性全文检查，直接写 workdir/fixes.json
    python3 scripts/40_apply_fixes.py <workdir>       # 产出 workdir/formatted.docx + out_pkg/
    python3 scripts/45_validate_output.py <workdir>   # 自检：ok=true 才算过（坏了退 2）
    python3 scripts/50_finalize.py <workdir> <out_dir> # <out_dir> 须在 workdir 之外
@@ -57,9 +80,15 @@
   逻辑在 `scripts/lib/workdir.py`（`base_dir()` / `is_inside_base()`），改路径约定要同步改这里。
 - **区域划分**：`cover` = 第一个 TOC / 第一个标题**之前**的所有段落。测试 docx 若既无目录又无标题，
   封面段落会全部落到 `body`——要放一个带 `outlineLvl` 的标题段来界定封面结束。
-- **`30` 有两套模式**：全量模式**直接写 `fixes.json`**；`--shard` 模式写 `fixes_parts/`，之后才用
-  `35_merge_fixes.py` 合并。**全量模式下不要跑 `35`**——它从 `fixes_parts/` 读，会把 `fixes.json`
-  覆盖掉。分片路径见 SKILL.md 的 Path B。
+- **区域划分是共享逻辑**：`tag_regions()` 在 `scripts/lib/structure.py`，由 `20_extract_structure.py`
+  （抽取时）和 `27_apply_review.py`（复核改层级后重算边界）**共用同一份**。27 复核可能提升/取消最早一条
+  标题、从而移动封面/正文边界，必须重跑 `tag_regions`。**别把这段再各自内联回两个脚本**（历史上就是各写
+  一遍、易漂移）。
+- **单一线性流程，不分片**：`30_check_format.py` 一次性全文扫描直接写 `fixes.json`（逐段格式 + 页边距 +
+  序号连续性 + 内容提示都在这一步）。检查是纯 Python、全程不把正文读进模型上下文，文档再大也这么跑。
+  历史上的「分片 + 子 agent」Path B（`31_check_global.py`/`30 --shard`/`35_merge_fixes.py`/`shards/`）
+  **已整体移除**——它对确定性 Python 检查没有任何收益，别再加回来；退役缘由见
+  `references/已知陷阱与设计决策.md`。
 - `cover_role` 的标题启发式阈值是**字号 ≥ 36 半点（小一）且居中**，或等于 title 的 `size_hp`。
   正常 15 磅（=30 半点）字段行低于此值，不会被误判成标题。
 - 输出命名由 `50_finalize.py` 负责（`原名_格式化版本_时间戳.原扩展名`），别在别处改名。
@@ -75,12 +104,28 @@
 - 封面角色：`title` / `classification`(密级·编号) / `field`(项目名称等) / `other`。字体字号取值在
   `spec` 的 `title` / `cover_classification` / `cover_field`。
 
+### `scripts/lib/canonstyles.py`（canonical 样式的唯一渲染源，纯 stdlib）
+- 把每个角色（title / cover_* / heading1-4 / body / caption / table_body / toc_title）渲染成一段
+  `<w:style>` **字符串**，外加 docDefaults / Normal / 目录样式 / settings 网格块 / 表格默认值。
+- **两条路径共用同一份字符串**：`make_canonical_reference.py`（人肉验收件）直接拼进 styles.xml，
+  `40_apply_fixes.py` 用 lxml 解析后注入真实文档。**别在 40 里另写一套 lxml 构造**——"参考件验收通过、
+  流水线注入的是另一套"是本项目最容易犯的漂移（同 `tag_regions` 的教训）。
+- 每个角色带一份 `governs`（该样式承载哪些属性）：它同时决定"指派时清掉哪些直接覆盖"与"45 步全坍缩
+  不变量查哪些键"。**新增一个 canonical 属性 = 同时改 `governs`**，否则清不干净或查不到。
+- 不 import lxml（参考件生成器零依赖）；判定值全部读 spec。
+
 ### `scripts/40_apply_fixes.py`（应用层，直接改 `document.xml`）
-- 所有改动写成**段落/run 的直接属性（override）**，覆盖样式继承值；清缩进用「显式置 0」而非删属性
-  （否则会露出样式里的缩进）。
+- **规范值优先写进「注入的 canonical 命名样式」**，段落只指派 `pStyle` 并**清掉样式已承载的直接属性**
+  （方案C 阶段2；角色分派复用 `checks.paragraph_role`，判定/指派同源）。没有 canonical 样式承载的角色
+  （目录条目）才继续写段落直接属性。
+- 直接属性里的缩进**只写字符单位**（`firstLineChars`/`leftChars`），不补非零绝对伴随值；清缩进用
+  「显式置 0」而非删属性（否则会露出样式里的缩进）。
 - `format` op 的每个 `set_*` / `clear_*` / `strip_text` 键，在 `main()` 的 `op == "format"` 分支里
   各有一段应用逻辑；改 `w:t` 文本时只动内容 run（`_iter_runs` 已跳过文本框 `w:txbxContent`），
   保留行内空格与 `xml:space`。
+- **每段只挂一条批注**：同一段落的多条 fix（如字体 fix + 序号 fix）在 `main()` 末尾用 `pending_comments`
+  合并成**一条** XAgent 批注，避免同一行叠多个批注区间。所以「文档里的批注数」按段落计、可能少于
+  `fixes.json` 的条目数——`summary.md` 仍逐条列，两者口径不同是正常的，别当成漏批注。
 
 ## 提交
 

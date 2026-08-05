@@ -54,14 +54,13 @@ never flagged at all (e.g. a heading with no number and no heading-ish
 style) into a heading, or demotes a false positive to null.
 
 Effect: rewrites <workdir>/structure.json in place (a pre-review copy is
-kept as structure.pre_review.json), recomputes the cover/toc/body region
+kept as structure.pre_review.json) and recomputes the cover/toc/body region
 boundary (promoting/demoting the document's first heading can move where
 that boundary falls — everything before it is otherwise silently excluded
-from all body-region checks), AND regenerates <workdir>/shards/*, so that
-whichever check path runs next (full or sharded) sees the corrected level —
-which also determines which font spec applies (黑体 for level 1, 楷体 for
-level 2, 仿宋 for level 3/4), so correcting a level must refresh formatting,
-not just renumbering.
+from all body-region checks), so that the format check (30_check_format.py)
+sees the corrected level — which also determines which font spec applies
+(黑体 for level 1, 楷体 for level 2, 仿宋 for level 3/4), so correcting a
+level must refresh formatting, not just renumbering.
 
 Safe to run with an empty overrides.json ({} or {"headings":{},"captions":{}})
 if review found nothing to correct — it's a no-op in that case.
@@ -73,6 +72,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lib"))
 from headings import RE_CAPTION, parse_leading_label
+from structure import tag_regions
 
 
 _COVER_ROLES = ("title", "classification", "field", "other")
@@ -116,46 +116,11 @@ def _full_text(r):
     return r.get("text") or ""
 
 
-def _retag_regions(records):
-    # Mirrors 20_extract_structure.py's region-tagging pass exactly. Must be
-    # redone here: promoting a previously-undetected paragraph to a heading
-    # (or demoting the old "first heading") can move where the cover/body
-    # boundary actually falls. Without this, paragraphs between a newly
-    # promoted early heading and the old first-detected one would stay
-    # mis-tagged "cover" — invisible to every body-region check (font,
-    # indent, continuity) even though they are now clearly body content.
-    first_toc_idx = next((r["i"] for r in records if r["is_toc"]), None)
-    first_heading_idx = next((r["i"] for r in records if r["is_heading"]), None)
-    cover_end = first_toc_idx if first_toc_idx is not None else first_heading_idx
-    for r in records:
-        if r["is_toc"]:
-            r["region"] = "toc"
-        elif cover_end is not None and r["i"] < cover_end:
-            r["region"] = "cover"
-        else:
-            r["region"] = "body"
-
-
-def _rewrite_shards(workdir, records):
-    shard_dir = os.path.join(workdir, "shards")
-    if not os.path.isdir(shard_dir):
-        return
-    existing = sorted(f for f in os.listdir(shard_dir) if f.startswith("shard_"))
-    shard_size = 400
-    if existing:
-        with open(os.path.join(shard_dir, existing[0]), encoding="utf-8") as f:
-            shard_size = max(len(json.load(f).get("records", [])), 1)
-    for f in existing:
-        os.remove(os.path.join(shard_dir, f))
-    for si, start in enumerate(range(0, len(records), shard_size)):
-        chunk = records[start:start + shard_size]
-        name = "shard_%03d.json" % si
-        with open(os.path.join(shard_dir, name), "w", encoding="utf-8") as f:
-            json.dump({"shard_id": si, "range": [chunk[0]["i"], chunk[-1]["i"]],
-                       "records": chunk}, f, ensure_ascii=False)
-
-
 def main():
+    if len(sys.argv) < 3:
+        print(json.dumps({"status": "error",
+                          "error": "usage: 27_apply_review.py <workdir> <overrides.json>"}))
+        sys.exit(1)
     workdir = sys.argv[1]
     overrides_path = sys.argv[2]
 
@@ -222,15 +187,19 @@ def main():
             raise ValueError("cover_present must be a list of field-name strings")
         structure["cover_present"] = cover_present
 
-    _retag_regions(records)
+    # Promoting a previously-undetected paragraph to a heading (or demoting the
+    # old "first heading") can move where the cover/body boundary falls, so the
+    # region tags must be recomputed with the same logic 20_extract_structure.py
+    # used — otherwise paragraphs between a newly promoted early heading and the
+    # old first-detected one stay mis-tagged "cover", invisible to every
+    # body-region check (font, indent, continuity).
+    tag_regions(records)
 
     bak = os.path.join(workdir, "structure.pre_review.json")
     if not os.path.exists(bak):
         shutil.copyfile(structure_path, bak)
     with open(structure_path, "w", encoding="utf-8") as f:
         json.dump(structure, f, ensure_ascii=False)
-
-    _rewrite_shards(workdir, records)
 
     print(json.dumps({
         "status": "ok",

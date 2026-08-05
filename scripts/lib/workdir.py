@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Shared helpers for locating and validating the pipeline's working directory.
 
-All intermediate artifacts (working.docx / structure.json / shards/ / fixes.json
+All intermediate artifacts (working.docx / structure.json / fixes.json
 / out_pkg/ / formatted.docx ...) live under ONE per-run ``<workdir>``. To keep
 those files from scattering, and to keep concurrent sessions from clobbering
 each other, every run gets its OWN uniquely-named ``<workdir>`` created atomically

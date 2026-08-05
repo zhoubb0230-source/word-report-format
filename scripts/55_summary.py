@@ -28,7 +28,9 @@ from datetime import datetime
 OP_CATEGORY = {
     "format": "格式（字体/字号/行距/缩进）",
     "renumber_heading": "标题序号",
+    "autonumber_heading": "标题序号（改用自动编号）",
     "renumber_caption": "图表编号",
+    "autonumber_caption": "图表编号（改用自动编号）",
     "section": "页面边距",
 }
 # hint rule_id -> category label (finer than the bare "提示")
@@ -38,6 +40,8 @@ HINT_CATEGORY = {
     "cover.green": "封面背景颜色",
     "caption.content": "图表缺少内容说明",
     "heading.unconfirmed": "疑似标题（未确认）",
+    "toc.depth": "目录层级超三级",
+    "page_number.font": "页码字体",
 }
 
 

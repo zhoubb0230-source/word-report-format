@@ -122,6 +122,22 @@ def name_to_halfpt(name):
 # ---------------------------------------------------------------------------
 # Canonical body-paragraph iterator
 # ---------------------------------------------------------------------------
+def in_textbox(el, stop_at=None):
+    """True if el is nested inside a <w:txbxContent> (a textbox), walking up the
+    ancestor chain until stop_at (exclusive) or the root.
+
+    Textbox content is not part of the linear reading flow and must not be
+    treated as body paragraphs, nor restyled as a side effect of editing the
+    host paragraph. Shared by iter_body_paragraphs (stop_at=None, walk to root)
+    and the run iterators (stop_at=p, only look above the paragraph)."""
+    anc = el.getparent()
+    while anc is not None and anc is not stop_at:
+        if anc.tag == qn("w:txbxContent"):
+            return True
+        anc = anc.getparent()
+    return False
+
+
 # BOTH extraction and apply MUST use this so that "para_index" refers to the
 # same physical <w:p> in both passes. It walks every <w:p> that is a descendant
 # of <w:body> in document order, including paragraphs inside tables, but skips
@@ -133,18 +149,44 @@ def iter_body_paragraphs(doc_root):
         return
     idx = 0
     for p in body.iter(qn("w:p")):
-        # skip textbox paragraphs
-        anc = p.getparent()
-        in_txbx = False
-        while anc is not None:
-            if anc.tag == qn("w:txbxContent"):
-                in_txbx = True
-                break
-            anc = anc.getparent()
-        if in_txbx:
+        if in_textbox(p):  # skip textbox paragraphs
             continue
         yield idx, p
         idx += 1
+
+
+def para_inline_items(p):
+    """段落自身（不含文本框）的 `w:t` / `w:tab`，**按文档顺序**。
+
+    `para_text` 只拼 `w:t`，制表符对整条流水线是**不可见**的——"序号与标题之间到底是
+    空格还是制表符"就看不出来。需要判定分隔符时用这个：它把两类内联内容按真实顺序
+    一起给出，调用方自己按 `el.tag` 分辨。"""
+    return [el for el in p.iter(qn("w:t"), qn("w:tab"))
+            if not in_textbox(el, stop_at=p)]
+
+
+def label_followed_by_tab(p, label):
+    """段落开头的序号 ``label`` 之后，紧跟的分隔符是不是一个真正的制表符（`w:tab`）？
+
+    判据：跳过 label 那么多个字符之后，在遇到**第一个非空白字符**之前出现了 `w:tab`。
+    这样 "一、<tab>绪论"、"一、 <tab>绪论" 都算 True，"一、 绪论"、"一、绪论" 算 False。
+    抽取阶段据此记 `num_tab`，判定层才知道要不要补制表符（补完再跑一遍不会重复补）。"""
+    if not label:
+        return False
+    n = len(label)
+    pos = 0
+    for el in para_inline_items(p):
+        if el.tag == qn("w:tab"):
+            if pos >= n:
+                return True
+            continue
+        txt = el.text or ""
+        if pos + len(txt) > n:
+            tail = txt[max(0, n - pos):]
+            if tail.strip():
+                return False        # 序号后直接是标题文字，中间没有制表符
+        pos += len(txt)
+    return False
 
 
 def para_text(p):
@@ -246,6 +288,81 @@ class StyleResolver:
             _merge(rpr, read_rpr(mark_rpr_el))
         return ppr, rpr
 
+    def resolve_cascade(self, style_id, direct_ppr_el, mark_rpr_el,
+                        num_levels=None):
+        """Like ``resolve`` but folds the NUMBERING layer into the cascade.
+
+        The real WordprocessingML precedence for a numbered paragraph's
+        indentation is::
+
+            docDefaults  <  paragraph style chain  <  numbering level  <  direct
+
+        ``resolve`` above stops at the style chain and never consults the
+        numbering level, so an indent (very often a ``w:hanging``) that a
+        heading inherits from its list level is INVISIBLE to it — the paragraph
+        looks compliant while Word renders a hanging indent. This method inserts
+        the numbering level's ``w:pPr`` between the style chain and the direct
+        pPr, at the correct precedence (it OVERRIDES the style chain but is
+        OVERRIDDEN by any direct value), so the returned ppr reflects the indent
+        the reader actually sees. That is the "把编号层折进有效值" requirement
+        from the 方案C 契约 (§2.3) and the foundation the collapse-invariant
+        check builds on.
+
+        ``num_levels`` is the map returned by :func:`load_numbering_levels`
+        (numId -> {ilvl: pPr_dict}). When it is None/empty this degrades to
+        exactly ``resolve``'s result, so callers without a numbering.xml are
+        unaffected. Only the paragraph pPr is folded (that is where a list level
+        carries its indent); the numbering level's own rPr is not merged — a
+        deliberate, documented limitation kept to match
+        ``load_numbering_levels``.
+
+        The winning numId/ilvl is computed with the same precedence: a direct
+        ``w:numPr`` beats one inherited from the style chain. numId "0" is the
+        OOXML "no numbering" override and disables the fold.
+        """
+        # 1) docDefaults + full style chain (no direct yet).
+        ppr = dict(self.doc_ppr)
+        rpr = dict(self.doc_rpr)
+        sid = style_id or self.default_para_style
+        for st in self._style_chain(sid):
+            spr = st.find(qn("w:pPr"))
+            if spr is not None:
+                _merge(ppr, read_ppr(spr))
+            srp = st.find(qn("w:rPr"))
+            if srp is not None:
+                _merge(rpr, read_rpr(srp))
+
+        # 2) Resolve the effective numbering reference: a direct numPr wins over
+        #    one inherited through the style chain (already in ppr from step 1).
+        direct_ppr = read_ppr(direct_ppr_el) if direct_ppr_el is not None else {}
+        num_id = direct_ppr.get("num_id")
+        if num_id is None:
+            num_id = ppr.get("num_id")
+        ilvl = direct_ppr.get("ilvl")
+        if ilvl is None:
+            ilvl = ppr.get("ilvl")
+
+        # 3) Fold the numbering level's pPr in — over the style chain, under the
+        #    direct pPr applied next.
+        if num_levels and num_id and num_id != "0":
+            try:
+                il = int(ilvl) if ilvl is not None else 0
+            except (ValueError, TypeError):
+                il = 0
+            lvl_ppr = num_levels.get(num_id, {}).get(il)
+            if lvl_ppr:
+                _merge(ppr, lvl_ppr)
+
+        # 4) Direct paragraph pPr + paragraph-mark rPr (highest precedence).
+        if direct_ppr_el is not None:
+            _merge(ppr, direct_ppr)
+            mrp = direct_ppr_el.find(qn("w:rPr"))
+            if mrp is not None:
+                _merge(rpr, read_rpr(mrp))
+        if mark_rpr_el is not None:
+            _merge(rpr, read_rpr(mark_rpr_el))
+        return ppr, rpr
+
 
 def _merge(base, extra):
     """Overlay non-None values from extra onto base."""
@@ -280,6 +397,8 @@ def read_rpr(rpr):
 def read_ppr(ppr):
     d = {"jc": None, "outline": None,
          "line": None, "line_rule": None,
+         "space_before": None, "space_after": None,
+         "space_before_lines": None, "space_after_lines": None,
          "first_line_chars": None, "first_line": None,
          "left_chars": None, "left": None,
          "start_chars": None, "start": None,
@@ -318,6 +437,15 @@ def read_ppr(ppr):
             except ValueError:
                 pass
         d["line_rule"] = sp.get(qn("w:lineRule"))
+        for attr, key in (("before", "space_before"), ("after", "space_after"),
+                          ("beforeLines", "space_before_lines"),
+                          ("afterLines", "space_after_lines")):
+            v = sp.get(qn("w:" + attr))
+            if v is not None:
+                try:
+                    d[key] = int(v)
+                except ValueError:
+                    d[key] = v
     ind = ppr.find(qn("w:ind"))
     if ind is not None:
         for attr, key in (("firstLineChars", "first_line_chars"),
@@ -410,14 +538,7 @@ def iter_text_runs(p):
     belong to a different logical paragraph.
     """
     for run in p.iter(qn("w:r")):
-        anc = run.getparent()
-        in_txbx = False
-        while anc is not None and anc is not p:
-            if anc.tag == qn("w:txbxContent"):
-                in_txbx = True
-                break
-            anc = anc.getparent()
-        if in_txbx:
+        if in_textbox(run, stop_at=p):
             continue
         txt = "".join((t.text or "") for t in run.findall(qn("w:t")))
         if txt:
@@ -431,3 +552,306 @@ def run_effective_rpr(run, baseline):
     if rpr is not None:
         _merge(eff, read_rpr(rpr))
     return eff
+
+
+def char_styles_overriding(styles_root):
+    """styleId 集合：那些**字符样式**（`w:type="character"`）设置了 canonical 段落样式
+    要管的属性（字体 / 字号 / 加粗），含经 basedOn 继承来的。
+
+    为什么需要：字符样式挂在 run 上，在 cascade 里**压过段落样式**。一段标题若有几个
+    run 带这种字符样式，指派 canonical 标题样式后那几个 run 依然我行我素——用户看到的
+    就是"同一个三级标题前半部分加粗、后半部分不加粗，样式好像只应用到了后半部分"。
+
+    `40_apply_fixes.py`（指派时摘掉这些 run 上的 `w:rStyle` 引用）与
+    `45_validate_output.py`（坍缩不变量把它算作泄漏）**共用这一份判断**，免得两边对
+    "哪些字符样式算抢戏"各有一套、彼此打架。只设颜色/下划线之类的字符样式（超链接、
+    批注引用）不在集合里，指派不会动它们。"""
+    if styles_root is None:
+        return frozenset()
+    by_id, based = {}, {}
+    for st in styles_root.findall(qn("w:style")):
+        if st.get(qn("w:type")) != "character":
+            continue
+        sid = st.get(qn("w:styleId"))
+        if not sid:
+            continue
+        by_id[sid] = st
+        b = st.find(qn("w:basedOn"))
+        based[sid] = b.get(qn("w:val")) if b is not None else None
+
+    def sets_governed(sid, seen):
+        if sid in seen or sid not in by_id:
+            return False
+        seen.add(sid)
+        rpr = by_id[sid].find(qn("w:rPr"))
+        if rpr is not None:
+            for tag in ("w:rFonts", "w:sz", "w:szCs", "w:b", "w:bCs"):
+                if rpr.find(qn(tag)) is not None:
+                    return True
+        parent = based.get(sid)
+        return sets_governed(parent, seen) if parent else False
+
+    return frozenset(sid for sid in by_id if sets_governed(sid, set()))
+
+
+# ---------------------------------------------------------------------------
+# OOXML 元素顺序（schema sequence）
+# ---------------------------------------------------------------------------
+# WordprocessingML 的复杂类型几乎都是 **xsd:sequence**：子元素顺序错了，文件仍然是
+# 良构 XML、zip 也完好，但**真实 Word 会拒绝打开**并提示"发现无法读取的内容，是否
+# 恢复此文档的内容"。这类事故光靠"XML 良构"检查发现不了（曾把 <w:suff> 写在
+# <w:numFmt> 之前就踩了一次）。
+#
+# 这份顺序表因此有两个用途：
+#  * `40_apply_fixes.py` 插入子元素时按它找位置（`_get_or_make` 自动查表）；
+#  * `45_validate_output.py` 在产物上逐个容器复查一遍，顺序错了当场硬失败。
+# 只列我们会写到的容器；未列出的容器不参与检查，未知子元素在比较时被跳过。
+ELEMENT_ORDER = {
+    "w:pPr": (
+        "pStyle", "keepNext", "keepLines", "pageBreakBefore", "framePr",
+        "widowControl", "numPr", "suppressLineNumbers", "pBdr", "shd", "tabs",
+        "suppressAutoHyphens", "kinsoku", "wordWrap", "overflowPunct",
+        "topLinePunct", "autoSpaceDE", "autoSpaceDN", "bidi", "adjustRightInd",
+        "snapToGrid", "spacing", "ind", "contextualSpacing", "mirrorIndents",
+        "suppressOverlap", "jc", "textDirection", "textAlignment",
+        "textboxTightWrap", "outlineLvl", "divId", "cnfStyle", "rPr", "sectPr",
+        "pPrChange",
+    ),
+    "w:rPr": (
+        "rStyle", "rFonts", "b", "bCs", "i", "iCs", "caps", "smallCaps",
+        "strike", "dstrike", "outline", "shadow", "emboss", "imprint",
+        "noProof", "snapToGrid", "vanish", "webHidden", "color", "spacing",
+        "w", "kern", "position", "sz", "szCs", "highlight", "u", "effect",
+        "bdr", "shd", "fitText", "vertAlign", "rtl", "cs", "em", "lang",
+        "eastAsianLayout", "specVanish", "oMath", "rPrChange",
+    ),
+    "w:numPr": ("ilvl", "numId", "numberingChange", "ins"),
+    "w:lvl": (
+        "start", "numFmt", "lvlRestart", "pStyle", "isLgl", "suff", "lvlText",
+        "lvlPicBulletId", "legacy", "lvlJc", "pPr", "rPr",
+    ),
+    "w:abstractNum": (
+        "nsid", "multiLevelType", "tmpl", "name", "styleLink", "numStyleLink",
+        "lvl",
+    ),
+    "w:num": ("abstractNumId", "lvlOverride"),
+    "w:style": (
+        "name", "aliases", "basedOn", "next", "link", "autoRedefine", "hidden",
+        "uiPriority", "semiHidden", "unhideWhenUsed", "qFormat", "locked",
+        "personal", "personalCompose", "personalReply", "rsid", "pPr", "rPr",
+        "tblPr", "trPr", "tcPr", "tblStylePr",
+    ),
+    "w:tblPr": (
+        "tblStyle", "tblpPr", "tblOverlap", "bidiVisual", "tblStyleRowBandSize",
+        "tblStyleColBandSize", "tblW", "tblJc", "tblCellSpacing", "tblInd",
+        "tblBorders", "shd", "tblLayout", "tblCellMar", "tblLook", "tblCaption",
+        "tblDescription", "tblPrChange",
+    ),
+    "w:tcPr": (
+        "cnfStyle", "tcW", "gridSpan", "hMerge", "vMerge", "tcBorders", "shd",
+        "noWrap", "tcMar", "textDirection", "tcFitText", "vAlign", "hideMark",
+        "headers", "cellIns", "cellDel", "cellMerge", "tcPrChange",
+    ),
+    "w:sectPr": (
+        # headerReference / footerReference 是 EG_HdrFtrReferences —— 一个**可重复的
+        # choice**，两者可以任意交错出现。写成先后关系会把合法文档误判成乱序（真实
+        # 文档里 footerReference 出现在 headerReference 之前很常见），故并列同级。
+        ("headerReference", "footerReference"),
+        "footnotePr", "endnotePr", "type",
+        "pgSz", "pgMar", "paperSrc", "pgBorders", "lnNumType", "pgNumType",
+        "cols", "formProt", "vAlign", "noEndnote", "titlePg", "textDirection",
+        "bidi", "rtlGutter", "docGrid", "printerSettings", "sectPrChange",
+    ),
+    "w:styles": ("docDefaults", "latentStyles", "style"),
+    "w:numbering": ("numPicBullet", "abstractNum", "num", "numIdMacAtCleanup"),
+    # CT_Settings 的 sequence（节选常见项）。`updateFields` 曾被 insert(0,...) 塞到
+    # 最前面——那也是乱序。
+    "w:settings": (
+        "writeProtection", "view", "zoom", "removePersonalInformation",
+        "removeDateAndTime", "doNotDisplayPageBoundaries", "displayBackgroundShape",
+        "printPostScriptOverText", "printFractionalCharacterWidth", "printFormsData",
+        "embedTrueTypeFonts", "embedSystemFonts", "saveSubsetFonts", "saveFormsData",
+        "mirrorMargins", "alignBordersAndEdges", "bordersDoNotSurroundHeader",
+        "bordersDoNotSurroundFooter", "gutterAtTop", "hideSpellingErrors",
+        "hideGrammaticalErrors", "activeWritingStyle", "proofState", "formsDesign",
+        "attachedTemplate", "linkStyles", "stylePaneFormatFilter",
+        "stylePaneSortMethod", "documentType", "mailMerge", "revisionView",
+        "trackChanges", "doNotTrackMoves", "doNotTrackFormatting",
+        "documentProtection", "autoFormatOverride", "styleLockTheme",
+        "styleLockQFSet", "defaultTabStop", "autoHyphenation",
+        "consecutiveHyphenLimit", "hyphenationZone", "doNotHyphenateCaps",
+        "showEnvelope", "summaryLength", "clickAndTypeStyle", "defaultTableStyle",
+        "evenAndOddHeaders", "bookFoldRevPrinting", "bookFoldPrinting",
+        "bookFoldPrintingSheets", "drawingGridHorizontalSpacing",
+        "drawingGridVerticalSpacing", "displayHorizontalDrawingGridEvery",
+        "displayVerticalDrawingGridEvery", "doNotUseMarginsForDrawingGridOrigin",
+        "drawingGridHorizontalOrigin", "drawingGridVerticalOrigin",
+        "doNotShadeFormData", "noPunctuationKerning", "characterSpacingControl",
+        "printTwoOnOne", "strictFirstAndLastChars", "noLineBreaksAfter",
+        "noLineBreaksBefore", "savePreviewPicture", "doNotValidateAgainstSchema",
+        "saveInvalidXml", "ignoreMixedContent", "alwaysShowPlaceholderText",
+        "doNotDemarcateInvalidXml", "saveXmlDataOnly", "useXSLTWhenSaving",
+        "saveThroughXslt", "showXMLTags", "alwaysMergeEmptyNamespace",
+        "updateFields", "hdrShapeDefaults", "footnotePr", "endnotePr", "compat",
+        "docVars", "rsids", "mathPr", "attachedSchema", "themeFontLang",
+        "clrSchemeMapping", "doNotIncludeSubdocsInStats",
+        "doNotAutoCompressPictures", "forceUpgrade", "captions",
+        "readModeInkLockDown", "smartTagType", "schemaLibrary", "shapeDefaults",
+        "doNotEmbedSmartTags", "decimalSymbol", "listSeparator",
+    ),
+}
+
+
+def _rank_map(order):
+    """把顺序表（元素名，或"同级可互换"的名字元组）压成 {名字: 序号}。"""
+    ranks = {}
+    for i, entry in enumerate(order):
+        for name in ((entry,) if isinstance(entry, str) else entry):
+            ranks[name] = i
+    return ranks
+
+
+RANKS = {tag: _rank_map(order) for tag, order in ELEMENT_ORDER.items()}
+
+
+def local_name(el):
+    return etree.QName(el).localname
+
+
+def ordered_insert(parent, el, order):
+    """按 schema 顺序把 el 插进 parent；未知子元素不参与比较（跳过）。
+
+    ``order`` 可以是 `ELEMENT_ORDER` 里的顺序表，也可以直接是 {名字: 序号} 的 rank 表。"""
+    ranks = order if isinstance(order, dict) else _rank_map(order)
+    idx = ranks.get(local_name(el))
+    if idx is None:
+        parent.append(el)
+        return el
+    for child in parent:
+        if not isinstance(child.tag, str):
+            continue
+        cidx = ranks.get(local_name(child))
+        if cidx is not None and cidx > idx:
+            child.addprevious(el)
+            return el
+    parent.append(el)
+    return el
+
+
+def order_for(parent):
+    """该容器的 rank 表（没登记则 None）。"""
+    return RANKS.get("w:" + local_name(parent))
+
+
+def comment_problems(doc_root, comments_root=None):
+    """批注一致性问题清单（Word 判"发现无法读取的内容"的一类成因）。
+
+    查三样，全是 Word 打开时会当成损坏的：
+      * **悬空引用** —— document.xml 里的 `commentReference` / `commentRangeStart`
+        指向 comments.xml 里没有的 id；
+      * **id 重复** —— 同一个 id 被多个 `commentRangeStart` 用掉，或 comments.xml 里
+        有两条同 id 的批注；
+      * **区间不配对** —— `commentRangeStart` 没有对应的 `commentRangeEnd`（反之亦然）。
+
+    历史成因：批注写入曾**整体覆盖** comments.xml，原文档自带的审阅批注被抹掉、
+    document.xml 里它们的标记变成悬空引用，新批注的 id 还从 0 重排、与残留标记撞车。
+    45 与 diagnose_docx 共用本函数（同一规则只写一份）。"""
+    def _ids(tag):
+        out = []
+        for el in doc_root.iter(qn(tag)):
+            v = el.get(qn("w:id"))
+            if v is not None:
+                out.append(v)
+        return out
+
+    problems = []
+    starts, ends = _ids("w:commentRangeStart"), _ids("w:commentRangeEnd")
+    refs = _ids("w:commentReference")
+    defined = []
+    if comments_root is not None:
+        for c in comments_root.findall(qn("w:comment")):
+            v = c.get(qn("w:id"))
+            if v is not None:
+                defined.append(v)
+
+    dup_defined = sorted({v for v in defined if defined.count(v) > 1})
+    if dup_defined:
+        problems.append({"kind": "duplicate_comment_id", "ids": dup_defined,
+                         "hint": "comments.xml 里有多条同 id 的批注"})
+    dup_starts = sorted({v for v in starts if starts.count(v) > 1})
+    if dup_starts:
+        problems.append({"kind": "duplicate_comment_range", "ids": dup_starts,
+                         "hint": "同一个批注 id 被多个 commentRangeStart 占用"})
+    if comments_root is not None:
+        dangling = sorted(set(refs + starts) - set(defined))
+        if dangling:
+            problems.append({"kind": "dangling_comment_reference", "ids": dangling,
+                             "hint": "document.xml 引用了 comments.xml 里不存在的批注"})
+    unmatched = sorted(set(starts) ^ set(ends))
+    if unmatched:
+        problems.append({"kind": "unbalanced_comment_range", "ids": unmatched,
+                         "hint": "commentRangeStart/End 没有配对"})
+    return problems
+
+
+def numbering_link_problems(numbering_root):
+    """编号定义里"两条 abstractNum 抢同一个身份"的问题清单。
+
+    `w:styleLink`/`w:numStyleLink` 把 abstractNum 与一个**编号样式**绑定，级别上的
+    `w:pStyle` 把该级别与一个**段落样式**绑定——两者都必须唯一。克隆 abstractNum 时若
+    把这些链接一并复制过去，文档里就有两条列表自称同一个编号样式、绑定同一批标题样式，
+    Word 打开时判定需要修复，编号本身也无从预期。"""
+    problems = []
+    for tag, kind in (("w:styleLink", "duplicate_num_style_link"),
+                      ("w:numStyleLink", "duplicate_num_style_link")):
+        seen = {}
+        for anum in numbering_root.findall(qn("w:abstractNum")):
+            el = anum.find(qn(tag))
+            if el is None or not el.get(qn("w:val")):
+                continue
+            seen.setdefault(el.get(qn("w:val")), []).append(
+                anum.get(qn("w:abstractNumId")))
+        for val, owners in seen.items():
+            if len(owners) > 1:
+                problems.append({"kind": kind, "element": tag, "value": val,
+                                 "abstractNumIds": owners})
+    linked = {}
+    for anum in numbering_root.findall(qn("w:abstractNum")):
+        for lvl in anum.findall(qn("w:lvl")):
+            ps = lvl.find(qn("w:pStyle"))
+            if ps is not None and ps.get(qn("w:val")):
+                linked.setdefault(ps.get(qn("w:val")), []).append(
+                    anum.get(qn("w:abstractNumId")))
+    for sid, owners in linked.items():
+        if len(set(owners)) > 1:
+            problems.append({"kind": "duplicate_num_pstyle_link", "styleId": sid,
+                             "abstractNumIds": sorted(set(owners))})
+    return problems
+
+
+def order_violations(root):
+    """产物自检：返回 [(容器名, 乱序的子元素名, 它前面那个子元素名)]。
+
+    只查 `ELEMENT_ORDER` 里列出的容器，未知子元素跳过——这样表不全时只会漏报，
+    不会把 Word 本来打得开的文档误判成坏文件。同级可互换的元素（如 sectPr 里的
+    header/footer 引用）共用一个序号，不会被误报。"""
+    bad = []
+    for parent in root.iter():
+        if not isinstance(parent.tag, str):
+            continue
+        ranks = RANKS.get("w:" + local_name(parent))
+        if not ranks:
+            continue
+        prev_name, prev_idx = None, -1
+        for child in parent:
+            if not isinstance(child.tag, str):
+                continue
+            name = local_name(child)
+            idx = ranks.get(name)
+            if idx is None:
+                continue
+            if idx < prev_idx:
+                bad.append((local_name(parent), name, prev_name))
+            else:
+                prev_name, prev_idx = name, idx
+    return bad

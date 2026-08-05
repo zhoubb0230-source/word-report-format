@@ -140,6 +140,28 @@ def _check_element_order(zf):
     return out
 
 
+def _problem_key(item):
+    return json.dumps(item, sort_keys=True, ensure_ascii=False)
+
+
+def _split_preexisting(out_items, ref_items):
+    """把**原件本来就有的**同类问题从产物问题里摘出来，返回 (新引入的, 原件已有的)。
+
+    为什么需要：`_check_element_order` / `_check_comments_and_numbering` 查的是
+    "良构但 Word 拒绝打开"的结构性损坏，而真实模板（WPS/LibreOffice 转换件尤其）
+    **本来就带**这类毛病——用户实测报过：原文档的 `numbering.xml` 里某个列表级别的
+    `rPr` 把 `shadow` 写在了 `specVanish` 之后，成品照样能正常打开，45 却因此退 2 挡住
+    交付。我们没引入的问题不该由我们的自检来拦；报出来让用户知道即可（要根治得改原件）。
+
+    比较**只看签名、不看条数**：甲法克隆钳会把模板里的 `abstractNum` 复制一份，原件
+    里出现一次的毛病在产物里就成了两次——按条数扣会把复制出来的那份判成"新引入"。"""
+    ref = {_problem_key(x) for x in ref_items}
+    new, pre = [], []
+    for it in out_items:
+        (pre if _problem_key(it) in ref else new).append(it)
+    return new, pre
+
+
 def _check_comments_and_numbering(zf):
     """批注一致性 + 编号身份链接唯一性——都是"良构但 Word 拒绝打开"的成因，
     与元素顺序同类，`45` 里一并硬查。规则实现在 `docxcommon`，与 diagnose_docx 共用。"""
@@ -274,6 +296,7 @@ def _check_canonical_collapse(zf, spec):
 
 def validate(formatted_path, reference_path=None, indent_fix_indices=()):
     errors = []
+    warnings = []
     info = {}
 
     if not os.path.exists(formatted_path):
@@ -350,25 +373,46 @@ def validate(formatted_path, reference_path=None, indent_fix_indices=()):
             except (etree.XMLSyntaxError, KeyError) as e:
                 info["clamp_invariant_skipped"] = str(e)
 
+        # 5b/5c 的公共前提：把**原件**也打开一遍。结构性损坏若原件本来就有，就不是
+        #     我们引入的——报成警告、不阻断交付（陷阱：曾因模板自带的 numbering rPr
+        #     乱序把能正常打开的成品挡在门外）。原件读不到就退回"全部当新引入"。
+        ref_order, ref_struct = [], []
+        if reference_path and os.path.exists(reference_path):
+            try:
+                with zipfile.ZipFile(reference_path) as rzf:
+                    ref_order = _check_element_order(rzf)
+                    ref_struct = _check_comments_and_numbering(rzf)
+            except (zipfile.BadZipFile, KeyError, etree.XMLSyntaxError) as e:
+                info["reference_baseline_skipped"] = str(e)
+
         # 5b. 元素顺序（OOXML sequence）：良构但乱序的 XML 会让 Word 提示"发现无法
         #     读取的内容"。这是第 3 项"良构"检查覆盖不到的一类损坏，单列一项。
         try:
-            order_bad = _check_element_order(zf)
+            order_bad, order_pre = _split_preexisting(_check_element_order(zf), ref_order)
             if order_bad:
                 errors.append("元素顺序违反 OOXML sequence：%d 处（Word 会提示"
                               "内容无法读取）" % len(order_bad))
                 info["element_order_violations"] = order_bad[:50]
+            if order_pre:
+                warnings.append("原件本来就有 %d 处元素顺序问题（不是本次引入的，"
+                                "未阻断交付；要根治需修原文档）" % len(order_pre))
+                info["element_order_preexisting"] = order_pre[:50]
         except (etree.XMLSyntaxError, KeyError) as e:
             info["element_order_skipped"] = str(e)
 
         # 5c. 批注一致性（悬空引用/重复 id/区间不配对）与编号身份链接唯一性。
         #     同 5b 一类：XML 良构、zip 完好，Word 照样报"发现无法读取的内容"。
         try:
-            struct_bad = _check_comments_and_numbering(zf)
+            struct_bad, struct_pre = _split_preexisting(
+                _check_comments_and_numbering(zf), ref_struct)
             if struct_bad:
                 errors.append("批注/编号结构损坏：%d 处（Word 会提示内容无法读取）"
                               % len(struct_bad))
                 info["structural_problems"] = struct_bad[:50]
+            if struct_pre:
+                warnings.append("原件本来就有 %d 处批注/编号结构问题（不是本次引入的，"
+                                "未阻断交付）" % len(struct_pre))
+                info["structural_preexisting"] = struct_pre[:50]
         except (etree.XMLSyntaxError, KeyError) as e:
             info["structural_check_skipped"] = str(e)
 
@@ -392,7 +436,8 @@ def validate(formatted_path, reference_path=None, indent_fix_indices=()):
 
     ok = not errors
     return {"status": "ok" if ok else "error", "ok": ok,
-            "formatted_docx": formatted_path, "errors": errors, **info}
+            "formatted_docx": formatted_path, "errors": errors,
+            "warnings": warnings, **info}
 
 
 def main():

@@ -199,7 +199,7 @@ def _new_sets():
             "set_first_line_chars": None,
             "set_left_chars": None,
             "clear_left_indent": False, "clear_right_indent": False,
-            "set_jc": None, "strip_text": None}
+            "set_jc": None, "strip_text": None, "set_number_tab": False}
 
 
 def paragraph_role(rec, spec):
@@ -360,6 +360,7 @@ def check_paragraph(rec, spec):
             sets["set_bold"] = True
             violations.append("%d级标题应加粗" % lvl)
         _check_strip_ends(rec, sets, violations, "%d级标题" % lvl)
+        _check_number_tab(rec, spec, sets, violations, lvl)
         # 一~四级标题行距固定值28磅（与正文一致，取 spec.line_spacing）。
         ls = spec["line_spacing"]
         _check_line_spacing(eff, ls["line_twips"], ls["line_rule"],
@@ -427,6 +428,26 @@ def _check_caption_format(rec, spec):
         _check_no_indent(eff, sets, violations, "图表标题")
     _check_strip_ends(rec, sets, violations, "图表标题")
     return _mk_format(rec["i"], sets, violations)
+
+
+def _check_number_tab(rec, spec, sets, violations, lvl):
+    """**手写在文字里**的标题序号，其后的分隔符也要是制表符。
+
+    交给 Word 维护的自动编号靠编号定义的 `suff=tab` 拿到制表符（阶段0 验收过的排版）；
+    而序号手写在文字里的标题走的是另一条路——`renumber_heading` 只把序号归位成规范
+    token，序号与标题文字之间原样保留原来的空格/无分隔，于是同一份规范在两类文档里
+    长得不一样：用户实测"原文档是手写序号的，生成的标题编号后没有制表符"。
+
+    分隔符取自 `spec.heading_numbering.suffix`（判定值只来自 spec），只在它是 `tab`
+    时补；`rec.num_tab` 由抽取阶段判定（`para_text` 看不见 `w:tab`，必须单独记），
+    已经是制表符就不再报——补完再跑一遍不会重复补。序号**不在文字里**（纯自动编号）的
+    标题 `num_raw` 为空，不走这条。"""
+    if not rec.get("num_raw") or rec.get("num_tab"):
+        return
+    if ((spec.get("heading_numbering") or {}).get("suffix") or "tab") != "tab":
+        return
+    sets["set_number_tab"] = True
+    violations.append("%d级标题序号与标题文字之间应为制表符（与自动编号的排版一致）" % lvl)
 
 
 def _check_strip_ends(rec, sets, violations, label):

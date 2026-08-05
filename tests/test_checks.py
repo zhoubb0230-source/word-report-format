@@ -36,7 +36,8 @@ def rec(i=0, region="body", text="", eff_=None, **kw):
     r = dict(i=i, region=region, text=text, is_blank=False, is_toc=False,
              toc_level=None, auto_num=False, is_title=False, above_title=False,
              cover_role=None, is_heading=False, level=None, level_source=None,
-             num_raw=None, caption=None, in_table=False, eff=eff_ or eff())
+             num_raw=None, num_tab=True, caption=None, in_table=False,
+             eff=eff_ or eff())
     r.update(kw)
     return r
 
@@ -524,6 +525,39 @@ class TestNewFormatRules2026(unittest.TestCase):
         r = rec(text="正文一段。",
                 eff_=eff(space_before=None, space_after=None))
         self.assertIsNone(checks.check_paragraph(r, SPEC))
+
+    def test_typed_heading_number_needs_a_tab(self):
+        """手写序号与标题文字之间要有**制表符**（与自动编号的 suff=tab 对齐）。
+
+        用户实测："原文档是手写序号的情况下，生成的标题编号后没有制表符"。自动编号
+        走编号定义的 suff=tab，手写序号是纯文本、renumber 只归位序号不管分隔符，
+        于是同一份规范在两类文档里长得不一样。"""
+        r = rec(is_heading=True, level=2, level_source="outline", num_raw="(一)",
+                num_tab=False, text="(一)研究方法",
+                eff_=eff(east_asia="楷体", size_hp=32, line=560, line_rule="exact",
+                         first_line_chars=200, bold=True))
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertTrue(fix["set_number_tab"])
+        self.assertIn("制表符", fix["rule_text"])
+
+    def test_heading_number_tab_not_reported_twice(self):
+        """已经是制表符的（`num_tab`）不再报——补完再跑一遍不该重复补。"""
+        r = rec(is_heading=True, level=2, level_source="outline", num_raw="(一)",
+                num_tab=True, text="(一)研究方法",
+                eff_=eff(east_asia="楷体", size_hp=32, line=560, line_rule="exact",
+                         first_line_chars=200, bold=True))
+        self.assertIsNone(checks.check_paragraph(r, SPEC))
+
+    def test_auto_numbered_heading_gets_no_tab_fix(self):
+        """序号不在文字里（纯自动编号）的标题不走这条——制表符由编号定义的 suff 管。"""
+        r = rec(is_heading=True, level=2, level_source="outline", num_raw=None,
+                num_tab=False, auto_num=True, text="研究方法",
+                eff_=eff(east_asia="楷体", size_hp=32, line=560, line_rule="exact",
+                         first_line_chars=200, bold=True))
+        fix = checks.check_paragraph(r, SPEC)
+        # 自动编号段仍会拿到缩进修复（编号层的悬挂缩进），但**不该**被要求补制表符
+        self.assertFalse((fix or {}).get("set_number_tab"))
+        self.assertNotIn("制表符", (fix or {}).get("rule_text", ""))
 
     def test_headings_must_be_bold(self):
         # 2026-07 新增规范：一~四级标题加粗。

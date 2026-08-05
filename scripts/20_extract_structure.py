@@ -37,6 +37,7 @@ from docxcommon import (
     qn, parse_xml, unzip_docx, iter_body_paragraphs, para_text, in_table,
     StyleResolver, read_ppr, read_rpr, get_pPr, get_style_id, get_mark_rpr,
     iter_text_runs, run_effective_rpr, load_numbering_levels,
+    label_followed_by_tab,
 )
 from headings import (
     RE_CAPTION, RE_TOCTITLE, infer_heading_level, parse_leading_label,
@@ -348,6 +349,9 @@ def main():
         if not is_blank and not is_toc and not is_toctitle:
             level, level_source = infer_heading_level(sid, outline, text, resolver)
         num_raw = parse_leading_label(text) if level else None
+        # 序号后的分隔符是不是真制表符。`para_text` 看不见 `w:tab`，不单独记一笔的话
+        # 判定层无从知道"手写序号后缺制表符"，补完也没法判断已经补过（会每轮重复报）。
+        num_tab = label_followed_by_tab(p, num_raw) if num_raw else False
 
         caption = None
         if not is_blank and not is_toc and not is_toctitle and level is None:
@@ -405,6 +409,7 @@ def main():
             "level": level,
             "level_source": level_source,
             "num_raw": num_raw,
+            "num_tab": num_tab,
             "caption": caption,
             "in_table": in_table(p),
             # Whether the paragraph actually contains Western text (Latin letters

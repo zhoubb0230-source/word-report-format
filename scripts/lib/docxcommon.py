@@ -155,6 +155,40 @@ def iter_body_paragraphs(doc_root):
         idx += 1
 
 
+def para_inline_items(p):
+    """段落自身（不含文本框）的 `w:t` / `w:tab`，**按文档顺序**。
+
+    `para_text` 只拼 `w:t`，制表符对整条流水线是**不可见**的——"序号与标题之间到底是
+    空格还是制表符"就看不出来。需要判定分隔符时用这个：它把两类内联内容按真实顺序
+    一起给出，调用方自己按 `el.tag` 分辨。"""
+    return [el for el in p.iter(qn("w:t"), qn("w:tab"))
+            if not in_textbox(el, stop_at=p)]
+
+
+def label_followed_by_tab(p, label):
+    """段落开头的序号 ``label`` 之后，紧跟的分隔符是不是一个真正的制表符（`w:tab`）？
+
+    判据：跳过 label 那么多个字符之后，在遇到**第一个非空白字符**之前出现了 `w:tab`。
+    这样 "一、<tab>绪论"、"一、 <tab>绪论" 都算 True，"一、 绪论"、"一、绪论" 算 False。
+    抽取阶段据此记 `num_tab`，判定层才知道要不要补制表符（补完再跑一遍不会重复补）。"""
+    if not label:
+        return False
+    n = len(label)
+    pos = 0
+    for el in para_inline_items(p):
+        if el.tag == qn("w:tab"):
+            if pos >= n:
+                return True
+            continue
+        txt = el.text or ""
+        if pos + len(txt) > n:
+            tail = txt[max(0, n - pos):]
+            if tail.strip():
+                return False        # 序号后直接是标题文字，中间没有制表符
+        pos += len(txt)
+    return False
+
+
 def para_text(p):
     """Full visible text of a paragraph (concatenate all w:t descendants)."""
     parts = []

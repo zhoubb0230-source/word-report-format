@@ -33,7 +33,7 @@ from docxcommon import (qn, parse_xml, unzip_docx, rezip_docx,
                         StyleResolver, load_numbering_levels,
                         get_style_id, get_pPr, get_mark_rpr,
                         char_styles_overriding, ELEMENT_ORDER, ordered_insert,
-                        local_name, order_for)
+                        local_name, order_for, para_inline_items)
 from commentwriter import CommentWriter
 from headings import ANY_LABEL_RE, CAPTION_STYLE_HINTS
 from checks import load_default_spec, paragraph_role, is_unnumbered_section
@@ -509,6 +509,85 @@ def _apply_renumber_heading(p, fix):
         # position token (there is no existing label to replace).
         return _prepend_text(p, _heading_insert_prefix(fix["new_token"]))
     return _replace_leading(p, STRIP_HEADING, fix["new_token"])
+
+
+def _heading_number_tab(p):
+    """把**手写在文字里**的标题序号与标题文字之间的分隔改成一个真正的制表符。
+
+    为什么需要：自动编号那条路径的制表符来自编号定义的 `suff=tab`；手写序号是纯文本，
+    `renumber_heading` 只把序号归位、分隔符原样保留，于是"同一份规范、两类文档长得不
+    一样"（用户实测："原文档是手写序号的，生成的标题编号后没有制表符"）。落点与自动
+    编号一致，都由 `settings` 的 `defaultTabStop`（2 字符）决定。
+
+    制表符**必须是 `w:tab` 元素**——`w:t` 里塞一个 `\\t` 字符 Word 会当成普通空白。
+    做法：在序号结束处把那个 `w:t` 一切为二，中间插 `w:tab`；序号与标题文字之间原有的
+    空白与制表符一并清掉（只清到第一个非空白字符为止，标题内部的制表符不动）。
+    重复运行是安全的：拆完再拆结果一样（判定层还会先按 `num_tab` 判断已经有制表符了）。
+
+    返回是否改动了段落。"""
+    items = para_inline_items(p)
+    ts = [el for el in items if el.tag == qn("w:t")]
+    if not ts:
+        return False
+    label = ANY_LABEL_RE.match("".join(t.text or "" for t in ts))
+    if not label:
+        return False
+    n = label.end()
+    if not n:
+        return False
+
+    # 序号结束的位置落在哪个 w:t 的第几个字符
+    pos, split_el, split_k = 0, None, 0
+    for t in ts:
+        L = len(t.text or "")
+        if split_el is None and pos + L >= n:
+            split_el, split_k = t, n - pos
+        pos += L
+    tail = (split_el.text or "")[split_k:]
+
+    # 序号之后、第一个非空白字符之前的东西：空白要吃掉、制表符要删掉（下面重新插一个）
+    stripped = tail.lstrip(" \t　")
+    rest = items[items.index(split_el) + 1:]
+    # `_replace_leading`（归位序号）会把整段文字并进第一个 w:t、把后面的清空，原有的
+    # 制表符就被甩到文字后面成了尾巴。识别这个形态（后面的 w:t 全空）后把残留的制表符
+    # 全部清掉；否则只清"序号与标题文字之间"那一段，标题内部的制表符不动。
+    collapsed = all(not (el.text or "") for el in rest if el.tag == qn("w:t"))
+    drop, seen_text = [], bool(stripped)
+    if collapsed:
+        drop = [el for el in rest if el.tag == qn("w:tab")]
+    else:
+        for el in rest:
+            if el.tag == qn("w:tab"):
+                if not seen_text:
+                    drop.append(el)
+                continue
+            if seen_text:
+                break
+            txt = el.text or ""
+            if txt.strip():
+                el.text = txt.lstrip(" \t　")
+                seen_text = True
+            else:
+                el.text = ""
+    if not (stripped or seen_text):
+        return False          # 只有序号、没有标题文字：不加制表符
+    for el in drop:
+        parent = el.getparent()
+        if parent is not None:
+            parent.remove(el)
+
+    split_el.text = (split_el.text or "")[:split_k]
+    split_el.set(XML_SPACE, "preserve")
+    run = split_el.getparent()
+    at = list(run).index(split_el) + 1
+    tab = etree.Element(qn("w:tab"))
+    run.insert(at, tab)
+    if stripped:
+        t2 = etree.Element(qn("w:t"))
+        t2.text = stripped
+        t2.set(XML_SPACE, "preserve")
+        run.insert(at + 1, t2)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1719,6 +1798,10 @@ def main():
     # XAgent comment at the end, so the document isn't littered with several
     # overlapping comment ranges on the same line.
     pending_comments = {}
+    # 需要在**所有 fix 应用完之后**重新分隔"序号 + 制表符 + 标题文字"的段落。
+    number_tab_targets = set()
+    heading_tab = ((spec.get("heading_numbering") or {}).get("suffix")
+                   or "tab") == "tab" if spec else False
 
     for fix in fixes:
         op = fix.get("op")
@@ -1770,6 +1853,10 @@ def main():
                 _set_jc(pPr, fix["set_jc"])
             if fix.get("strip_text"):
                 _strip_para_ws(p, fix["strip_text"])
+            if fix.get("set_number_tab"):
+                # 实际改动推迟到本轮所有 fix 之后：同一段若还有 renumber_heading，
+                # 归位序号会把文字并回一个 w:t、把制表符甩到文字后面。
+                number_tab_targets.add(idx)
             applied["format"] += 1
         elif op == "renumber_caption":
             ok = _apply_renumber_caption(p, fix)
@@ -1785,6 +1872,10 @@ def main():
         elif op == "renumber_heading":
             ok = _apply_renumber_heading(p, fix)
             applied["renumber_heading"] += 1 if ok else 0
+            # 归位序号会把整段文字并回第一个 w:t，原有的制表符会被落在文字后面——
+            # 无论判定层有没有报"缺制表符"，重排过序号的段落都要重新分隔一次。
+            if ok:
+                number_tab_targets.add(idx)
         elif op == "hint":
             applied["hint"] += 1
         else:
@@ -1801,6 +1892,14 @@ def main():
             if slot is None:
                 slot = pending_comments[idx] = [p, []]
             slot[1].append(fix["rule_text"])
+
+    # 手写序号与标题文字之间补制表符——放在所有 fix 之后（renumber 会重排文字）、
+    # 批注之前（批注区间要把最终内容整个包住）。
+    if heading_tab:
+        for idx in sorted(number_tab_targets):
+            p_el = para_by_idx.get(idx)
+            if p_el is not None and _heading_number_tab(p_el):
+                applied["heading_number_tab"] = applied.get("heading_number_tab", 0) + 1
 
     # one XAgent comment per paragraph, joining all its rule texts
     for _idx, (p_el, texts) in pending_comments.items():

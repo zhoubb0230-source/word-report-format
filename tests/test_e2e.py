@@ -1182,6 +1182,42 @@ class TestCanonicalStyleInjection(unittest.TestCase):
         self.assertIsNotNone(body_blank, "正文区空行应套正文样式")
         self.assertEqual(body_blank.get(self.qn("w:val")), "FGWCanonBody")
 
+    def _inline(self, p):
+        """段落的内联内容（w:t 的文字 / 制表符记作 '\\t'），用来看清分隔符。"""
+        out = []
+        for el in p.iter(self.qn("w:t"), self.qn("w:tab")):
+            out.append("\t" if el.tag == self.qn("w:tab") else (el.text or ""))
+        return "".join(out)
+
+    def test_typed_heading_number_gets_a_real_tab(self):
+        """手写序号与标题文字之间补一个**真正的 `w:tab`**（不是空格、也不是 w:t 里的 \\t）。
+
+        用户实测："原文档是手写序号的情况下，生成的标题编号后没有制表符"——自动编号那
+        条路径靠编号定义的 `suff=tab` 拿到制表符，手写序号是纯文本，此前只归位序号、
+        分隔符原样保留。落点与自动编号一致（`defaultTabStop`＝2 字符）。"""
+        def heading(outline, *texts):
+            runs = "".join('<w:r><w:rPr><w:rFonts w:eastAsia="宋体"/>'
+                           '<w:sz w:val="32"/></w:rPr>'
+                           '<w:t xml:space="preserve">%s</w:t></w:r>' % t for t in texts)
+            return ('<w:p><w:pPr><w:outlineLvl w:val="%d"/></w:pPr>%s</w:p>'
+                    % (outline, runs))
+        body = (helpers.para("先进项目2024年度自评价报告", east_asia="宋体",
+                             size_hp=44, jc="center")
+                + heading(0, "一、项目概况")            # 序号已正确，只缺制表符
+                + heading(1, "（一）", "  ", "研究背景")  # 序号要改半角 + 跨 run 的空格
+                # 已经是真制表符的：不该被改坏，也不该多出第二个
+                + ('<w:p><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:r>'
+                   '<w:rPr><w:sz w:val="32"/></w:rPr><w:t>（二）</w:t><w:tab/>'
+                   '<w:t>研究方法</w:t></w:r></w:p>'))
+        wd, _ = self._run(body)
+        paras = list(self._doc(wd).iter(self.qn("w:p")))
+        self.assertEqual(self._inline(paras[1]), "一、\t项目概况")
+        self.assertEqual(self._inline(paras[2]), "(一)\t研究背景")
+        self.assertEqual(self._inline(paras[3]), "(二)\t研究方法")
+        for p in paras[1:4]:
+            self.assertEqual(len(p.findall(".//" + self.qn("w:tab"))), 1,
+                             "序号后应恰好一个制表符（不能重复补、也不能留下尾巴）")
+
     def test_blank_after_toc_field_gets_body_style(self):
         """目录**域跨度之外**、只是顺手继承了目录样式的空行照样套正文样式。
 
@@ -1707,6 +1743,69 @@ class TestStructuralDetectors(unittest.TestCase):
             '<w:abstractNum w:abstractNumId="1">'
             '<w:lvl w:ilvl="0"/></w:abstractNum></w:numbering>' % self.W)
         self.assertEqual(numbering_link_problems(clean), [])
+
+
+@unittest.skipUnless(HAVE_LXML, "lxml not installed")
+class TestValidatePreexistingProblems(unittest.TestCase):
+    """**原件本来就有的**结构性毛病不该由 45 来拦。
+
+    用户实测：原文档的 `numbering.xml` 里某个列表级别的 `rPr` 把 `shadow` 写在了
+    `specVanish` 之后（违反 CT_RPr 的 sequence），成品在 Word 里能正常打开，45 却退 2
+    挡住交付。我们没引入的问题只报不拦；真·新引入的仍然硬失败。"""
+
+    W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="wrf_pre_")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _script(self, name):
+        return os.path.join(helpers.SCRIPTS, name)
+
+    def _build(self):
+        import zipfile
+        numbering = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<w:numbering xmlns:w="%s"><w:abstractNum w:abstractNumId="0">'
+            '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/>'
+            '<w:lvlText w:val="%%1."/><w:lvlJc w:val="left"/>'
+            # 乱序：specVanish 在 shadow 之前（CT_RPr 的 sequence 要求反过来）
+            '<w:rPr><w:specVanish/><w:shadow/></w:rPr></w:lvl></w:abstractNum>'
+            '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>'
+            '</w:numbering>' % self.W)
+        src = os.path.join(self.tmp, "pre.docx")
+        with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", _CT_LO)
+            z.writestr("_rels/.rels", helpers.ROOT_RELS)
+            z.writestr("word/_rels/document.xml.rels", _DRELS_LO)
+            z.writestr("word/document.xml", helpers.document_xml(
+                helpers.para("一、绪论", east_asia="宋体", size_hp=32, outline=0)
+                + helpers.para("正文内容。", east_asia="宋体", size_hp=32)))
+            z.writestr("word/numbering.xml", numbering)
+        return src
+
+    def test_preexisting_order_violation_warns_but_does_not_block(self):
+        src = self._build()
+        wd = run(self._script("05_new_workdir.py"),
+                 os.path.join(self.tmp, "wb"))["workdir"]
+        run(self._script("10_prepare_input.py"), src, wd)
+        run(self._script("20_extract_structure.py"), wd)
+        run(self._script("30_check_format.py"), wd)
+        run(self._script("40_apply_fixes.py"), wd)
+        # run() 断言退出码 0——原件自带的乱序不该让自检退 2
+        report = run(self._script("45_validate_output.py"), wd)
+        self.assertTrue(report["ok"], report.get("errors"))
+        self.assertTrue(report.get("element_order_preexisting"),
+                        "原件自带的乱序应作为警告报出来，而不是消失")
+        self.assertTrue(any("原件" in w for w in report.get("warnings", [])))
+
+        # 对照：拿不到原件做基线时，同一处乱序仍然算"新引入"、硬失败
+        mod = helpers.load_script("45_validate_output.py")
+        blind = mod.validate(os.path.join(wd, "formatted.docx"), None, ())
+        self.assertFalse(blind["ok"])
+        self.assertTrue(any("元素顺序" in e for e in blind["errors"]))
 
 
 if __name__ == "__main__":

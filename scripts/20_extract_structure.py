@@ -37,6 +37,7 @@ from docxcommon import (
     qn, parse_xml, unzip_docx, iter_body_paragraphs, para_text, in_table,
     StyleResolver, read_ppr, read_rpr, get_pPr, get_style_id, get_mark_rpr,
     iter_text_runs, run_effective_rpr, load_numbering_levels,
+    label_followed_by_tab,
 )
 from headings import (
     RE_CAPTION, RE_TOCTITLE, infer_heading_level, parse_leading_label,
@@ -333,8 +334,12 @@ def main():
         auto_num = bool(num_id and num_id != "0")
 
         is_blank = not text.strip()
-        is_toc = (style_is_toc(sid, resolver) or has_toc_field(p)
-                  or in_toc_sdt(p) or (i in toc_span))
+        # 段落是否落在**目录域/目录内容控件的跨度内**——即"Word 刷新目录时会重写它"。
+        # 这比 is_toc 严格：is_toc 还包含"只是套着目录样式"的段落，而目录后面那几个
+        # 顺手继承了目录样式的空行并不在域里，动它们没有破坏域的风险（见 40 的
+        # `_blank_style`：空行套正文样式的例外只认这一项，不认样式）。
+        toc_in_field = has_toc_field(p) or in_toc_sdt(p) or (i in toc_span)
+        is_toc = style_is_toc(sid, resolver) or toc_in_field
         is_toctitle = bool(RE_TOCTITLE.match(text))
         toc_level = toc_level_from_style(sid, resolver) if (is_toc and not is_toctitle) else None
 
@@ -344,6 +349,9 @@ def main():
         if not is_blank and not is_toc and not is_toctitle:
             level, level_source = infer_heading_level(sid, outline, text, resolver)
         num_raw = parse_leading_label(text) if level else None
+        # 序号后的分隔符是不是真制表符。`para_text` 看不见 `w:tab`，不单独记一笔的话
+        # 判定层无从知道"手写序号后缺制表符"，补完也没法判断已经补过（会每轮重复报）。
+        num_tab = label_followed_by_tab(p, num_raw) if num_raw else False
 
         caption = None
         if not is_blank and not is_toc and not is_toctitle and level is None:
@@ -390,6 +398,8 @@ def main():
             "text_len": len(text),
             "is_blank": is_blank,
             "is_toc": is_toc or is_toctitle,
+            # 在真正的目录域/内容控件跨度内（刷新目录会重写它）——空行样式的唯一目录例外
+            "toc_in_field": toc_in_field,
             "toc_level": toc_level,
             "auto_num": auto_num,
             "is_title": False,     # set by _mark_title_block() after region tagging
@@ -399,6 +409,7 @@ def main():
             "level": level,
             "level_source": level_source,
             "num_raw": num_raw,
+            "num_tab": num_tab,
             "caption": caption,
             "in_table": in_table(p),
             # Whether the paragraph actually contains Western text (Latin letters

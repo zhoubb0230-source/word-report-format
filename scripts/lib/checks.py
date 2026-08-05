@@ -29,6 +29,11 @@ autonumber fix (把图/表标题交给 Word 自动编号：删掉文字里的静
   {"para_index": i, "op": "renumber_heading", "level": 1,
    "new_token": "二、", "rule_id":..., "rule_text":..., "comment": true}
 
+autonumber fix（标题同理：删掉文字里的手写序号、把段落挂到注入的四级标题列表上。
+`strip` 为 false 表示文字里本来就没有序号，只需挂编号）：
+  {"para_index": i, "op": "autonumber_heading", "level": 1..4, "strip": bool,
+   "rule_id":..., "rule_text":..., "comment": true}
+
 hint fix (NOT auto-fixable, comment only):
   {"para_index": i, "op": "hint", "rule_id":..., "rule_text":..., "comment": true}
 
@@ -199,7 +204,7 @@ def _new_sets():
             "set_first_line_chars": None,
             "set_left_chars": None,
             "clear_left_indent": False, "clear_right_indent": False,
-            "set_jc": None, "strip_text": None}
+            "set_jc": None, "strip_text": None, "set_number_tab": False}
 
 
 def paragraph_role(rec, spec):
@@ -360,6 +365,7 @@ def check_paragraph(rec, spec):
             sets["set_bold"] = True
             violations.append("%d级标题应加粗" % lvl)
         _check_strip_ends(rec, sets, violations, "%d级标题" % lvl)
+        _check_number_tab(rec, spec, sets, violations, lvl)
         # 一~四级标题行距固定值28磅（与正文一致，取 spec.line_spacing）。
         ls = spec["line_spacing"]
         _check_line_spacing(eff, ls["line_twips"], ls["line_rule"],
@@ -427,6 +433,69 @@ def _check_caption_format(rec, spec):
         _check_no_indent(eff, sets, violations, "图表标题")
     _check_strip_ends(rec, sets, violations, "图表标题")
     return _mk_format(rec["i"], sets, violations)
+
+
+def heading_goes_auto(rec, spec):
+    """这条标题的序号该不该**改由 Word 自动编号维护**（连带删掉文字里的手写序号）？
+
+    2026-08 用户裁决："手写序号也转变为自动编号，但要注意去掉原本的手写编号"。取代了
+    第四轮的"文字里有可选中的序号就按手动序号处理"（方案一）。判定与应用**共用这一个
+    谓词**（`continuity` 出 fix、`_check_number_tab` 据它让路），别各写一份。
+
+    四道闸门，缺一不可：
+
+      * `spec.heading_numbering.auto_number` 关掉时整条规则不生效（判定值只来自 spec）；
+      * **未确认的标题**（`pattern`：仅凭序号形状认出、无样式/大纲级别撑腰）绝不碰
+        ——安全阀 #5，它很可能只是一句以"3."开头的正文；
+      * **惯例不编号的章节**（摘要/前言/结论/参考文献/附录/致谢…）不挂编号；它们也
+        **不能**删手写序号——删了又不给编号，等于把内容抹掉；
+      * **表格里的标题**不转：它拿到的是"表格内容"样式，挂上标题列表会在单元格里冒出
+        一个章节号，还会占掉 Word 列表里的一个计数位。这类段落维持原来的静态重编号。
+
+    还有一条**退化情形**：整段文字就是那个序号（"五、"后面什么都没有）。删掉序号后段落
+    变成空段，下一轮它就不再是标题（空行没有角色）、却还挂着标题编号——会被当成空行套上
+    正文样式、还被克隆钳分到一条私有列表上，编号从头数。这类段落原样保留。"""
+    if not ((spec.get("heading_numbering") or {}).get("auto_number")):
+        return False
+    if not rec.get("is_heading") or rec.get("level_source") == "pattern":
+        return False
+    if rec.get("in_table"):
+        return False
+    if is_unnumbered_section(rec.get("text"), rec.get("num_raw")):
+        return False
+    if rec.get("num_raw") and not _norm_title(rec.get("text"), rec.get("num_raw")):
+        return False
+    lvl = rec.get("level")
+    return bool(lvl and 1 <= lvl <= 4)
+
+
+def _check_number_tab(rec, spec, sets, violations, lvl):
+    """**手写在文字里**的标题序号，其后的分隔符也要是制表符。
+
+    交给 Word 维护的自动编号靠编号定义的 `suff=tab` 拿到制表符（阶段0 验收过的排版）；
+    而序号手写在文字里的标题走的是另一条路——`renumber_heading` 只把序号归位成规范
+    token，序号与标题文字之间原样保留原来的空格/无分隔，于是同一份规范在两类文档里
+    长得不一样：用户实测"原文档是手写序号的，生成的标题编号后没有制表符"。
+
+    分隔符取自 `spec.heading_numbering.suffix`（判定值只来自 spec），只在它是 `tab`
+    时补；`rec.num_tab` 由抽取阶段判定（`para_text` 看不见 `w:tab`，必须单独记），
+    已经是制表符就不再报——补完再跑一遍不会重复补。序号**不在文字里**（纯自动编号）的
+    标题 `num_raw` 为空，不走这条。
+
+    **要转成 Word 自动编号的标题也不走这条**（`heading_goes_auto`）：它的手写序号本轮
+    就会被删掉、改由编号定义的 `suff=tab` 供给制表符，这里再报一条"缺制表符"既多余、
+    又会在批注里留下一句与实际改动不符的话。剩下"保留手写序号"的那几类（惯例不编号
+    章节、表格里的标题、spec 关掉自动编号时）仍然要补制表符。"""
+    if not rec.get("num_raw") or rec.get("num_tab"):
+        return
+    if heading_goes_auto(rec, spec):
+        return
+    if not _norm_title(rec.get("text"), rec.get("num_raw")):
+        return          # 整段只有一个序号，没有可分隔的标题文字
+    if ((spec.get("heading_numbering") or {}).get("suffix") or "tab") != "tab":
+        return
+    sets["set_number_tab"] = True
+    violations.append("%d级标题序号与标题文字之间应为制表符（与自动编号的排版一致）" % lvl)
 
 
 def _check_strip_ends(rec, sets, violations, label):
@@ -708,6 +777,25 @@ def continuity(records, spec):
         expected = counters[lvl]
         expected_token = _heading_token(lvl, expected)
         raw = r.get("num_raw")
+        # ---- 交给 Word 自动编号（2026-08 用户裁决，取代原先的"手写序号即手动序号"）----
+        # 只在**确实有事要做**时出 fix：文字里还留着序号（要删掉再挂编号），或者压根
+        # 没有序号也没有自动编号（要挂上）。已经是"文字无序号 + 自动编号"的形态就不再
+        # 出 fix——否则每跑一轮都重复报一次、批注刷屏（幂等的关键）；那种段落改挂到
+        # canonical 那条四级列表由 40 的样式指派顺手完成，不需要 fix。
+        if heading_goes_auto(r, spec) and (raw is not None or not r.get("auto_num")):
+            if raw is not None:
+                detail = "原手写序号“%s”已删除，改由 Word 按层级维护" % raw.strip()
+            else:
+                detail = "原缺少序号，已加入自动编号序列"
+            fixes.append({
+                "para_index": r["i"], "op": "autonumber_heading", "level": lvl,
+                "strip": raw is not None,
+                "rule_id": "heading.autonumber",
+                "rule_text": "%d级标题改用 Word 自动编号（序号后接制表符）——%s"
+                             % (lvl, detail),
+                "comment": True,
+            })
+            continue
         if raw is None:
             # No ordinal in the TEXT.
             if r.get("auto_num"):
@@ -878,10 +966,14 @@ def _caption_fix(r, kind, new_num, old_num, insert=False):
 
 
 def _heading_token(level, n):
+    """手写在文字里的序号被规范成的 token。**必须与 canonical 自动编号的 lvlText
+    同形**（`canonstyles.HEADING_LEVEL_SHAPES`，由 tests 锁住）——同一篇文档里两种编号
+    方式常常并存，形状不一致就成了两套规则。二级用**半角括号** `(一)`：用户第六轮验收
+    要求"二级标题前后的括号是英文括号"（半角括号还会自动走西文字体 Times New Roman）。"""
     if level == 1:
         return int2cn(n) + "、"
     if level == 2:
-        return "（" + int2cn(n) + "）"
+        return "(" + int2cn(n) + ")"
     if level == 3:
         return "%d." % n
     if level == 4:

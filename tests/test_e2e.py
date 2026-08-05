@@ -1160,24 +1160,121 @@ class TestCanonicalStyleInjection(unittest.TestCase):
         self.assertEqual(texts[0], "一、绪论")
         self.assertEqual(texts[1], "系统架构")
 
-    def test_blank_lines_outside_cover_get_body_style(self):
-        """新增规范：封面外的空行统一套正文样式（仿宋三号）。
+    def test_blank_lines_get_body_style_including_cover(self):
+        """空行统一套正文样式（仿宋三号），**封面也不例外**。
 
         不这么做的话空行跟随 Normal——而 Normal 已被钉成五号（文档网格的前提），
-        空行会莫名变矮、与正文行距不一致。封面空行属版式留白，不在规则内。"""
+        空行会莫名变矮、与正文行距不一致。封面空行一度作为"版式留白"排除在外，
+        2026-08 第六轮验收由用户推翻（"封面的空行也应用正文的样式"），代价是封面留白
+        变成正文行距 28 磅、整体变高——知情裁决，别以"封面是版式"为由改回去。"""
         body = (helpers.para("先进项目2024年度自评价报告", east_asia="宋体",
                              size_hp=44, jc="center")
-                + '<w:p/>'                       # 封面空行：不动
+                + '<w:p/>'                       # 封面空行：也套正文样式
                 + helpers.para("一、绪论", east_asia="宋体", size_hp=32, outline=0)
                 + '<w:p/>'                       # 正文区空行：套正文样式
                 + helpers.para("正文内容。", east_asia="宋体", size_hp=32))
         wd, _ = self._run(body)
         paras = list(self._doc(wd).iter(self.qn("w:p")))
         cover_blank = paras[1].find(self.qn("w:pPr") + "/" + self.qn("w:pStyle"))
-        self.assertIsNone(cover_blank, "封面空行不该被指派样式")
+        self.assertIsNotNone(cover_blank, "封面空行也应套正文样式（用户第六轮裁决）")
+        self.assertEqual(cover_blank.get(self.qn("w:val")), "FGWCanonBody")
         body_blank = paras[3].find(self.qn("w:pPr") + "/" + self.qn("w:pStyle"))
         self.assertIsNotNone(body_blank, "正文区空行应套正文样式")
         self.assertEqual(body_blank.get(self.qn("w:val")), "FGWCanonBody")
+
+    def _inline(self, p):
+        """段落的内联内容（w:t 的文字 / 制表符记作 '\\t'），用来看清分隔符。"""
+        out = []
+        for el in p.iter(self.qn("w:t"), self.qn("w:tab")):
+            out.append("\t" if el.tag == self.qn("w:tab") else (el.text or ""))
+        return "".join(out)
+
+    _HEADING_RUNS = ('<w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="32"/>'
+                     '</w:rPr><w:t xml:space="preserve">%s</w:t></w:r>')
+
+    def _heading_p(self, outline, *texts):
+        runs = "".join(self._HEADING_RUNS % t for t in texts)
+        return '<w:p><w:pPr><w:outlineLvl w:val="%d"/></w:pPr>%s</w:p>' % (outline, runs)
+
+    def test_typed_heading_numbers_are_removed_and_auto_numbered(self):
+        """手写序号一律**删掉文字里的序号**、改挂 canonical 四级列表（2026-08 用户裁决）。
+
+        缜密之处：序号后面的分隔符（空格 / 已经补上的 `w:tab` / 跨 run 的空白）要跟着
+        序号一起走——留着就会与编号自带的 `suff=tab` 叠成两个制表符。"""
+        body = (helpers.para("先进项目2024年度自评价报告", east_asia="宋体",
+                             size_hp=44, jc="center")
+                + self._heading_p(0, "一、项目概况")             # 序号正确也照样转
+                + self._heading_p(1, "（一）", "  ", "研究背景")   # 跨 run 的分隔空白
+                # 已经带真制表符的（上一轮产物）：制表符也要跟着序号一起删
+                + ('<w:p><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:r>'
+                   '<w:rPr><w:sz w:val="32"/></w:rPr><w:t>（二）</w:t><w:tab/>'
+                   '<w:t>研究方法</w:t></w:r></w:p>')
+                + self._heading_p(2, "1.1  数据来源"))            # 多级点式序号
+        wd, applied = self._run(body)
+        paras = list(self._doc(wd).iter(self.qn("w:p")))
+        self.assertEqual(applied["applied"].get("autonumber_heading"), 4)
+        for p, want, ilvl in ((paras[1], "项目概况", "0"), (paras[2], "研究背景", "1"),
+                              (paras[3], "研究方法", "1"), (paras[4], "数据来源", "2")):
+            self.assertEqual(self._inline(p), want, "手写序号/分隔符没删干净")
+            npr = p.find(self.qn("w:pPr") + "/" + self.qn("w:numPr"))
+            self.assertIsNotNone(npr, "删了序号却没挂上自动编号＝把内容删没了")
+            self.assertEqual(npr.find(self.qn("w:ilvl")).get(self.qn("w:val")), ilvl)
+            self.assertNotEqual(npr.find(self.qn("w:numId")).get(self.qn("w:val")), "0")
+        nids = {p.find(".//" + self.qn("w:numId")).get(self.qn("w:val"))
+                for p in paras[1:5]}
+        self.assertEqual(len(nids), 1, "四级必须同处一条列表，否则无法逐级归零")
+
+    def test_kept_heading_number_still_gets_a_tab(self):
+        """保留手写序号的那几类（惯例不编号章节…）仍然要补一个真正的 `w:tab`。
+
+        用户实测："原文档是手写序号的情况下，生成的标题编号后没有制表符"。这类标题不挂
+        自动编号（挂了就会渲染出"三、结论"并顶掉同级序号），所以制表符得自己补。"""
+        body = (helpers.para("先进项目2024年度自评价报告", east_asia="宋体",
+                             size_hp=44, jc="center")
+                + self._heading_p(0, "一、项目概况")
+                + self._heading_p(0, "三、结论"))
+        wd, _ = self._run(body)
+        p = list(self._doc(wd).iter(self.qn("w:p")))[2]
+        self.assertEqual(self._inline(p), "三、\t结论")
+        self.assertEqual(len(p.findall(".//" + self.qn("w:tab"))), 1,
+                         "序号后应恰好一个制表符（不能重复补、也不能留下尾巴）")
+        nid = p.find(self.qn("w:pPr") + "/" + self.qn("w:numPr") + "/"
+                     + self.qn("w:numId"))
+        self.assertTrue(nid is None or nid.get(self.qn("w:val")) == "0",
+                        "惯例不编号章节不该被挂上标题自动编号")
+
+    def test_blank_after_toc_field_gets_body_style(self):
+        """目录**域跨度之外**、只是顺手继承了目录样式的空行照样套正文样式。
+
+        用户第六轮报"空行没有应用正文样式"：目录后面那几个空行往往带着 `TOC1`/
+        `Contents 3` 样式，旧判据只看 `is_toc`（含"套着目录样式"）就把它们一起放过了。
+        真正需要保护的只有**落在 TOC 域/内容控件跨度内**的段落（刷新目录会重写它们），
+        那一类仍旧不动。"""
+        toc = ('<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>'
+               '<w:r><w:fldChar w:fldCharType="begin"/></w:r>'
+               '<w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" \\h </w:instrText></w:r>'
+               '<w:r><w:fldChar w:fldCharType="separate"/></w:r>'
+               '<w:r><w:t>一、绪论\t1</w:t></w:r></w:p>'
+               # 域跨度**内**的空行：不动
+               '<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr></w:p>'
+               '<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>'
+               '<w:r><w:t>二、方法\t2</w:t></w:r>'
+               '<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>')
+        body = (helpers.para("先进项目2024年度自评价报告", east_asia="宋体",
+                             size_hp=44, jc="center")
+                + toc
+                # 域跨度**外**、但继承了目录样式的空行：应套正文样式
+                + '<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr></w:p>'
+                + helpers.para("一、绪论", east_asia="宋体", size_hp=32, outline=0)
+                + helpers.para("正文内容。", east_asia="宋体", size_hp=32))
+        wd, _ = self._run(body)
+        paras = list(self._doc(wd).iter(self.qn("w:p")))
+        in_field = paras[2].find(self.qn("w:pPr") + "/" + self.qn("w:pStyle"))
+        self.assertEqual(in_field.get(self.qn("w:val")), "TOC1",
+                         "目录域跨度内的空行不该被动（刷新域会重写它）")
+        after = paras[4].find(self.qn("w:pPr") + "/" + self.qn("w:pStyle"))
+        self.assertEqual(after.get(self.qn("w:val")), "FGWCanonBody",
+                         "目录域外的空行应套正文样式")
 
     _IMAGE_P = ('<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats'
                 '.org/drawingml/2006/wordprocessingDrawing"><wp:extent cx="5000000" '
@@ -1372,8 +1469,60 @@ class TestCanonicalStyleInjection(unittest.TestCase):
                 self.assertIsNotNone(suff, "缺 w:suff（Word 默认虽是 tab，但要显式写）")
                 self.assertEqual(suff.get(self.qn("w:val")), "tab")
 
+    def test_heading_numbering_levels_carry_their_own_fonts(self):
+        """每级序号的字体钉在**级别的 rPr** 上（Word「定义多级列表→字体」的落点）。
+
+        第六轮验收：① 一级序号要与标题文字同为黑体；② 二级的**半角括号**要走
+        Times New Roman（括号里的中文数字仍是楷体）；③ 四级序号整体是仿宋。序号跟着
+        段落标记继承的话，西文位一律是 Times，②的中文位和③就都不对。只钉 rFonts——
+        字号/加粗继续跟随标题样式，否则又会出现"序号与标题一粗一细"（#13/#19）。"""
+        src = self._build_split_level_numbering("numfont.docx", one_abstract=True)
+        wd = self._run_src(src, "wbnumfont")
+        _root, canon = self._abstract_by_marker(wd, "FGWHeadingNumbering")
+        self.assertIsNotNone(canon)
+        want = {  # ilvl -> (ascii/hAnsi, eastAsia)
+            "0": ("黑体", "黑体"),
+            "1": ("Times New Roman", "楷体"),
+            "2": ("Times New Roman", "仿宋"),
+            "3": ("仿宋", "仿宋"),
+        }
+        for l in canon.findall(self.qn("w:lvl")):
+            rpr = l.find(self.qn("w:rPr"))
+            self.assertIsNotNone(rpr, "级别缺 rPr → 序号字体又跟着段落标记走了")
+            rf = rpr.find(self.qn("w:rFonts"))
+            latin, ea = want[l.get(self.qn("w:ilvl"))]
+            self.assertEqual(rf.get(self.qn("w:ascii")), latin)
+            self.assertEqual(rf.get(self.qn("w:hAnsi")), latin)
+            self.assertEqual(rf.get(self.qn("w:eastAsia")), ea)
+            # 字号/加粗不写进级别：让序号继续跟随标题样式
+            self.assertIsNone(rpr.find(self.qn("w:sz")))
+            self.assertIsNone(rpr.find(self.qn("w:b")))
+            # CT_Lvl 的 sequence 是 … pPr → rPr，顺序反了 Word 会拒绝打开
+            from lxml import etree
+            kids = [etree.QName(k).localname for k in l]
+            self.assertLess(kids.index("pPr"), kids.index("rPr"))
+
+    def test_level2_numbering_uses_halfwidth_parens(self):
+        """二级序号用**半角括号** `(一)`（用户第六轮："二级标题前后的括号要英文括号"）。
+
+        半角括号是西文字符，因此自动走级别 rPr 里的 Times New Roman；手写在文字里的
+        序号同样被规范成半角，两条路径形状一致（另有 test 锁住"同形"）。"""
+        sys.path.insert(0, os.path.join(helpers.SCRIPTS, "lib"))
+        import canonstyles
+        from checks import _heading_token
+        self.assertEqual(_heading_token(2, 3), "(三)")
+        self.assertEqual(canonstyles.heading_level_shapes(self.spec)[1][1], "(%2)")
+
+    def test_reference_generator_shares_the_canonical_numbering(self):
+        """人肉验收参考件与流水线用**同一份**标题编号定义（曾经各写一遍就漂了括号形状）。"""
+        sys.path.insert(0, os.path.join(helpers.SCRIPTS, "lib"))
+        import canonstyles
+        mkref = helpers.load_script("make_canonical_reference.py")
+        self.assertIn(canonstyles.heading_numbering_def(self.spec)["lvl_xml"],
+                      mkref.build_numbering(self.spec))
+
     def test_canonical_heading_numbering_matches_static_tokens(self):
-        """自动编号的 lvlText 必须与手写序号被改成的 token 同形（一、/（一）/1./（1）），
+        """自动编号的 lvlText 必须与手写序号被改成的 token 同形（一、/(一)/1./（1）），
         否则同一篇文档里两种编号并存、看起来像两套规则。"""
         sys.path.insert(0, os.path.join(helpers.SCRIPTS, "lib"))
         import canonstyles
@@ -1457,9 +1606,11 @@ class TestCanonicalStyleInjection(unittest.TestCase):
         self.assertEqual(refs[2][0], "0",
                          "惯例不编号章节仍带自动编号（会渲染出“1.结论”并顶掉同级序号）")
 
-    def test_typed_ordinal_wins_over_auto_number(self):
-        """序号已经写在文字里的标题，自动编号必须取消——否则 `renumber_heading` 把文字
-        里的序号归位后，Word 再生成一个，渲染成"一、一、绪论"（历史实测）。"""
+    def test_typed_ordinal_is_converted_to_auto_numbering(self):
+        """**手写序号改由 Word 自动编号维护**（2026-08 用户裁决，取代第四轮的方案一）。
+
+        文字里的序号必须**删掉**，段落改挂注入的四级 canonical 列表——两件事同生共死：
+        只删不挂＝把内容删没了，只挂不删＝渲染成"一、一、项目概况"（历史实测）。"""
         import zipfile
         numbering = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                      '<w:numbering xmlns:w="%s"><w:abstractNum w:abstractNumId="0">'
@@ -1489,10 +1640,20 @@ class TestCanonicalStyleInjection(unittest.TestCase):
             z.writestr("word/styles.xml", styles)
             z.writestr("word/numbering.xml", numbering)
         wd = self._run_src(src, "wbtyped")
-        self.assertEqual(self._heading_num_refs(wd)[0][0], "0",
-                         "文字里已有序号的标题还留着自动编号 → 会渲染成“一、一、…”")
-        text = "".join(t.text or "" for t in self._doc(wd).iter(self.qn("w:t")))
-        self.assertTrue(text.startswith("一、"), text)
+        _root, canon = self._abstract_by_marker(wd, "FGWHeadingNumbering")
+        self.assertIsNotNone(canon, "没有注入 canonical 标题编号定义")
+        nid, ilvl = self._heading_num_refs(wd)[0]
+        self.assertNotIn(nid, (None, "0"), "标题应改挂 canonical 编号，而不是取消编号")
+        self.assertEqual(ilvl, "0")
+        num2abs = {n.get(self.qn("w:numId")):
+                   n.find(self.qn("w:abstractNumId")).get(self.qn("w:val"))
+                   for n in _root.findall(self.qn("w:num"))}
+        self.assertEqual(num2abs[nid], canon.get(self.qn("w:abstractNumId")))
+        p = list(self._doc(wd).iter(self.qn("w:p")))[0]
+        self.assertEqual(self._inline(p), "项目概况",
+                         "手写序号没删干净 → Word 的编号会叠在它前面")
+        self.assertEqual(p.findall(".//" + self.qn("w:tab")), [],
+                         "序号后的制表符要跟着序号一起删（编号自带 suff=tab）")
 
     def test_injected_style_name_collision_is_avoided(self):
         """Word 要求样式名唯一，重名会让它提示"发现无法读取的内容"。文档里已存在同名
@@ -1619,6 +1780,69 @@ class TestStructuralDetectors(unittest.TestCase):
             '<w:abstractNum w:abstractNumId="1">'
             '<w:lvl w:ilvl="0"/></w:abstractNum></w:numbering>' % self.W)
         self.assertEqual(numbering_link_problems(clean), [])
+
+
+@unittest.skipUnless(HAVE_LXML, "lxml not installed")
+class TestValidatePreexistingProblems(unittest.TestCase):
+    """**原件本来就有的**结构性毛病不该由 45 来拦。
+
+    用户实测：原文档的 `numbering.xml` 里某个列表级别的 `rPr` 把 `shadow` 写在了
+    `specVanish` 之后（违反 CT_RPr 的 sequence），成品在 Word 里能正常打开，45 却退 2
+    挡住交付。我们没引入的问题只报不拦；真·新引入的仍然硬失败。"""
+
+    W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="wrf_pre_")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _script(self, name):
+        return os.path.join(helpers.SCRIPTS, name)
+
+    def _build(self):
+        import zipfile
+        numbering = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<w:numbering xmlns:w="%s"><w:abstractNum w:abstractNumId="0">'
+            '<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/>'
+            '<w:lvlText w:val="%%1."/><w:lvlJc w:val="left"/>'
+            # 乱序：specVanish 在 shadow 之前（CT_RPr 的 sequence 要求反过来）
+            '<w:rPr><w:specVanish/><w:shadow/></w:rPr></w:lvl></w:abstractNum>'
+            '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>'
+            '</w:numbering>' % self.W)
+        src = os.path.join(self.tmp, "pre.docx")
+        with zipfile.ZipFile(src, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("[Content_Types].xml", _CT_LO)
+            z.writestr("_rels/.rels", helpers.ROOT_RELS)
+            z.writestr("word/_rels/document.xml.rels", _DRELS_LO)
+            z.writestr("word/document.xml", helpers.document_xml(
+                helpers.para("一、绪论", east_asia="宋体", size_hp=32, outline=0)
+                + helpers.para("正文内容。", east_asia="宋体", size_hp=32)))
+            z.writestr("word/numbering.xml", numbering)
+        return src
+
+    def test_preexisting_order_violation_warns_but_does_not_block(self):
+        src = self._build()
+        wd = run(self._script("05_new_workdir.py"),
+                 os.path.join(self.tmp, "wb"))["workdir"]
+        run(self._script("10_prepare_input.py"), src, wd)
+        run(self._script("20_extract_structure.py"), wd)
+        run(self._script("30_check_format.py"), wd)
+        run(self._script("40_apply_fixes.py"), wd)
+        # run() 断言退出码 0——原件自带的乱序不该让自检退 2
+        report = run(self._script("45_validate_output.py"), wd)
+        self.assertTrue(report["ok"], report.get("errors"))
+        self.assertTrue(report.get("element_order_preexisting"),
+                        "原件自带的乱序应作为警告报出来，而不是消失")
+        self.assertTrue(any("原件" in w for w in report.get("warnings", [])))
+
+        # 对照：拿不到原件做基线时，同一处乱序仍然算"新引入"、硬失败
+        mod = helpers.load_script("45_validate_output.py")
+        blind = mod.validate(os.path.join(wd, "formatted.docx"), None, ())
+        self.assertFalse(blind["ok"])
+        self.assertTrue(any("元素顺序" in e for e in blind["errors"]))
 
 
 if __name__ == "__main__":

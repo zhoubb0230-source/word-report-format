@@ -28,6 +28,7 @@ from datetime import datetime
 OP_CATEGORY = {
     "format": "格式（字体/字号/行距/缩进）",
     "renumber_heading": "标题序号",
+    "autonumber_heading": "标题序号（改用自动编号）",
     "renumber_caption": "图表编号",
     "autonumber_caption": "图表编号（改用自动编号）",
     "section": "页面边距",

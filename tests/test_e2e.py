@@ -1189,34 +1189,59 @@ class TestCanonicalStyleInjection(unittest.TestCase):
             out.append("\t" if el.tag == self.qn("w:tab") else (el.text or ""))
         return "".join(out)
 
-    def test_typed_heading_number_gets_a_real_tab(self):
-        """手写序号与标题文字之间补一个**真正的 `w:tab`**（不是空格、也不是 w:t 里的 \\t）。
+    _HEADING_RUNS = ('<w:r><w:rPr><w:rFonts w:eastAsia="宋体"/><w:sz w:val="32"/>'
+                     '</w:rPr><w:t xml:space="preserve">%s</w:t></w:r>')
 
-        用户实测："原文档是手写序号的情况下，生成的标题编号后没有制表符"——自动编号那
-        条路径靠编号定义的 `suff=tab` 拿到制表符，手写序号是纯文本，此前只归位序号、
-        分隔符原样保留。落点与自动编号一致（`defaultTabStop`＝2 字符）。"""
-        def heading(outline, *texts):
-            runs = "".join('<w:r><w:rPr><w:rFonts w:eastAsia="宋体"/>'
-                           '<w:sz w:val="32"/></w:rPr>'
-                           '<w:t xml:space="preserve">%s</w:t></w:r>' % t for t in texts)
-            return ('<w:p><w:pPr><w:outlineLvl w:val="%d"/></w:pPr>%s</w:p>'
-                    % (outline, runs))
+    def _heading_p(self, outline, *texts):
+        runs = "".join(self._HEADING_RUNS % t for t in texts)
+        return '<w:p><w:pPr><w:outlineLvl w:val="%d"/></w:pPr>%s</w:p>' % (outline, runs)
+
+    def test_typed_heading_numbers_are_removed_and_auto_numbered(self):
+        """手写序号一律**删掉文字里的序号**、改挂 canonical 四级列表（2026-08 用户裁决）。
+
+        缜密之处：序号后面的分隔符（空格 / 已经补上的 `w:tab` / 跨 run 的空白）要跟着
+        序号一起走——留着就会与编号自带的 `suff=tab` 叠成两个制表符。"""
         body = (helpers.para("先进项目2024年度自评价报告", east_asia="宋体",
                              size_hp=44, jc="center")
-                + heading(0, "一、项目概况")            # 序号已正确，只缺制表符
-                + heading(1, "（一）", "  ", "研究背景")  # 序号要改半角 + 跨 run 的空格
-                # 已经是真制表符的：不该被改坏，也不该多出第二个
+                + self._heading_p(0, "一、项目概况")             # 序号正确也照样转
+                + self._heading_p(1, "（一）", "  ", "研究背景")   # 跨 run 的分隔空白
+                # 已经带真制表符的（上一轮产物）：制表符也要跟着序号一起删
                 + ('<w:p><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:r>'
                    '<w:rPr><w:sz w:val="32"/></w:rPr><w:t>（二）</w:t><w:tab/>'
-                   '<w:t>研究方法</w:t></w:r></w:p>'))
-        wd, _ = self._run(body)
+                   '<w:t>研究方法</w:t></w:r></w:p>')
+                + self._heading_p(2, "1.1  数据来源"))            # 多级点式序号
+        wd, applied = self._run(body)
         paras = list(self._doc(wd).iter(self.qn("w:p")))
-        self.assertEqual(self._inline(paras[1]), "一、\t项目概况")
-        self.assertEqual(self._inline(paras[2]), "(一)\t研究背景")
-        self.assertEqual(self._inline(paras[3]), "(二)\t研究方法")
-        for p in paras[1:4]:
-            self.assertEqual(len(p.findall(".//" + self.qn("w:tab"))), 1,
-                             "序号后应恰好一个制表符（不能重复补、也不能留下尾巴）")
+        self.assertEqual(applied["applied"].get("autonumber_heading"), 4)
+        for p, want, ilvl in ((paras[1], "项目概况", "0"), (paras[2], "研究背景", "1"),
+                              (paras[3], "研究方法", "1"), (paras[4], "数据来源", "2")):
+            self.assertEqual(self._inline(p), want, "手写序号/分隔符没删干净")
+            npr = p.find(self.qn("w:pPr") + "/" + self.qn("w:numPr"))
+            self.assertIsNotNone(npr, "删了序号却没挂上自动编号＝把内容删没了")
+            self.assertEqual(npr.find(self.qn("w:ilvl")).get(self.qn("w:val")), ilvl)
+            self.assertNotEqual(npr.find(self.qn("w:numId")).get(self.qn("w:val")), "0")
+        nids = {p.find(".//" + self.qn("w:numId")).get(self.qn("w:val"))
+                for p in paras[1:5]}
+        self.assertEqual(len(nids), 1, "四级必须同处一条列表，否则无法逐级归零")
+
+    def test_kept_heading_number_still_gets_a_tab(self):
+        """保留手写序号的那几类（惯例不编号章节…）仍然要补一个真正的 `w:tab`。
+
+        用户实测："原文档是手写序号的情况下，生成的标题编号后没有制表符"。这类标题不挂
+        自动编号（挂了就会渲染出"三、结论"并顶掉同级序号），所以制表符得自己补。"""
+        body = (helpers.para("先进项目2024年度自评价报告", east_asia="宋体",
+                             size_hp=44, jc="center")
+                + self._heading_p(0, "一、项目概况")
+                + self._heading_p(0, "三、结论"))
+        wd, _ = self._run(body)
+        p = list(self._doc(wd).iter(self.qn("w:p")))[2]
+        self.assertEqual(self._inline(p), "三、\t结论")
+        self.assertEqual(len(p.findall(".//" + self.qn("w:tab"))), 1,
+                         "序号后应恰好一个制表符（不能重复补、也不能留下尾巴）")
+        nid = p.find(self.qn("w:pPr") + "/" + self.qn("w:numPr") + "/"
+                     + self.qn("w:numId"))
+        self.assertTrue(nid is None or nid.get(self.qn("w:val")) == "0",
+                        "惯例不编号章节不该被挂上标题自动编号")
 
     def test_blank_after_toc_field_gets_body_style(self):
         """目录**域跨度之外**、只是顺手继承了目录样式的空行照样套正文样式。
@@ -1581,9 +1606,11 @@ class TestCanonicalStyleInjection(unittest.TestCase):
         self.assertEqual(refs[2][0], "0",
                          "惯例不编号章节仍带自动编号（会渲染出“1.结论”并顶掉同级序号）")
 
-    def test_typed_ordinal_wins_over_auto_number(self):
-        """序号已经写在文字里的标题，自动编号必须取消——否则 `renumber_heading` 把文字
-        里的序号归位后，Word 再生成一个，渲染成"一、一、绪论"（历史实测）。"""
+    def test_typed_ordinal_is_converted_to_auto_numbering(self):
+        """**手写序号改由 Word 自动编号维护**（2026-08 用户裁决，取代第四轮的方案一）。
+
+        文字里的序号必须**删掉**，段落改挂注入的四级 canonical 列表——两件事同生共死：
+        只删不挂＝把内容删没了，只挂不删＝渲染成"一、一、项目概况"（历史实测）。"""
         import zipfile
         numbering = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
                      '<w:numbering xmlns:w="%s"><w:abstractNum w:abstractNumId="0">'
@@ -1613,10 +1640,20 @@ class TestCanonicalStyleInjection(unittest.TestCase):
             z.writestr("word/styles.xml", styles)
             z.writestr("word/numbering.xml", numbering)
         wd = self._run_src(src, "wbtyped")
-        self.assertEqual(self._heading_num_refs(wd)[0][0], "0",
-                         "文字里已有序号的标题还留着自动编号 → 会渲染成“一、一、…”")
-        text = "".join(t.text or "" for t in self._doc(wd).iter(self.qn("w:t")))
-        self.assertTrue(text.startswith("一、"), text)
+        _root, canon = self._abstract_by_marker(wd, "FGWHeadingNumbering")
+        self.assertIsNotNone(canon, "没有注入 canonical 标题编号定义")
+        nid, ilvl = self._heading_num_refs(wd)[0]
+        self.assertNotIn(nid, (None, "0"), "标题应改挂 canonical 编号，而不是取消编号")
+        self.assertEqual(ilvl, "0")
+        num2abs = {n.get(self.qn("w:numId")):
+                   n.find(self.qn("w:abstractNumId")).get(self.qn("w:val"))
+                   for n in _root.findall(self.qn("w:num"))}
+        self.assertEqual(num2abs[nid], canon.get(self.qn("w:abstractNumId")))
+        p = list(self._doc(wd).iter(self.qn("w:p")))[0]
+        self.assertEqual(self._inline(p), "项目概况",
+                         "手写序号没删干净 → Word 的编号会叠在它前面")
+        self.assertEqual(p.findall(".//" + self.qn("w:tab")), [],
+                         "序号后的制表符要跟着序号一起删（编号自带 suff=tab）")
 
     def test_injected_style_name_collision_is_avoided(self):
         """Word 要求样式名唯一，重名会让它提示"发现无法读取的内容"。文档里已存在同名

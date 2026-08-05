@@ -200,21 +200,69 @@ class TestPatternHeadingNeverAutoEdited(unittest.TestCase):
 class TestUnnumberedSection(unittest.TestCase):
     """惯例不编号章节（参考文献等）不占用同级序号计数。"""
 
-    def test_unnumbered_does_not_consume_ordinal(self):
+    def test_unnumbered_section_is_left_alone(self):
+        """惯例不编号章节：不挂自动编号、也**不删**它自带的手写序号。
+
+        删序号却不给编号 = 把内容抹掉，所以 `heading_goes_auto` 必须先把它挡掉。
+        普通标题则一律转成 Word 自动编号（2026-08 用户裁决）。"""
         recs = [
             rec(i=0, is_heading=True, level=1, level_source="outline",
                 num_raw="一、", text="一、项目概况"),
             rec(i=1, is_heading=True, level=1, level_source="outline",
                 num_raw=None, text="参考文献"),
             rec(i=2, is_heading=True, level=1, level_source="outline",
+                num_raw="三、", text="三、结论"),
+            rec(i=3, is_heading=True, level=1, level_source="outline",
                 num_raw=None, text="结果分析"),
         ]
-        fixes = checks.continuity(recs, SPEC)
-        by_idx = {f["para_index"]: f for f in fixes}
-        self.assertNotIn(0, by_idx)          # 一、绪论 already correct
-        self.assertNotIn(1, by_idx)          # 参考文献 untouched (not numbered)
-        self.assertEqual(by_idx[2]["op"], "renumber_heading")
-        self.assertEqual(by_idx[2]["new_token"], "二、")  # not 三、
+        by_idx = {f["para_index"]: f for f in checks.continuity(recs, SPEC)}
+        self.assertEqual(by_idx[0]["op"], "autonumber_heading")
+        self.assertTrue(by_idx[0]["strip"], "手写序号要删掉，改由 Word 生成")
+        self.assertNotIn(1, by_idx)          # 参考文献：不编号、不动
+        self.assertNotIn(2, by_idx)          # 三、结论：惯例不编号，序号也保留原样
+        self.assertEqual(by_idx[3]["op"], "autonumber_heading")
+        self.assertFalse(by_idx[3]["strip"], "文字里本来就没有序号，只需挂编号")
+
+    def test_pattern_and_table_headings_are_not_converted(self):
+        """安全阀：只凭序号形状认出的标题（pattern）绝不删它的文字；表格里的标题也不转
+        （它拿的是表格内容样式，挂上标题列表会在单元格里冒出章节号）。"""
+        pattern = rec(i=0, is_heading=True, level=1, level_source="pattern",
+                      num_raw="1.", text="1. 看着像标题")
+        in_table = rec(i=1, is_heading=True, level=1, level_source="outline",
+                       num_raw="三、", text="三、单元格里的标题", in_table=True)
+        self.assertFalse(checks.heading_goes_auto(pattern, SPEC))
+        self.assertFalse(checks.heading_goes_auto(in_table, SPEC))
+        ops = {f["para_index"]: f["op"] for f in checks.continuity(
+            [pattern, in_table], SPEC)}
+        self.assertEqual(ops[0], "hint")            # pattern 只提示
+        self.assertEqual(ops[1], "renumber_heading")  # 表格里仍走静态重编号
+
+    def test_number_only_heading_keeps_its_typed_number(self):
+        """整段只有一个序号（"五、"后面没有标题文字）不转：删完就成了空段，下一轮它
+        不再是标题却还挂着编号——会被当空行套正文样式、还被克隆钳分到私有列表上。"""
+        r = rec(i=0, is_heading=True, level=1, level_source="outline",
+                num_raw="五、", text="五、")
+        self.assertFalse(checks.heading_goes_auto(r, SPEC))
+        fixes = checks.continuity([r], SPEC)
+        self.assertEqual([f["op"] for f in fixes], ["renumber_heading"])
+
+    def test_auto_number_switch_off_keeps_static_tokens(self):
+        """`spec.heading_numbering.auto_number` 关掉时整条规则不生效（判定值只来自 spec）。"""
+        import copy
+        spec = copy.deepcopy(SPEC)
+        spec["heading_numbering"]["auto_number"] = False
+        r = rec(i=0, is_heading=True, level=1, level_source="outline",
+                num_raw="三、", text="三、项目概况")
+        self.assertFalse(checks.heading_goes_auto(r, spec))
+        fixes = checks.continuity([r], spec)
+        self.assertEqual(fixes[0]["op"], "renumber_heading")
+        self.assertEqual(fixes[0]["new_token"], "一、")
+
+    def test_auto_numbered_heading_needs_no_fix(self):
+        """已经是"文字无序号 + 自动编号"的标题不再出 fix——否则每轮重复报、批注刷屏。"""
+        recs = [rec(i=0, is_heading=True, level=1, level_source="outline",
+                    num_raw=None, auto_num=True, text="项目概况")]
+        self.assertEqual(checks.continuity(recs, SPEC), [])
 
     def test_attachment_is_numbered_but_appendix_is_not(self):
         """「附件」**要**编号（用户裁决：报告里的附件常常就是正文的一章），
@@ -230,8 +278,8 @@ class TestUnnumberedSection(unittest.TestCase):
                 num_raw=None, text="附件"),
         ]
         by_idx = {f["para_index"]: f for f in checks.continuity(recs, SPEC)}
-        self.assertEqual(by_idx[1]["op"], "renumber_heading")
-        self.assertEqual(by_idx[1]["new_token"], "二、")
+        self.assertEqual(by_idx[1]["op"], "autonumber_heading",
+                         "附件要参与编号（挂上自动编号），不是被跳过")
 
 
 class TestCaptionGrouping(unittest.TestCase):
@@ -532,19 +580,31 @@ class TestNewFormatRules2026(unittest.TestCase):
         用户实测："原文档是手写序号的情况下，生成的标题编号后没有制表符"。自动编号
         走编号定义的 suff=tab，手写序号是纯文本、renumber 只归位序号不管分隔符，
         于是同一份规范在两类文档里长得不一样。"""
-        r = rec(is_heading=True, level=2, level_source="outline", num_raw="(一)",
-                num_tab=False, text="(一)研究方法",
-                eff_=eff(east_asia="楷体", size_hp=32, line=560, line_rule="exact",
+        # 用"惯例不编号章节 + 手写序号"作样本：普通标题的手写序号本轮会被删掉、改挂
+        # 自动编号（制表符由编号定义的 suff 供给），只有保留手写序号的这几类才补制表符。
+        r = rec(is_heading=True, level=1, level_source="outline", num_raw="三、",
+                num_tab=False, text="三、结论",
+                eff_=eff(east_asia="黑体", size_hp=32, line=560, line_rule="exact",
                          first_line_chars=200, bold=True))
         fix = checks.check_paragraph(r, SPEC)
         self.assertTrue(fix["set_number_tab"])
         self.assertIn("制表符", fix["rule_text"])
 
+    def test_heading_converted_to_autonumber_gets_no_tab_fix(self):
+        """要转自动编号的标题不报"缺制表符"——它的手写序号本轮就被删了，制表符改由
+        编号定义的 `suff=tab` 供给，再报一条只会让批注与实际改动对不上。"""
+        r = rec(is_heading=True, level=2, level_source="outline", num_raw="(一)",
+                num_tab=False, text="(一)研究方法",
+                eff_=eff(east_asia="楷体", size_hp=32, line=560, line_rule="exact",
+                         first_line_chars=200, bold=True))
+        fix = checks.check_paragraph(r, SPEC)
+        self.assertFalse((fix or {}).get("set_number_tab"))
+
     def test_heading_number_tab_not_reported_twice(self):
         """已经是制表符的（`num_tab`）不再报——补完再跑一遍不该重复补。"""
-        r = rec(is_heading=True, level=2, level_source="outline", num_raw="(一)",
-                num_tab=True, text="(一)研究方法",
-                eff_=eff(east_asia="楷体", size_hp=32, line=560, line_rule="exact",
+        r = rec(is_heading=True, level=1, level_source="outline", num_raw="三、",
+                num_tab=True, text="三、结论",
+                eff_=eff(east_asia="黑体", size_hp=32, line=560, line_rule="exact",
                          first_line_chars=200, bold=True))
         self.assertIsNone(checks.check_paragraph(r, SPEC))
 

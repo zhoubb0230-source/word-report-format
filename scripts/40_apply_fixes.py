@@ -1388,6 +1388,11 @@ def _blank_style(rec):
         return None
     if rec.get("toc_in_field", rec.get("is_toc")):
         return None
+    if rec.get("auto_num"):
+        # 文字为空、却挂着**自动编号**的段落不是空行——Word 会在这里渲染出一个编号。
+        # 套上正文样式会把那个编号变成正文格式，还会因为"有编号 + 样式承载缩进"被送进
+        # 克隆钳、分到一条私有列表上从头数。原样不动。
+        return None
     return STYLE_ID_BY_ROLE["table_body" if rec.get("in_table") else "body"]
 
 
@@ -1399,8 +1404,12 @@ def _heading_num_ref(rec, level, heading_num_id, current):
       * **惯例不编号的章节**（摘要/前言/结论/参考文献/附录/致谢…）——取消自动编号。
         判定层（`checks.continuity`）本来就不给它们发号、也不让它们占同级序号，编号层
         却照发不误的话，就会出现"三、结论"、而且它后面的同级标题全被顶掉一位。
-      * **序号已经写在文字里**（`num_raw`）——取消自动编号。这类序号由
-        `renumber_heading` 归位到规范 token，自动编号再叠一层就渲染成"一、一、绪论"。
+      * **序号已经写在文字里**（`num_raw`）——取消自动编号。自动编号叠在手写序号上会
+        渲染成"一、一、绪论"。**注意这只是本阶段的保守动作**：2026-08 起绝大多数这类
+        标题会由 `autonumber_heading` 那条 fix 在稍后的 fix 循环里把手写序号删掉、再挂
+        回 canonical 编号（`_apply_autonumber_heading`），此处写下的 `numId=0` 会被它
+        覆盖。留着这一步是**兜底**：转换若失败（比如文字里的序号删不掉），段落就停在
+        "手写序号 + 无自动编号"这个自洽状态上，而不是两个编号叠着。
       * 其余——改指注入的 canonical 四级标题列表，`ilvl = 级别-1`。四级同处**一条**多级
         列表是"二级在其一级下从头数"能成立的前提（见
         `canonstyles.heading_numbering_def`）。
@@ -1644,6 +1653,61 @@ def _apply_autonumber_caption(p):
     return True
 
 
+def _drop_leading_separator_tabs(p):
+    """删掉段落开头那些"孤儿制表符"——序号被删后残留的分隔符。
+
+    两种形态都要清：① 制表符排在第一个有文字的 `w:t` **之前**（原来它跟在序号后面）；
+    ② `_replace_leading` 把全部文字并进了第一个 `w:t`、后面的 `w:t` 全空，此时**任何**
+    制表符都是残渣（它们原来的上下文已经不存在了）——不清就会渲染成"一、<制表符><制表符>
+    绪论"（编号自己的 `suff=tab` 再加一个）。形态②之外不动标题内部的制表符。"""
+    items = para_inline_items(p)
+    first_text = next((el for el in items
+                       if el.tag == qn("w:t") and (el.text or "").strip()), None)
+    if first_text is None:
+        drop = [el for el in items if el.tag == qn("w:tab")]
+    else:
+        after = items[items.index(first_text) + 1:]
+        collapsed = all(not (el.text or "") for el in after if el.tag == qn("w:t"))
+        drop = []
+        for el in items:
+            if el.tag != qn("w:tab"):
+                continue
+            before_text = items.index(el) < items.index(first_text)
+            if before_text or collapsed:
+                drop.append(el)
+    for el in drop:
+        parent = el.getparent()
+        if parent is not None:
+            parent.remove(el)
+    return len(drop)
+
+
+def _apply_autonumber_heading(p, level, num_id, strip):
+    """把标题交给 Word 自动编号：删掉文字里的手写序号，并把段落挂到注入的四级标题列表。
+
+    **两件事必须同生共死**（用户："要注意去掉原本的手写编号，这里逻辑需要缜密一点"）：
+    只删序号不挂编号 = 把内容删没了；只挂编号不删序号 = 渲染成"一、一、绪论"。所以
+    这里先试删、删不掉就整条放弃（返回 False，调用方记 problem 并保持原样——段落此前
+    在样式指派阶段已按"手写序号"被写了 `numId=0`，放弃后正好维持旧行为）。
+
+    编号挂在**段落**上而不是标题样式上（与图/表标题相反）：摘要/结论这类"惯例不编号的
+    章节"与普通标题共用同一个 canonical 标题样式，编号若挂样式上就没法只让它们不编号
+    （陷阱 #19 反例②）。`ilvl = 级别-1`，四级同处一条列表才有逐级归零。"""
+    if not num_id:
+        return False
+    if strip and not _replace_leading(p, STRIP_HEADING, ""):
+        return False
+    if strip:
+        # 序号后面的分隔符是"序号的一部分"，跟着序号一起走，否则会与编号自带的
+        # `suff=tab` 叠出两段空白：`_replace_leading` 只在**序号被整段吃掉**时才顺手
+        # 削空白（这里替换成的是空串，它会把原分隔空白当正文留下），`w:tab` 元素更是
+        # 完全不归它管。两样都要单独清。
+        _strip_para_ws(p, "leading")
+        _drop_leading_separator_tabs(p)
+    _set_para_numid(p, num_id, min(max(level, 1), 4) - 1)
+    return True
+
+
 def _set_update_fields(pkg_dir):
     """Set settings.xml <w:updateFields w:val="true"/> so Word refreshes the TOC
     (renumbered headings + new page numbers) when the document is opened.
@@ -1868,6 +1932,17 @@ def main():
                 ok = _apply_autonumber_caption(p)
                 applied["autonumber_caption"] = applied.get("autonumber_caption", 0) + 1
                 # 编号来自 canonical 题注样式（缩进已中和），无需再克隆钳
+                clamp_targets = [t for t in clamp_targets if t is not p]
+        elif op == "autonumber_heading":
+            # 删手写序号 + 挂 canonical 标题编号，两件事同生共死（见函数注释）。
+            # 没有注入成功的标题编号定义时整条放弃：宁可留着手写序号，也不能把序号
+            # 删掉却没有编号顶上。
+            ok = _apply_autonumber_heading(p, fix.get("level") or 1,
+                                           heading_num_id, fix.get("strip"))
+            if ok:
+                applied["autonumber_heading"] = applied.get("autonumber_heading", 0) + 1
+                applied["heading_numbering"] = applied.get("heading_numbering", 0) + 1
+                # 挂上的是 canonical 那条列表，级别缩进本来就中和过，不必进克隆钳
                 clamp_targets = [t for t in clamp_targets if t is not p]
         elif op == "renumber_heading":
             ok = _apply_renumber_heading(p, fix)

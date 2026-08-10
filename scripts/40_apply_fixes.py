@@ -497,10 +497,14 @@ def _apply_renumber_caption(p, fix):
 
 
 def _heading_insert_prefix(token):
-    """Prefix used when INSERTING a missing heading number. Arabic dotted tokens
-    ("1.") read better with a trailing space before the title; full-width
-    punctuation tokens ("一、"/"（一）"/"（1）") need none."""
-    return token + " " if token.endswith(".") else token
+    """Prefix used when INSERTING a missing heading number. Tokens ending in a
+    digit or a half-width dot ("1", "1.1", "1.") run straight into the title
+    text, so they get a separating space; tokens that end in punctuation
+    ("一、"/"（一）"/"（1）") already read as separated and get none.
+
+    该空格只是"插入时"的应急分隔——判定层随后会以 `set_number_tab` 把它换成真正的
+    `w:tab`，与自动编号的 `suff=tab` 对齐。"""
+    return token + " " if (token[-1:].isdigit() or token.endswith(".")) else token
 
 
 def _apply_renumber_heading(p, fix):

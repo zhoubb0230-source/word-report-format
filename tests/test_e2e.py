@@ -708,7 +708,7 @@ class TestCanonicalStyleInjection(unittest.TestCase):
             '<w:spacing w:line="560" w:lineRule="exact" w:before="0" w:after="0"/>'
             '<w:ind w:firstLineChars="200"/></w:pPr>'
             '<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" '
-            'w:eastAsia="仿宋"/><w:sz w:val="32"/><w:szCs w:val="32"/></w:rPr>'
+            'w:eastAsia="方正仿宋_GBK"/><w:sz w:val="30"/><w:szCs w:val="30"/></w:rPr>'
             '</w:style></w:styles>' % self.W)
         doc = helpers.document_xml(
             '<w:p><w:r><w:t xml:space="preserve">完全合规的正文段落。</w:t></w:r></w:p>',
@@ -1472,20 +1472,21 @@ class TestCanonicalStyleInjection(unittest.TestCase):
     def test_heading_numbering_levels_carry_their_own_fonts(self):
         """每级序号的字体钉在**级别的 rPr** 上（Word「定义多级列表→字体」的落点）。
 
-        第六轮验收：① 一级序号要与标题文字同为黑体；② 二级的**半角括号**要走
-        Times New Roman（括号里的中文数字仍是楷体）；③ 四级序号整体是仿宋。序号跟着
-        段落标记继承的话，西文位一律是 Times，②的中文位和③就都不对。只钉 rFonts——
-        字号/加粗继续跟随标题样式，否则又会出现"序号与标题一粗一细"（#13/#19）。"""
+        第六轮验收：序号跟着段落标记继承的话，西文位一律是 Times、中文位一律是标题
+        字体，于是"中文数字落到西文字体""半角标点落到中文字体"两种错法必居其一。取值
+        全部来自 spec（`heading_numbering.levels` 的 east_asia/western），这里只锁
+        "每级都写了、且与 spec 一致"。只钉 rFonts——字号/加粗继续跟随标题样式，否则又会
+        出现"序号与标题一粗一细"（#13/#19）。"""
+        sys.path.insert(0, os.path.join(helpers.SCRIPTS, "lib"))
+        import canonstyles
         src = self._build_split_level_numbering("numfont.docx", one_abstract=True)
         wd = self._run_src(src, "wbnumfont")
         _root, canon = self._abstract_by_marker(wd, "FGWHeadingNumbering")
         self.assertIsNotNone(canon)
-        want = {  # ilvl -> (ascii/hAnsi, eastAsia)
-            "0": ("黑体", "黑体"),
-            "1": ("Times New Roman", "楷体"),
-            "2": ("Times New Roman", "仿宋"),
-            "3": ("仿宋", "仿宋"),
-        }
+        fonts = canonstyles.heading_level_fonts(self.spec)
+        want = {str(i): (latin, ea) for i, (ea, latin) in enumerate(fonts)}
+        # 本规范的序号是点分阿拉伯数字 → 西文位必须是 Times New Roman
+        self.assertEqual(want["0"][0], "Times New Roman")
         for l in canon.findall(self.qn("w:lvl")):
             rpr = l.find(self.qn("w:rPr"))
             self.assertIsNotNone(rpr, "级别缺 rPr → 序号字体又跟着段落标记走了")
@@ -1502,16 +1503,28 @@ class TestCanonicalStyleInjection(unittest.TestCase):
             kids = [etree.QName(k).localname for k in l]
             self.assertLess(kids.index("pPr"), kids.index("rPr"))
 
-    def test_level2_numbering_uses_halfwidth_parens(self):
-        """二级序号用**半角括号** `(一)`（用户第六轮："二级标题前后的括号要英文括号"）。
+    def test_heading_numbering_is_dotted_decimal(self):
+        """本规范的标题序号是**点分十进制**：1 / 1.1 / 1.1.1（四级同套顺延 1.1.1.1）。
 
-        半角括号是西文字符，因此自动走级别 rPr 里的 Times New Roman；手写在文字里的
-        序号同样被规范成半角，两条路径形状一致（另有 test 锁住"同形"）。"""
+        点分编号的关键是**每级都引用上级的 `%N` 占位符**——只写 `%2` 的话 Word 渲染出
+        的是孤零零的"1"，看不出层级；而手写序号那条路径同源渲染，所以"1.2.3"这样的
+        父子关系两边一致。"""
         sys.path.insert(0, os.path.join(helpers.SCRIPTS, "lib"))
         import canonstyles
         from checks import _heading_token
-        self.assertEqual(_heading_token(2, 3), "(三)")
-        self.assertEqual(canonstyles.heading_level_shapes(self.spec)[1][1], "(%2)")
+        shapes = canonstyles.heading_level_shapes(self.spec)
+        self.assertEqual([lvl_text for _fmt, lvl_text in shapes],
+                         ["%1", "%1.%2", "%1.%2.%3", "%1.%2.%3.%4"])
+        self.assertTrue(all(fmt == "decimal" for fmt, _t in shapes))
+        # 手写序号：第 2 个一级下的第 3 个二级 = "2.3"
+        self.assertEqual(_heading_token(2, {1: 2, 2: 3}, self.spec), "2.3")
+        self.assertEqual(_heading_token(3, {1: 1, 2: 2, 3: 1}, self.spec), "1.2.1")
+
+    def test_heading_token_falls_back_to_start_when_parent_absent(self):
+        """上级尚未出现（计数 0）时按 1 渲染——Word 对未开始的上级同样显示其 start 值，
+        总不能渲染出"0.1"。"""
+        from checks import _heading_token
+        self.assertEqual(_heading_token(2, {1: 0, 2: 1}, self.spec), "1.1")
 
     def test_reference_generator_shares_the_canonical_numbering(self):
         """人肉验收参考件与流水线用**同一份**标题编号定义（曾经各写一遍就漂了括号形状）。"""
@@ -1522,18 +1535,23 @@ class TestCanonicalStyleInjection(unittest.TestCase):
                       mkref.build_numbering(self.spec))
 
     def test_canonical_heading_numbering_matches_static_tokens(self):
-        """自动编号的 lvlText 必须与手写序号被改成的 token 同形（一、/(一)/1./（1）），
-        否则同一篇文档里两种编号并存、看起来像两套规则。"""
+        """自动编号的 lvlText 必须与手写序号被改成的 token 同形，否则同一篇文档里两种
+        编号并存、看起来像两套规则。
+
+        两者现在**同源**（`_heading_token` 直接渲染 `heading_level_shapes` 的 lvlText），
+        这条测试守的是"同源"本身别被改回两处硬编码：把每级都取第 1 号渲染一遍，结果必须
+        等于 lvlText 里的 `%N` 逐个换成对应级别的第 1 号。"""
         sys.path.insert(0, os.path.join(helpers.SCRIPTS, "lib"))
         import canonstyles
-        from checks import _heading_token
-        for i, (fmt, lvl_text) in enumerate(
-                canonstyles.heading_level_shapes(self.spec)):
+        from checks import _heading_token, _numeral
+        shapes = canonstyles.heading_level_shapes(self.spec)
+        counters = {lv: 1 for lv in range(1, len(shapes) + 1)}
+        for i, (_fmt, lvl_text) in enumerate(shapes):
             level = i + 1
-            numeral = "一" if fmt == "chineseCounting" else "1"
-            # 静态 token 里的"第 1 号"换成 Word 的 %N 占位符，就该等于 lvlText
-            expected = _heading_token(level, 1).replace(numeral, "%%%d" % level, 1)
-            self.assertEqual(lvl_text, expected,
+            expected = lvl_text
+            for lv, (lv_fmt, _t) in enumerate(shapes, start=1):
+                expected = expected.replace("%%%d" % lv, _numeral(lv_fmt, 1))
+            self.assertEqual(_heading_token(level, counters, self.spec), expected,
                              "%d 级自动编号与手写序号形状不一致" % level)
 
     def test_paragraph_mark_decorations_cleared_so_number_matches_text(self):

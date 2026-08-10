@@ -51,6 +51,13 @@ RE_L2 = re.compile(r"^[（(]\s*[%s]+\s*[）)]" % CN_NUM)   # （一）
 RE_L3 = re.compile(r"^(\d{1,2})\.(?!\d)")                        # 3.  (not 3.1, not 2024.)
 RE_L4 = re.compile(r"^[（(]\s*(\d{1,2})\s*[）)]")        # （4）
 
+# 点分十进制序号（1.1 / 1.1.1 / 1.1.1.1）：**级别＝数字段数**。
+# RE_L3 的 `(?!\d)` 明确拒绝这种形状（"1.1" 不是"1." + 标题），所以没有它，一份
+# "1.1 研究方法"式的文档里，二/三级标题只能靠样式名定级；样式名不带级别时会一路
+# 落到 `return (name_level or 1), "style"` 变成一级，四级标题挤在同一级上。
+# 收尾的 `(?![\d.．])` 保证段数数全（"1.1.1" 不会先按两段匹配掉），末尾可带一个点。
+RE_DOTTED = re.compile(r"^\s*\d{1,2}((?:[.．]\d{1,2})+)[.．]?(?![\d.．])")
+
 RE_CAPTION = re.compile(r"^\s*(图|表)\s*([0-9]+(?:[-\.–][0-9]+)?)(.*)$")
 RE_TOCTITLE = re.compile(r"^\s*目\s*录\s*$")            # 目录 / 目 录
 
@@ -210,6 +217,20 @@ def heading_level_from_style_name(style_id, name):
     return None
 
 
+def shape_level(text):
+    """序号**形状**给出的层级猜测（1..4），认不出返回 None。
+
+    先看点分十进制（段数即层级），再按四种固定形状比对——两者互斥（`RE_L3` 的
+    `(?!\\d)` 已把 "1.1" 排除在"1."之外），先后顺序只是把最长的形状放在前面。"""
+    m = RE_DOTTED.match(text)
+    if m:
+        return min(1 + m.group(1).count(".") + m.group(1).count("．"), 4)
+    for rx, lvl in ((RE_L1, 1), (RE_L2, 2), (RE_L4, 4), (RE_L3, 3)):
+        if rx.match(text):
+            return lvl
+    return None
+
+
 def infer_heading_level(style_id, outline, text, resolver):
     """Return (level, source). level is 1..4 or None; source is
     "outline"/"style"/"pattern" when level is not None, else None. See
@@ -234,13 +255,13 @@ def infer_heading_level(style_id, outline, text, resolver):
     name_level = heading_level_from_style_name(sid, name) if is_hstyle else None
     # 3) numbering pattern (only trust for short lines when no style backs it)
     short = len(text.strip()) <= 40
-    for rx, lvl in ((RE_L1, 1), (RE_L2, 2), (RE_L4, 4), (RE_L3, 3)):
-        if rx.match(text):
-            if is_hstyle:
-                return (name_level or lvl), "style"
-            if short:
-                return lvl, "pattern"
-            return None, None
+    lvl = shape_level(text)
+    if lvl is not None:
+        if is_hstyle:
+            return (name_level or lvl), "style"
+        if short:
+            return lvl, "pattern"
+        return None, None
     if is_hstyle:
         return (name_level or 1), "style"
     return None, None

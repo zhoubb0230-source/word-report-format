@@ -44,7 +44,8 @@ import json
 import os
 import re
 
-from canonstyles import CAPTION_ROLE_BY_KIND, STYLE_ID_BY_ROLE
+from canonstyles import (CAPTION_ROLE_BY_KIND, STYLE_ID_BY_ROLE,
+                         heading_level_shapes)
 
 CN_DIGITS = "零一二三四五六七八九"
 
@@ -775,7 +776,8 @@ def continuity(records, spec):
         for d in range(lvl + 1, 5):
             counters[d] = 0
         expected = counters[lvl]
-        expected_token = _heading_token(lvl, expected)
+        # 点分编号（1.1.1）要用到上级计数，故整本账都传进去，不只本级的那个数。
+        expected_token = _heading_token(lvl, counters, spec)
         raw = r.get("num_raw")
         # ---- 交给 Word 自动编号（2026-08 用户裁决，取代原先的"手写序号即手动序号"）----
         # 只在**确实有事要做**时出 fix：文字里还留着序号（要删掉再挂编号），或者压根
@@ -965,20 +967,45 @@ def _caption_fix(r, kind, new_num, old_num, insert=False):
     }
 
 
-def _heading_token(level, n):
-    """手写在文字里的序号被规范成的 token。**必须与 canonical 自动编号的 lvlText
-    同形**（`canonstyles.HEADING_LEVEL_SHAPES`，由 tests 锁住）——同一篇文档里两种编号
-    方式常常并存，形状不一致就成了两套规则。二级用**半角括号** `(一)`：用户第六轮验收
-    要求"二级标题前后的括号是英文括号"（半角括号还会自动走西文字体 Times New Roman）。"""
-    if level == 1:
-        return int2cn(n) + "、"
-    if level == 2:
-        return "(" + int2cn(n) + ")"
-    if level == 3:
-        return "%d." % n
-    if level == 4:
-        return "（%d）" % n
+_LVL_PLACEHOLDER_RE = re.compile(r"%([1-9])")
+
+
+def _numeral(num_fmt, n):
+    """一个级别计数值按该级 `numFmt` 渲染成的字面数字。Word 的 `chineseCounting`
+    ＝中文数字（一/二/十三），其余（`decimal` 等）＝阿拉伯数字。"""
+    if num_fmt in ("chineseCounting", "chineseCountingThousand"):
+        return int2cn(n)
     return str(n)
+
+
+def _heading_token(level, counters, spec=None):
+    """手写在文字里的序号被规范成的 token —— **按 canonical 自动编号的 `lvlText`
+    渲染**，不再硬编码任何形状。
+
+    为什么这样写（2026-08，别改回硬编码）：同一篇文档里两种编号方式常常并存
+    （已确认标题转 Word 自动编号，pattern/惯例不编号/表格里的标题保留手写序号），
+    形状不一致就成了"一篇文档两套规则"。以前靠"两处各写一遍 + 一条测试盯着"来保持
+    同形，换一套编号规范（如点分十进制 1/1.1/1.1.1）就得同时改两处；现在两者**同源**
+    ——`heading_level_shapes(spec)` 给出 (numFmt, lvlText)，这里把 `%N` 占位符换成
+    该级计数值即可，改 spec 就够了。
+
+    ``counters`` 是各级当前计数 `{1: n1, 2: n2, …}`（`continuity` 维护的那本账）；
+    只用到自己一级的形状（"一、"）时也可以直接传该级的整数。父级尚未出现过（计数 0）
+    时按 1 渲染——Word 对未开始的上级同样显示其 `start` 值。"""
+    shapes = heading_level_shapes(spec)
+    if not (1 <= level <= len(shapes)):
+        n = counters if isinstance(counters, int) else (counters or {}).get(level, 1)
+        return str(n)
+    if isinstance(counters, int):
+        counters = {level: counters}
+    fmt, lvl_text = shapes[level - 1]
+
+    def _sub(m):
+        lv = int(m.group(1))
+        lv_fmt = shapes[lv - 1][0] if 1 <= lv <= len(shapes) else fmt
+        return _numeral(lv_fmt, (counters or {}).get(lv) or 1)
+
+    return _LVL_PLACEHOLDER_RE.sub(_sub, lvl_text)
 
 
 # ---------------------------------------------------------------------------

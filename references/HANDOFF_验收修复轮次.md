@@ -11,8 +11,20 @@
 > 已修复，另有一条**裁决反转**——**手写序号一律转成 Word 自动编号、并删掉文字里的手写序号**；
 > 连同"封面空行也套正文样式"一起**待下一轮确认**，见 §3。
 
-分支：`claude/skill-style-fixes-xiqr0r`　　回归：**140 passing**
+分支：`claude/document-style-formatting-h2xqlq`　　回归：**151 passing**
 （`pip install lxml` 后 `python3 -m unittest discover -s tests -p "test_*.py"`）
+
+> ⚠️ **本分支不是主线的下一轮验收，而是「另一类文档」的规范分支**（2026-08，用户单开分支）：标题序号
+> 改为**点分十进制**（`1` / `1.1` / `1.1.1`，四级同套顺延 `1.1.1.1`），标题＝方正楷体_GBK 三号、
+> 正文＝方正仿宋_GBK 小三、目录＝方正楷体_GBK 五号、表格内容＝方正仿宋_GBK 小四。改动几乎全在
+> `spec/format_spec.json`；代码只动了三处、目的都是让它跟着 spec 走：手写序号 token 改为按 `lvl_text`
+> 渲染（`checks._heading_token`）、点分序号按段数定级（`headings.shape_level`）、插入序号时数字结尾补
+> 空格（`40_apply_fixes._heading_insert_prefix`）。详见陷阱 #21。
+>
+> **本分支尚未经用户在 Word 里验收**；下面 §1–§4 记的是主线各轮的结论，仍然适用（判定/应用逻辑共用）。
+> **两个未定项**（问过用户但未答复，按"只改用户列出的 6 项"处理）：① 图/表标题仍是**仿宋 三号**，
+> 没跟着正文换成方正仿宋_GBK 小三；② 一~四级标题**保持加粗**（沿用主线规范）。用户若有异议，改
+> `spec.caption_format` / `spec.headings.*.bold` 即可，代码无需改。
 
 ---
 
@@ -20,12 +32,12 @@
 
 ```bash
 pip install lxml
-python3 -m unittest discover -s tests -p "test_*.py"     # 应 140 passing
+python3 -m unittest discover -s tests -p "test_*.py"     # 应 151 passing
 python3 scripts/make_canonical_reference.py /tmp/ref.docx # 人肉验收参考件（可选）
 ```
 
 **必读顺序**：本文件 → `references/已知陷阱与设计决策.md` 的**索引表**（只看表，按需展开条目）
-→ `CLAUDE.md`（开发约定）。`SKILL.md` 是运行工作流的权威。**别整篇读陷阱文件**，20 条里单次任务
+→ `CLAUDE.md`（开发约定）。`SKILL.md` 是运行工作流的权威。**别整篇读陷阱文件**，21 条里单次任务
 通常只需 1–2 条。
 
 **架构一句话**：判定层（`scripts/lib/checks.py`，纯函数出 `fixes.json`）与应用层

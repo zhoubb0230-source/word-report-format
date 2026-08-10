@@ -21,8 +21,8 @@ SPEC = checks.load_spec(helpers.SPEC_PATH)
 
 def eff(**kw):
     """Effective-format dict defaulting to a COMPLIANT body paragraph
-    (仿宋 / 三号 / 固定行距28磅 / 首行缩进2字符); override what a test needs."""
-    d = dict(east_asia="仿宋", ascii=None, size_hp=32, bold=True,
+    (方正仿宋_GBK / 小三 / 固定行距28磅 / 首行缩进2字符); override what a test needs."""
+    d = dict(east_asia="方正仿宋_GBK", ascii=None, size_hp=30, bold=True,
              line=560, line_rule="exact",
              first_line_chars=200, first_line=None, left_chars=None, left=None,
              start_chars=None, start=None, right_chars=None, right=None,
@@ -103,26 +103,26 @@ class TestCoverField(unittest.TestCase):
 
 
 class TestTableBody(unittest.TestCase):
-    """表格内容：仿宋 四号（28半点）、行距固定值28磅、无任何缩进。"""
+    """表格内容：方正仿宋_GBK 小四（24半点）、行距固定值28磅、无任何缩进。"""
 
-    def test_table_size_is_sihao(self):
+    def test_table_size_is_xiaosi(self):
         r = rec(in_table=True, text="设备名称123", has_western=True,
-                eff_=eff(east_asia="仿宋", size_hp=32, ascii="仿宋",
+                eff_=eff(east_asia="方正仿宋_GBK", size_hp=30, ascii="方正仿宋_GBK",
                          first_line_chars=None))
         fix = checks.check_paragraph(r, SPEC)
-        self.assertEqual(fix["set_size_hp"], 28)   # 四号，非三号
+        self.assertEqual(fix["set_size_hp"], 24)   # 小四，非正文的小三
 
-    def test_table_sihao_compliant_no_fix(self):
-        # 合规表格内容：四号 + 固定28磅 + 无缩进
+    def test_table_xiaosi_compliant_no_fix(self):
+        # 合规表格内容：小四 + 固定28磅 + 无缩进
         r = rec(in_table=True, text="设备名称", has_western=False,
-                eff_=eff(east_asia="仿宋", size_hp=28, ascii="仿宋",
+                eff_=eff(east_asia="方正仿宋_GBK", size_hp=24, ascii="方正仿宋_GBK",
                          first_line_chars=None, line=560, line_rule="exact"))
         self.assertIsNone(checks.check_paragraph(r, SPEC))
 
     def test_table_indent_and_line_spacing_flagged(self):
         # 表格内容带缩进 + 行距非28磅固定 -> 都要被清/改
         r = rec(in_table=True, text="设备名称", has_western=False,
-                eff_=eff(east_asia="仿宋", size_hp=28, ascii="仿宋",
+                eff_=eff(east_asia="方正仿宋_GBK", size_hp=24, ascii="方正仿宋_GBK",
                          first_line_chars=200, left_chars=100,
                          line=480, line_rule="auto"))
         fix = checks.check_paragraph(r, SPEC)
@@ -161,8 +161,8 @@ class TestTocExcluded(unittest.TestCase):
         r = rec(region="toc", is_toc=True, toc_level=1, text="绪论\t1",
                 eff_=eff(east_asia="黑体", size_hp=28))
         fix = checks.check_paragraph(r, SPEC)
-        self.assertEqual(fix["set_east_asia"], "仿宋")  # toc font, not 黑体
-        self.assertEqual(fix["set_size_hp"], 30)         # 小三
+        self.assertEqual(fix["set_east_asia"], "方正楷体_GBK")  # toc font, not 黑体
+        self.assertEqual(fix["set_size_hp"], 21)                # 五号
 
     def test_toc_not_counted_in_continuity(self):
         recs = [rec(i=0, region="toc", is_toc=True, is_heading=False,
@@ -194,7 +194,7 @@ class TestPatternHeadingNeverAutoEdited(unittest.TestCase):
         r = rec(is_heading=True, level=1, level_source="outline",
                 num_raw="一、", text="一、绪论", eff_=eff(east_asia="宋体"))
         fix = checks.check_paragraph(r, SPEC)
-        self.assertEqual(fix["set_east_asia"], "黑体")  # level-1 heading font
+        self.assertEqual(fix["set_east_asia"], "方正楷体_GBK")  # level-1 heading font
 
 
 class TestUnnumberedSection(unittest.TestCase):
@@ -256,7 +256,7 @@ class TestUnnumberedSection(unittest.TestCase):
         self.assertFalse(checks.heading_goes_auto(r, spec))
         fixes = checks.continuity([r], spec)
         self.assertEqual(fixes[0]["op"], "renumber_heading")
-        self.assertEqual(fixes[0]["new_token"], "一、")
+        self.assertEqual(fixes[0]["new_token"], "1")
 
     def test_auto_numbered_heading_needs_no_fix(self):
         """已经是"文字无序号 + 自动编号"的标题不再出 fix——否则每轮重复报、批注刷屏。"""
@@ -414,6 +414,14 @@ class TestTocStyleLeftCharsOnly(unittest.TestCase):
                     t.get("{%s}leader" % self.W)) for t in tabs]
             self.assertEqual(got, [("left", "1050", None), ("right", "8665", "dot")])
 
+    def test_reference_toc_style_pins_the_east_asian_font(self):
+        """参考件的 TOC 样式必须写 `w:eastAsia`——目录条目正文是中文，省了就继承 Normal
+        的正文字体。目录字体≠正文字体时（本分支：楷体目录 / 仿宋正文）参考件会验到一份
+        假的，与流水线 `_patch_toc_styles`（写的正是 eastAsia）也对不上。"""
+        import canonstyles
+        xml = canonstyles.toc_style_xml(SPEC, 1)
+        self.assertIn('w:eastAsia="%s"' % SPEC["toc"]["east_asia"], xml)
+
     def test_toc_tab_positions_follow_char_unit_size(self):
         # 字符单位随 Normal 字号走：Normal=三号(32) 时同样的字符数换算成 1600/13203。
         mod = helpers.load_script("40_apply_fixes.py")
@@ -468,13 +476,13 @@ class TestWesternFont(unittest.TestCase):
 
     def test_pure_chinese_body_no_western_fix(self):
         # Bug2: pure-Chinese line whose Latin font is 仿宋 must NOT be flagged.
-        r = rec(text="纯中文正文。", has_western=False, eff_=eff(ascii="仿宋"))
+        r = rec(text="纯中文正文。", has_western=False, eff_=eff(ascii="方正仿宋_GBK"))
         self.assertIsNone(checks.check_paragraph(r, SPEC))
 
     def test_pure_chinese_table_no_western_fix(self):
         # Bug2 exact report: 表格内容纯中文 误判 "西文应为 TNR（实际：仿宋）".
         r = rec(in_table=True, text="设备名称", has_western=False,
-                eff_=eff(east_asia="仿宋", size_hp=28, ascii="仿宋",
+                eff_=eff(east_asia="方正仿宋_GBK", size_hp=24, ascii="方正仿宋_GBK",
                          first_line_chars=None, line=560, line_rule="exact"))
         self.assertIsNone(checks.check_paragraph(r, SPEC))
 
@@ -503,9 +511,9 @@ class TestWesternFont(unittest.TestCase):
 
     def test_toc_still_not_forced_western(self):
         # 目录仍**不**套西文（_check_toc 不传 western）——只有封面被推翻，别顺手扩大。
-        r = rec(region="toc", is_toc=True, toc_level=1, text="一、概述 3",
+        r = rec(region="toc", is_toc=True, toc_level=1, text="1 概述 3",
                 has_western=True,
-                eff_=eff(east_asia="仿宋", size_hp=30, ascii="Calibri"))
+                eff_=eff(east_asia="方正楷体_GBK", size_hp=21, ascii="Calibri"))
         fix = checks.check_paragraph(r, SPEC)
         self.assertIsNone(fix if fix is None else fix.get("set_ascii"))
 
@@ -544,7 +552,7 @@ class TestNewFormatRules2026(unittest.TestCase):
         # #6 一~四级标题行距固定值28磅(560/exact)
         r = rec(is_heading=True, level=2, level_source="outline", num_raw="（一）",
                 text="（一）研究背景",
-                eff_=eff(east_asia="楷体", size_hp=32, line=None, line_rule=None))
+                eff_=eff(east_asia="方正楷体_GBK", size_hp=32, line=None, line_rule=None))
         fix = checks.check_paragraph(r, SPEC)
         self.assertEqual(fix["set_line_exact"], 560)
         self.assertEqual(fix["set_line_rule"], "exact")
@@ -584,7 +592,7 @@ class TestNewFormatRules2026(unittest.TestCase):
         # 自动编号（制表符由编号定义的 suff 供给），只有保留手写序号的这几类才补制表符。
         r = rec(is_heading=True, level=1, level_source="outline", num_raw="三、",
                 num_tab=False, text="三、结论",
-                eff_=eff(east_asia="黑体", size_hp=32, line=560, line_rule="exact",
+                eff_=eff(east_asia="方正楷体_GBK", size_hp=32, line=560, line_rule="exact",
                          first_line_chars=200, bold=True))
         fix = checks.check_paragraph(r, SPEC)
         self.assertTrue(fix["set_number_tab"])
@@ -595,7 +603,7 @@ class TestNewFormatRules2026(unittest.TestCase):
         编号定义的 `suff=tab` 供给，再报一条只会让批注与实际改动对不上。"""
         r = rec(is_heading=True, level=2, level_source="outline", num_raw="(一)",
                 num_tab=False, text="(一)研究方法",
-                eff_=eff(east_asia="楷体", size_hp=32, line=560, line_rule="exact",
+                eff_=eff(east_asia="方正楷体_GBK", size_hp=32, line=560, line_rule="exact",
                          first_line_chars=200, bold=True))
         fix = checks.check_paragraph(r, SPEC)
         self.assertFalse((fix or {}).get("set_number_tab"))
@@ -604,7 +612,7 @@ class TestNewFormatRules2026(unittest.TestCase):
         """已经是制表符的（`num_tab`）不再报——补完再跑一遍不该重复补。"""
         r = rec(is_heading=True, level=1, level_source="outline", num_raw="三、",
                 num_tab=True, text="三、结论",
-                eff_=eff(east_asia="黑体", size_hp=32, line=560, line_rule="exact",
+                eff_=eff(east_asia="方正楷体_GBK", size_hp=32, line=560, line_rule="exact",
                          first_line_chars=200, bold=True))
         self.assertIsNone(checks.check_paragraph(r, SPEC))
 
@@ -612,7 +620,7 @@ class TestNewFormatRules2026(unittest.TestCase):
         """序号不在文字里（纯自动编号）的标题不走这条——制表符由编号定义的 suff 管。"""
         r = rec(is_heading=True, level=2, level_source="outline", num_raw=None,
                 num_tab=False, auto_num=True, text="研究方法",
-                eff_=eff(east_asia="楷体", size_hp=32, line=560, line_rule="exact",
+                eff_=eff(east_asia="方正楷体_GBK", size_hp=32, line=560, line_rule="exact",
                          first_line_chars=200, bold=True))
         fix = checks.check_paragraph(r, SPEC)
         # 自动编号段仍会拿到缩进修复（编号层的悬挂缩进），但**不该**被要求补制表符
@@ -623,7 +631,7 @@ class TestNewFormatRules2026(unittest.TestCase):
         # 2026-07 新增规范：一~四级标题加粗。
         r = rec(is_heading=True, level=2, level_source="outline", num_raw="（一）",
                 text="（一）研究方法",
-                eff_=eff(east_asia="楷体", size_hp=32, line=560, line_rule="exact",
+                eff_=eff(east_asia="方正楷体_GBK", size_hp=32, line=560, line_rule="exact",
                          first_line_chars=200, bold=False))
         fix = checks.check_paragraph(r, SPEC)
         self.assertTrue(fix["set_bold"])
@@ -632,23 +640,23 @@ class TestNewFormatRules2026(unittest.TestCase):
     def test_bold_heading_compliant_no_bold_fix(self):
         r = rec(is_heading=True, level=2, level_source="outline", num_raw="（一）",
                 text="（一）研究方法",
-                eff_=eff(east_asia="楷体", size_hp=32, line=560, line_rule="exact",
+                eff_=eff(east_asia="方正楷体_GBK", size_hp=32, line=560, line_rule="exact",
                          first_line_chars=200, bold=True))
         self.assertIsNone(checks.check_paragraph(r, SPEC))
 
     def test_half_bold_heading_is_flagged(self):
         # "前半加粗、后半不加粗"：eff.bold 走【全体一致】语义（20 抽取时只要有一个
         # 文字 run 不粗就是 False），所以这种半粗半细会被判不合规而不是被多数票放过。
-        r = rec(is_heading=True, level=3, level_source="outline", num_raw="1.",
-                text="1. 数据来源与口径说明",
-                eff_=eff(east_asia="仿宋", size_hp=32, line=560, line_rule="exact",
+        r = rec(is_heading=True, level=3, level_source="outline", num_raw="1.1.1",
+                text="1.1.1 数据来源与口径说明",
+                eff_=eff(east_asia="方正楷体_GBK", size_hp=32, line=560, line_rule="exact",
                          first_line_chars=200, bold=False))
         self.assertTrue(checks.check_paragraph(r, SPEC)["set_bold"])
 
     def test_body_bold_is_not_touched(self):
         # 规范没规定正文加粗 → 正文样式不承载 bold，作者的行内加粗保持原样。
         r = rec(text="正文内容。",
-                eff_=eff(east_asia="仿宋", size_hp=32, line=560, line_rule="exact",
+                eff_=eff(east_asia="方正仿宋_GBK", size_hp=30, line=560, line_rule="exact",
                          first_line_chars=200, space_before=0, space_after=0,
                          bold=True))
         self.assertIsNone(checks.check_paragraph(r, SPEC))
@@ -660,6 +668,89 @@ class TestNewFormatRules2026(unittest.TestCase):
                 eff_=eff(first_line_chars=200, hanging=420))
         fix = checks.check_paragraph(r, SPEC)
         self.assertEqual(fix["set_first_line_chars"], 200)
+
+
+class TestDottedDocType2026(unittest.TestCase):
+    """本分支的文档类型：标题点分数字编号 + 方正字体族。每条锁用户列出的一项要求。
+
+    字体名一律是**完整的方正名**（`east_asia_match` 只收 "方正楷体_GBK"/"方正仿宋_GBK"），
+    所以文档里的"楷体"/"仿宋"/"仿宋_GB2312" 都算不合规、会被改写——这是刻意的，别为了
+    "少报几条"把宽松别名加回 match 列表。"""
+
+    def _heading(self, level, **kw):
+        kw.setdefault("text", "研究方法")
+        return rec(is_heading=True, level=level, level_source="outline", **kw)
+
+    def test_headings_1_to_3_are_fangzheng_kaiti_sanhao(self):
+        for lvl in (1, 2, 3):
+            r = self._heading(lvl, eff_=eff(east_asia="楷体", size_hp=30))
+            fix = checks.check_paragraph(r, SPEC)
+            self.assertEqual(fix["set_east_asia"], "方正楷体_GBK", "%d级标题" % lvl)
+            self.assertEqual(fix["set_size_hp"], 32, "%d级标题应为三号" % lvl)
+
+    def test_level4_follows_the_same_font_and_size(self):
+        # 规范只写到三级；四级沿用同一套字体字号（顺延编号 1.1.1.1）。
+        fix = checks.check_paragraph(
+            self._heading(4, eff_=eff(east_asia="仿宋", size_hp=32)), SPEC)
+        self.assertEqual(fix["set_east_asia"], "方正楷体_GBK")
+
+    def test_compliant_heading_needs_no_fix(self):
+        r = self._heading(2, eff_=eff(east_asia="方正楷体_GBK", size_hp=32,
+                                      line=560, line_rule="exact",
+                                      first_line_chars=200, bold=True))
+        self.assertIsNone(checks.check_paragraph(r, SPEC))
+
+    def test_body_is_fangzheng_fangsong_xiaosan(self):
+        fix = checks.check_paragraph(
+            rec(text="正文一段。", eff_=eff(east_asia="仿宋", size_hp=32)), SPEC)
+        self.assertEqual(fix["set_east_asia"], "方正仿宋_GBK")
+        self.assertEqual(fix["set_size_hp"], 30)      # 小三
+
+    def test_toc_is_fangzheng_kaiti_wuhao(self):
+        fix = checks.check_paragraph(
+            rec(region="toc", is_toc=True, toc_level=1, text="概述\t3",
+                eff_=eff(east_asia="仿宋", size_hp=30)), SPEC)
+        self.assertEqual(fix["set_east_asia"], "方正楷体_GBK")
+        self.assertEqual(fix["set_size_hp"], 21)      # 五号
+
+    def test_table_body_is_fangzheng_fangsong_xiaosi(self):
+        fix = checks.check_paragraph(
+            rec(in_table=True, text="设备名称",
+                eff_=eff(east_asia="仿宋", size_hp=28, first_line_chars=None)), SPEC)
+        self.assertEqual(fix["set_east_asia"], "方正仿宋_GBK")
+        self.assertEqual(fix["set_size_hp"], 24)      # 小四
+
+    def test_static_tokens_are_dotted_decimal(self):
+        """保留手写序号的那几类（这里用表格里的标题）被规范成的 token 是 1 / 1.1 / 1.1.1
+        ——与自动编号的 lvlText 同源渲染。"""
+        recs = [
+            rec(i=0, is_heading=True, level=1, level_source="outline",
+                num_raw="一、", text="一、项目概况", in_table=True),
+            rec(i=1, is_heading=True, level=2, level_source="outline",
+                num_raw="（一）", text="（一）研究方法", in_table=True),
+            rec(i=2, is_heading=True, level=3, level_source="outline",
+                num_raw="1.", text="1. 数据来源", in_table=True),
+        ]
+        tokens = [f["new_token"] for f in checks.continuity(recs, SPEC)]
+        self.assertEqual(tokens, ["1", "1.1", "1.1.1"])
+
+    def test_dotted_shape_gives_the_level_by_segment_count(self):
+        self.assertEqual(headings.shape_level("1.1 研究方法"), 2)
+        self.assertEqual(headings.shape_level("1.1.1 数据来源"), 3)
+        self.assertEqual(headings.shape_level("1.1.1.1 口径"), 4)
+        self.assertEqual(headings.shape_level("2.3.4.5.6 超深"), 4)   # 封顶四级
+        self.assertEqual(headings.shape_level("1. 概述"), 3)          # 单段仍是老形状
+        self.assertIsNone(headings.shape_level("2024 年度工作总结"))   # 四位数不是序号
+
+    def test_dotted_heading_is_pattern_tier_only(self):
+        """点分序号照样只是"形状"证据：没有样式/大纲级别撑腰时只出提示，绝不自动改文字
+        （安全阀 #5，别因为形状更"像标题"就破例）。"""
+        level, source = headings.infer_heading_level(None, None, "1.1 研究方法", None)
+        self.assertEqual((level, source), (2, "pattern"))
+        fixes = checks.continuity([rec(i=0, is_heading=True, level=2,
+                                       level_source="pattern", num_raw="1.1 ",
+                                       text="1.1 研究方法")], SPEC)
+        self.assertEqual([f["op"] for f in fixes], ["hint"])
 
 
 class TestDocHints(unittest.TestCase):

@@ -345,10 +345,15 @@ def toc_style_xml(spec, level, char_unit_hp=21):
     tabs_xml = ('<w:tabs>%s</w:tabs>' % tabs_xml) if tabs_xml else ""
     lc = props["left_chars"]
     ind = ('<w:ind w:leftChars="%d" w:left="%d"/>' % (lc, lc)) if lc else ""
-    rpr = ('<w:rFonts w:ascii="%s" w:hAnsi="%s" w:cs="%s"/>'
+    # `w:eastAsia` 不能省：目录条目的正文是中文，中文字体走的就是这一位。省掉它时
+    # 中文会**继承 Normal 的 eastAsia**（＝正文字体）——目录字体与正文字体恰好相同的
+    # 规范下看不出问题，一旦两者不同（本分支：目录方正楷体_GBK、正文方正仿宋_GBK），
+    # 参考件的目录就渲染成正文字体，与流水线的 `_patch_toc_styles`（它写的正是
+    # eastAsia）对不上，人肉验收会验到一份假的。
+    rpr = ('<w:rFonts w:ascii="%s" w:hAnsi="%s" w:eastAsia="%s" w:cs="%s"/>'
            '<w:sz w:val="%d"/><w:szCs w:val="%d"/>'
            % (_esc(toc["east_asia"]), _esc(toc["east_asia"]), _esc(toc["east_asia"]),
-              toc["size_hp"], toc["size_hp"]))
+              _esc(toc["east_asia"]), toc["size_hp"], toc["size_hp"]))
     return ('<w:style w:type="paragraph" w:styleId="TOC%s"><w:name w:val="toc %s"/>'
             '<w:basedOn w:val="%s"/><w:next w:val="%s"/>'
             '<w:uiPriority w:val="39"/><w:qFormat/>'
@@ -473,11 +478,12 @@ def caption_numbering_defs(spec):
 HEADING_NUM_MARKER = "FGWHeadingNumbering"
 
 # 每级 (numFmt, lvlText 模板) 的**兜底**值——正常取 `spec.heading_numbering.levels`
-# （判定值只来自 spec），spec 缺这一块时才用这里。**必须与 `checks._heading_token` 的
-# 静态 token 同形**——一、/(一)/1./（1）。文档里两种编号方式（手写在文字里的、Word
-# 自动生成的）常常并存，形状不一致就成了"同一篇文档两套编号规则"。
-# 二级用**半角括号** `(一)`：用户第六轮验收明确要求"二级标题前后的括号是英文括号"，
-# 阶段0 的参考件本来也是半角（全角括号更宽，在目录里会越过左制表位）。
+# （判定值只来自 spec），spec 缺这一块时才用这里。
+#
+# 这里是**手写序号与自动编号的共同真源**：`checks._heading_token` 直接拿这份
+# (numFmt, lvlText) 渲染手写序号被规范成的 token（把 `%N` 换成该级计数），所以两种
+# 编号方式在同一篇文档里必然同形——换编号规范（如本分支的点分十进制 1/1.1/1.1.1）
+# 只需改 spec，不必两处各改一遍。别把 token 改回硬编码。
 HEADING_LEVEL_SHAPES = (
     ("chineseCounting", "%1、"),
     ("chineseCounting", "(%2)"),
@@ -500,13 +506,14 @@ def heading_level_shapes(spec=None):
 def heading_level_fonts(spec=None):
     """四级标题**序号自身**的 (中文字体, 西文字体)，取自 `heading_numbering.levels`。
 
-    序号的字体不能一律跟着标题样式走（那是 2026-08 第六轮验收报的三个问题）：
+    序号的字体不能一律跟着标题样式走（那是 2026-08 第六轮验收报的三个问题）——序号
+    里的中文数字/全角标点走 eastAsia，阿拉伯数字与半角标点走 ascii/hAnsi，一个 rFonts
+    正好分别管这两半，所以每级都在 spec 里显式钉死两边。举两个真实取值：
 
-      * 一级 `一、` 是中文，要与标题文字同为**黑体**——标题样式本身是黑体，但西文位
-        走的是 Times，序号里万一出现西文就会不一致，故两边都钉成黑体；
-      * 二级 `(一)` 的**半角括号是西文字符**，要求走 **Times New Roman**，而括号里的
-        中文数字仍是标题的楷体——一个 rFonts 正好分别管 ascii/hAnsi 与 eastAsia；
-      * 四级 `（1）` 的数字与全角括号**整体用仿宋**（不走 Times）。
+      * 点分十进制的 `1.1`（本分支的规范）序号全是阿拉伯数字与半角点 → 西文位
+        Times New Roman，中文位跟标题文字同字体（用不到，兜底）；
+      * 中文序号 `(一)` 那套规范里，半角括号是西文字符要走 Times New Roman，而括号
+        里的中文数字仍是标题的中文字体。
 
     spec 没给某一级时的兜底：中文＝该级标题的 `east_asia`（"序号与标题内容同字体"的
     默认语义），西文＝`spec.western_font`。"""
@@ -533,8 +540,9 @@ def heading_numbering_def(spec=None):
         不到一级出现、只能一路数下去——就是用户实测的"二/三/四级变成全局编号"。这种
         情况下无论怎么改 `lvlRestart` 都救不回来，唯一的解法是把四级**并进同一条多级
         列表**。
-      * 级别的 `lvlText` 也是规范值（同 `_heading_token`），沿用模板的话自动编号会渲染
-        成"1.1"这类模板自带形状，与手写序号被改成的"（一）"打架。
+      * 级别的 `lvlText` 也是规范值（`_heading_token` 用的就是这一份，见
+        `HEADING_LEVEL_SHAPES`），沿用模板的话自动编号会渲染成模板自带的形状，与手写
+        序号被规范成的 token 打架。
 
     级别里**不写 `lvlRestart`**：省略即 Word 默认的"上一级出现时归零"，正是规范要的
     逐级重新编号。缩进已中和（left=0、无 hanging），首行缩进由 canonical 标题样式承载。
@@ -547,8 +555,8 @@ def heading_numbering_def(spec=None):
     与这里不是一回事，不要互相看齐。
 
     **每级带自己的 `rPr`（序号字体）**：见 `heading_level_fonts`——序号跟着段落标记走
-    的话，一级序号会是 Times 的西文位、二级的半角括号也是标题的楷体，正是用户第六轮
-    报的问题。只钉字体，字号/加粗仍继承标题样式。"""
+    的话，中文数字会落到西文位、半角标点会落到中文字体，正是用户第六轮报的问题。
+    只钉字体，字号/加粗仍继承标题样式。"""
     suff = ((spec or {}).get("heading_numbering") or {}).get("suffix") or "tab"
     fonts = heading_level_fonts(spec)
     lvls = "".join(
